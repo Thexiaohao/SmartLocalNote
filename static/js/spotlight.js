@@ -49,9 +49,9 @@ let spotlightMeta = null;
 let spotlightSeq = 0;
 
 const SPOTLIGHT_MODES = [
-  { id: 'quick', label: '⚡ 快捷跳转' },
-  { id: 'keyword', label: '🔍 关键词全文检索' },
-  { id: 'semantic', label: '✨ AI 语义描述检索' },
+  { id: 'quick', icon: 'zap', label: '快捷' },
+  { id: 'keyword', icon: 'search', label: '全文' },
+  { id: 'semantic', icon: 'sparkles', label: '语义' },
 ];
 
 const SPOTLIGHT_PLACEHOLDERS = {
@@ -851,17 +851,20 @@ function renderSpotlightModeBar() {
   }
   if (!modeBar) return;
 
+  const activeIdx = Math.max(0, SPOTLIGHT_MODES.findIndex((m) => m.id === spotlightMode));
   modeBar.innerHTML = `
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+    <div class="segmented-pill spotlight-mode-pill" role="tablist" aria-label="检索模式">
+      <div class="segmented-thumb" style="width: calc((100% - 6px) / ${SPOTLIGHT_MODES.length}); transform: translateX(${activeIdx * 100}%);"></div>
       ${SPOTLIGHT_MODES.map((m) => {
         const active = spotlightMode === m.id;
         return `
           <button
             type="button"
-            class="pill-btn pill-btn-sm ${active ? 'pill-btn-primary is-active' : ''}"
+            class="segmented-btn ${active ? 'is-active' : ''}"
             data-spotlight-mode="${m.id}"
-            style="height:26px;padding:0 10px;font-size:11.5px;"
-          >${escapeHtml(m.label)}</button>
+            role="tab"
+            aria-selected="${active ? 'true' : 'false'}"
+          >${icon(m.icon, 12)} <span>${escapeHtml(m.label)}</span></button>
         `;
       }).join('')}
     </div>
@@ -1363,7 +1366,7 @@ async function executeSpotlightItem(item) {
       showToast(`已定位至 ${r.name} ${r.sheet ? `${r.sheet}!` : ''}${r.cell || ''}`, 'success', { duration: 2000 });
       return;
     }
-    store.emit('file:open', { path: r.path, name: r.name, ext: r.ext });
+    store.emit('file:open', { path: r.path, name: r.name, ext: r.ext, line: r.line });
     showToast(`已打开：${r.name}`, 'info', { duration: 1800 });
     return;
   }
@@ -1376,8 +1379,14 @@ async function executeSpotlightItem(item) {
 
   if (item.type === 'app') {
     try {
-      await api.post('/api/apps/launch', { app_id: item.payload.id });
-      showToast(`已启动应用：${item.label}`, 'success');
+      const res = await api.post('/api/apps/launch', { app_id: item.payload.id });
+      const failed = Array.isArray(res?.failed) ? res.failed : [];
+      if (failed.length > 0) {
+        const first = failed[0];
+        showToast(`启动应用失败（${first.name || item.label}）：${first.reason || '未找到可执行文件'}`, 'error');
+      } else {
+        showToast(`已启动应用：${item.label}`, 'success');
+      }
     } catch (err) {
       showToast(`启动应用失败：${err?.message || '未知错误'}`, 'error');
     }
@@ -1386,12 +1395,20 @@ async function executeSpotlightItem(item) {
 
   if (item.type === 'workspace') {
     try {
-      await api.post('/api/apps/launch', { workspace_id: item.payload.id });
+      const res = await api.post('/api/apps/launch', { workspace_id: item.payload.id });
       const files = item.payload?.file_paths || [];
       if (files.length > 0) {
         openFileByPath(files[0]);
       }
-      showToast(`已联启工作区：${item.label}`, 'success');
+      const failed = Array.isArray(res?.failed) ? res.failed : [];
+      const launched = Array.isArray(res?.launched) ? res.launched : [];
+      if (failed.length > 0 && launched.length === 0) {
+        showToast(`工作区「${item.label}」应用启动失败：${failed[0]?.reason || '未找到可执行文件'}`, 'error');
+      } else if (failed.length > 0) {
+        showToast(`工作区「${item.label}」已启动 ${launched.length} 个软件（${failed.length} 个失败）`, 'warning');
+      } else {
+        showToast(`已联启工作区：${item.label}`, 'success');
+      }
     } catch (err) {
       showToast(`联启工作区失败：${err?.message || '未知错误'}`, 'error');
     }
@@ -1947,6 +1964,14 @@ async function openSettingsSheet() {
           <div style="font-size:12px;color:var(--text-secondary);">将左右侧栏宽度、模块显隐排序与卡片高度恢复为初始状态</div>
           <button type="button" class="pill-btn pill-btn-sm" id="cfg-reset-layout">↺ 恢复默认三栏宽度与模块布局</button>
         </div>
+
+        <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;flex-wrap:wrap;">
+          <div>
+            <div style="font-size:12.5px;font-weight:600;color:var(--text-primary);">🧪 V5 全格式实测流程包</div>
+            <div style="font-size:11.5px;color:var(--text-secondary);">一键加载全格式测试文档并打开实测流程清单</div>
+          </div>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="cfg-seed-test-btn">${icon('flask', 13)} 一键加载</button>
+        </div>
       </div>
     `,
     footerHtml: `
@@ -2079,6 +2104,37 @@ async function openSettingsSheet() {
           resetUiLayout();
         }
         showToast('已恢复默认三栏宽度与模块尺寸', 'success');
+      });
+
+      const seedTestBtn = card.querySelector('#cfg-seed-test-btn');
+      seedTestBtn?.addEventListener('click', async () => {
+        seedTestBtn.disabled = true;
+        try {
+          const res = await api.seedTestSuite({ reset: true });
+          const filesData = await api.get('/api/files/list').catch(() => null);
+          if (filesData) {
+            store.setState({ files: filesData });
+          }
+          store.emit('files:updated', filesData);
+          closeSheet();
+          const checklist =
+            (filesData?.items || store.state.files?.items || []).find(
+              (f) => f.name === '00_V5全流程实测清单.md' || String(f.path || '').endsWith('00_V5全流程实测清单.md')
+            ) ||
+            (res?.checklist_path
+              ? { path: res.checklist_path, name: '00_V5全流程实测清单.md', ext: '.md' }
+              : null);
+          if (checklist?.path) {
+            openFileObject(checklist);
+          } else {
+            openFileByPath('00_V5全流程实测清单.md');
+          }
+          showToast('已加载 V5 全格式实测流程包', 'success');
+        } catch (err) {
+          showToast(`加载实测流程包失败：${err?.message || '未知错误'}`, 'error');
+        } finally {
+          seedTestBtn.disabled = false;
+        }
       });
 
       card.querySelector('#cfg-cancel')?.addEventListener('click', closeSheet);

@@ -12,10 +12,13 @@ const PANE_WIDTHS_KEY = 'sln_pane_widths';
 const UI_LAYOUT_KEY = 'sln_ui_layout';
 const RECENT_FILES_KEY = 'sln_recent_files';
 const AUTO_SAVE_KEY = 'sln_auto_save';
-const LEFT_SORT_KEY = 'sln_left_sort';
+const LEFT_SORT_KEY = 'sln_left_file_sort';
+const LEGACY_LEFT_SORT_KEY = 'sln_left_sort';
+const DRAG_SHELF_KEY = 'sln_drag_shelf_v1';
 const MAX_CONTEXT_FILES = 20;
 const MAX_TOASTS = 3;
 const MAX_RECENT_FILES = 8;
+const MAX_SHELF_ITEMS = 30;
 
 export const DRAG_MIME = 'application/x-smartlocalnote-block';
 
@@ -149,12 +152,19 @@ function loadInitialAutoSaveOnSwitch() {
   return false;
 }
 
+function normalizeLeftSortBy(rawBy) {
+  const val = String(rawBy || '').trim().toLowerCase();
+  if (val === 'time') return 'mtime';
+  if (val === 'type') return 'ext';
+  return ['name', 'mtime', 'ext', 'size'].includes(val) ? val : 'name';
+}
+
 function loadInitialLeftSort() {
   try {
-    const raw = localStorage.getItem(LEFT_SORT_KEY);
+    const raw = localStorage.getItem(LEFT_SORT_KEY) || localStorage.getItem(LEGACY_LEFT_SORT_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      const by = ['name', 'time', 'type', 'size'].includes(parsed?.by) ? parsed.by : 'name';
+      const by = normalizeLeftSortBy(parsed?.by);
       const dir = parsed?.dir === 'desc' ? 'desc' : 'asc';
       return { by, dir };
     }
@@ -162,6 +172,23 @@ function loadInitialLeftSort() {
     // ignore storage errors
   }
   return { by: 'name', dir: 'asc' };
+}
+
+function loadInitialShelfItems() {
+  try {
+    const raw = localStorage.getItem(DRAG_SHELF_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((item) => item && typeof item === 'object' && typeof item.markdown === 'string' && item.markdown.trim())
+          .slice(0, MAX_SHELF_ITEMS);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return [];
 }
 
 function clampNumber(val, min, max, fallback) {
@@ -240,6 +267,7 @@ export const store = {
     uiLayout: loadInitialUiLayout(),
     leftFileSort: loadInitialLeftSort(),
     leftFileFilter: '',
+    shelfItems: loadInitialShelfItems(),
     activeDragPayload: null,
     systemInfo: null,
     config: {},
@@ -329,6 +357,18 @@ export const store = {
       store.emit(eventName, store.state);
     }
     return store.state;
+  },
+
+  addToShelf(payload) {
+    return addToShelf(payload);
+  },
+
+  removeFromShelf(id) {
+    return removeFromShelf(id);
+  },
+
+  clearShelf() {
+    return clearShelf();
   },
 };
 
@@ -710,13 +750,13 @@ export function toggleContextPath(path) {
 }
 
 /**
- * Update and persist left file sort preferences, then emit 'left:sort-changed'.
- * @param {{ by?: 'name'|'time'|'type'|'size', dir?: 'asc'|'desc' }} [patch={}]
+ * Update and persist left file sort preferences, then emit 'files:sort-changed'.
+ * @param {{ by?: 'name'|'mtime'|'ext'|'size'|'time'|'type', dir?: 'asc'|'desc' }} [patch={}]
  */
 export function setLeftFileSort(patch = {}) {
   const cur = store.state.leftFileSort || { by: 'name', dir: 'asc' };
   const rawBy = patch?.by ?? cur.by;
-  const by = ['name', 'time', 'type', 'size'].includes(rawBy) ? rawBy : 'name';
+  const by = normalizeLeftSortBy(rawBy);
   const rawDir = patch?.dir ?? cur.dir;
   const dir = rawDir === 'desc' ? 'desc' : 'asc';
   const next = { by, dir };
@@ -727,8 +767,64 @@ export function setLeftFileSort(patch = {}) {
   } catch {
     // ignore storage errors
   }
-  store.emit('left:sort-changed', next);
+  store.emit('files:sort-changed', next);
   return next;
+}
+
+function persistShelfItems(items) {
+  const safeList = Array.isArray(items) ? items.slice(0, MAX_SHELF_ITEMS) : [];
+  store.state.shelfItems = safeList;
+  try {
+    localStorage.setItem(DRAG_SHELF_KEY, JSON.stringify(safeList));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('shelf:changed', safeList);
+  return safeList;
+}
+
+/**
+ * Add a dragged snippet / capsule / file item to the Drag Staging Shelf (max 30).
+ * @param {object | string} payload
+ */
+export function addToShelf(payload) {
+  const rawObj = typeof payload === 'string' ? { markdown: payload } : (payload || {});
+  const markdown = String(rawObj.markdown ?? rawObj.text ?? rawObj.content ?? '').trim();
+  if (!markdown) return store.state.shelfItems;
+
+  const path = String(rawObj.path || rawObj.sourceDocPath || '').trim();
+  const baseName = path ? path.split(/[\\/]/).pop() : '';
+  const ext = String(
+    rawObj.ext || (baseName.includes('.') ? `.${baseName.split('.').pop().toLowerCase()}` : '')
+  ).trim();
+  const firstLine = markdown.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 32);
+  const label = String(rawObj.label ?? rawObj.title ?? '').trim() || firstLine || baseName || '内容片段';
+  const type = String(rawObj.type || 'snippet').trim() || 'snippet';
+  const id = String(rawObj.id || '').trim() || `shelf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const createdAt = Number(rawObj.createdAt) || Date.now();
+
+  const entry = { id, type, label, markdown, path, ext, createdAt };
+  const prev = Array.isArray(store.state.shelfItems) ? store.state.shelfItems : [];
+  const deduped = prev.filter((item) => item && item.markdown !== markdown);
+  return persistShelfItems([entry, ...deduped].slice(0, MAX_SHELF_ITEMS));
+}
+
+/**
+ * Remove an item by id from the Drag Staging Shelf.
+ * @param {string} id
+ */
+export function removeFromShelf(id) {
+  const targetId = String(id || '').trim();
+  if (!targetId) return store.state.shelfItems;
+  const prev = Array.isArray(store.state.shelfItems) ? store.state.shelfItems : [];
+  return persistShelfItems(prev.filter((item) => item?.id !== targetId));
+}
+
+/**
+ * Clear all items from the Drag Staging Shelf.
+ */
+export function clearShelf() {
+  return persistShelfItems([]);
 }
 
 /**
@@ -1143,24 +1239,59 @@ function getFileBaseNameLower(pathOrName) {
   return String(pathOrName || '').split(/[\\/]/).pop().trim().toLowerCase();
 }
 
-function findWorkspaceFileItem(fileRef) {
+export function findWorkspaceFileItem(fileRef) {
   const items = store.state.files?.items;
   if (!Array.isArray(items) || items.length === 0) return null;
   const target = String(fileRef || '').trim();
   if (!target) return null;
   const targetLower = target.toLowerCase();
   const targetNorm = target.replace(/\\/g, '/').toLowerCase();
+  const hasSlash = targetNorm.includes('/');
   const targetBase = getFileBaseNameLower(target);
 
-  return (
-    items.find((item) => {
+  // 1. Exact full path match
+  const exactPathMatch = items.find((item) => {
+    const itemPath = String(item?.path || '').replace(/\\/g, '/').toLowerCase();
+    return itemPath === targetNorm;
+  });
+  if (exactPathMatch) return exactPathMatch;
+
+  // 2. Normalized path suffix match when query contains / or \ (disambiguates duplicate basenames)
+  if (hasSlash) {
+    const suffixTarget = targetNorm.replace(/^\.\//, '');
+    const suffixMatch = items.find((item) => {
       const itemPath = String(item?.path || '').replace(/\\/g, '/').toLowerCase();
-      const itemName = String(item?.name || '').toLowerCase();
-      return itemPath === targetNorm || itemName === targetLower;
-    }) ||
-    items.find((item) => getFileBaseNameLower(item?.path || item?.name || '') === targetBase) ||
-    null
-  );
+      return itemPath.endsWith(`/${suffixTarget}`) || itemPath === suffixTarget;
+    });
+    if (suffixMatch) return suffixMatch;
+  }
+
+  // 3. Exact basename match
+  const exactBaseMatch = items.find((item) => {
+    const itemName = String(item?.name || '').toLowerCase();
+    const itemBase = getFileBaseNameLower(item?.path || item?.name || '');
+    return itemName === targetLower || itemBase === targetBase;
+  });
+  if (exactBaseMatch) return exactBaseMatch;
+
+  // 4. Extensionless match (prefer .md over .txt)
+  const stripNoteExt = (name) => String(name || '').replace(/\.(md|txt)$/i, '').toLowerCase();
+  const targetStem = stripNoteExt(targetBase);
+  if (targetStem) {
+    const mdMatch = items.find((item) => {
+      const itemBase = getFileBaseNameLower(item?.path || item?.name || '');
+      return /\.md$/i.test(itemBase) && stripNoteExt(itemBase) === targetStem;
+    });
+    if (mdMatch) return mdMatch;
+
+    const txtMatch = items.find((item) => {
+      const itemBase = getFileBaseNameLower(item?.path || item?.name || '');
+      return /\.txt$/i.test(itemBase) && stripNoteExt(itemBase) === targetStem;
+    });
+    if (txtMatch) return txtMatch;
+  }
+
+  return null;
 }
 
 function isFileMountedInStore(fileRef) {
@@ -1199,10 +1330,13 @@ function parseMediaTimeToSeconds(timeStr) {
 function buildImageEmbedCard(file, pathStr, widthPx, fullMatch) {
   const card = document.createElement('div');
   card.className = 'media-embed-card';
+  card.draggable = true;
+  card.setAttribute('draggable', 'true');
   card.dataset.mediaKind = 'image';
   card.dataset.mediaFile = file;
   card.dataset.mediaPath = pathStr;
   card.dataset.mediaRaw = fullMatch;
+  card.dataset.anchorRaw = fullMatch;
   card.style.width = widthPx ? `${widthPx}px` : '100%';
   card.style.maxWidth = '100%';
 
@@ -1226,16 +1360,20 @@ function buildImageEmbedCard(file, pathStr, widthPx, fullMatch) {
 function buildVideoEmbedCard(file, pathStr, timeStr, widthPx, fullMatch) {
   const card = document.createElement('div');
   card.className = 'media-embed-card is-video';
+  card.draggable = true;
+  card.setAttribute('draggable', 'true');
   card.dataset.mediaKind = 'video';
   card.dataset.mediaFile = file;
   card.dataset.mediaPath = pathStr;
   card.dataset.mediaTime = timeStr || '';
   card.dataset.mediaRaw = fullMatch;
+  card.dataset.anchorRaw = fullMatch;
   card.style.width = widthPx ? `${widthPx}px` : '460px';
   card.style.maxWidth = '100%';
 
-  const seekSec = parseMediaTimeToSeconds(timeStr);
-  const streamUrl = `/api/files/raw-stream?path=${encodeURIComponent(pathStr)}#t=${seekSec || 0.5}`;
+  const hasExplicitTime = Boolean(String(timeStr || '').trim());
+  const seekSec = hasExplicitTime ? parseMediaTimeToSeconds(timeStr) : 0;
+  const streamUrl = `/api/files/raw-stream?path=${encodeURIComponent(pathStr)}${hasExplicitTime ? `#t=${seekSec}` : ''}`;
   const timeBadge = timeStr ? `<span class="media-time-pill">${escapeHtml(timeStr)}</span>` : '';
 
   card.innerHTML = `
@@ -1257,12 +1395,14 @@ function buildVideoEmbedCard(file, pathStr, timeStr, widthPx, fullMatch) {
   return card;
 }
 
-function createUrlPillNode(urlStr, labelStr = '') {
+function createUrlPillNode(urlStr, labelStr = '', rawFull = '') {
   const rawUrl = String(urlStr || '').trim();
   if (!/^https?:\/\//i.test(rawUrl)) return null;
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'anchor-pill anchor-url';
+  btn.draggable = true;
+  btn.setAttribute('draggable', 'true');
   btn.dataset.anchorType = 'url';
   btn.dataset.anchorUrl = rawUrl;
   let displayLabel = String(labelStr || '').trim();
@@ -1274,30 +1414,19 @@ function createUrlPillNode(urlStr, labelStr = '') {
       displayLabel = rawUrl.slice(0, 36);
     }
   }
+  btn.dataset.anchorRaw = rawFull || (labelStr ? `[[url:${labelStr}|${rawUrl}]]` : `[[url:${rawUrl}]]`);
   btn.title = rawUrl;
   btn.innerHTML = `${icon('globe', 13)}<span>${escapeHtml(displayLabel)}</span>`;
   return btn;
 }
 
-function buildAnchorPillNode(rawToken, fullMatch = '') {
+function buildAnchorPillNode(rawToken, fullMatch = '', opts = {}) {
   const token = String(rawToken || '').trim();
   if (!token) return null;
+  const rawFull = fullMatch || `[[${rawToken}]]`;
+  const compactMedia = Boolean(opts?.compactMedia);
 
-  // 1. [[app:AppName]]
-  if (/^app:/i.test(token)) {
-    const appName = token.slice(4).trim();
-    if (!appName) return null;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'anchor-pill anchor-app';
-    btn.dataset.anchorType = 'app';
-    btn.dataset.anchorApp = appName;
-    btn.title = `启动应用：${appName}`;
-    btn.innerHTML = `${icon('rocket', 13)}<span>${escapeHtml(appName)}</span>`;
-    return btn;
-  }
-
-  // 2. [[url:Title|https://...]] or [[url:https://...]]
+  // 1. [[url:Title|https://...]] or [[url:https://...]] (FIRST)
   if (/^url:/i.test(token)) {
     const rest = token.slice(4).trim();
     if (!rest) return null;
@@ -1308,148 +1437,224 @@ function buildAnchorPillNode(rawToken, fullMatch = '') {
       label = rest.slice(0, pipeIdx).trim();
       url = rest.slice(pipeIdx + 1).trim();
     }
-    return createUrlPillNode(url, label);
+    return createUrlPillNode(url, label, rawFull);
   }
 
-  // Optional width suffix |w=NNN (for image & video portals)
+  // 2. [[app:AppName]] (SECOND)
+  if (/^app:/i.test(token)) {
+    const appName = token.slice(4).trim();
+    if (!appName) return null;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-app';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
+    btn.dataset.anchorType = 'app';
+    btn.dataset.anchorApp = appName;
+    btn.dataset.anchorRaw = rawFull;
+    btn.title = `启动应用：${appName}`;
+    btn.innerHTML = `${icon('rocket', 13)}<span>${escapeHtml(appName)}</span>`;
+    return btn;
+  }
+
+  // 3. Optional width suffix |w=NNN and optional display alias [[target|别名]]
   let baseToken = token;
   let widthPx = 0;
-  const widthSuffixMatch = token.match(/\|w=(\d+)\s*$/i);
+  const widthSuffixMatch = token.match(/\|\s*w=(\d+)(?:px)?\s*$/i);
   if (widthSuffixMatch) {
     widthPx = clampNumber(widthSuffixMatch[1], 120, 1200, 0);
     baseToken = token.slice(0, widthSuffixMatch.index).trim();
   }
 
-  // 3. Archive member syntax [[file.zip!member]] or [[file.zip]]
-  const archiveOnlyOrBangMatch = baseToken.match(/^([^#!]+?\.(?:zip|tar|tgz|gz))(?:!(.+))?$/i);
+  let targetToken = baseToken;
+  let aliasLabel = '';
+  const aliasPipeIdx = baseToken.indexOf('|');
+  if (aliasPipeIdx > 0) {
+    targetToken = baseToken.slice(0, aliasPipeIdx).trim();
+    aliasLabel = baseToken.slice(aliasPipeIdx + 1).trim();
+  }
+  if (!targetToken) return null;
+
+  // 4. Same-file heading anchor [[#章节名]]
+  const hashIdx = targetToken.indexOf('#');
+  if (hashIdx === 0) {
+    const heading = targetToken.slice(1).trim();
+    if (!heading) return null;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-doc';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
+    btn.dataset.anchorType = 'heading';
+    btn.dataset.anchorFile = '';
+    btn.dataset.anchorHeading = heading;
+    btn.dataset.anchorRaw = rawFull;
+    btn.innerHTML = `${icon('file-text', 13)}<span>${escapeHtml(aliasLabel || `#${heading}`)}</span>`;
+    return btn;
+  }
+
+  // 5. Archive member syntax [[file.zip!member]] or [[file.zip]]
+  const archiveOnlyOrBangMatch = targetToken.match(/^([^#!]+?\.(?:zip|tar|tgz|gz))(?:!(.+))?$/i);
   if (archiveOnlyOrBangMatch) {
     const file = archiveOnlyOrBangMatch[1].trim();
     const member = (archiveOnlyOrBangMatch[2] || '').trim();
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'anchor-pill anchor-archive';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
     btn.dataset.anchorType = 'archive';
     btn.dataset.anchorFile = file;
     btn.dataset.anchorMember = member;
-    btn.innerHTML = `${icon('layers', 13)}<span>${escapeHtml(file)}${member ? ` · ${escapeHtml(member)}` : ''}</span>`;
+    btn.dataset.anchorRaw = rawFull;
+    const defaultLabel = `${file}${member ? ` · ${member}` : ''}`;
+    btn.innerHTML = `${icon('layers', 13)}<span>${escapeHtml(aliasLabel || defaultLabel)}</span>`;
     markBrokenIfMissing(btn, file);
     return btn;
   }
 
-  const hashIdx = baseToken.indexOf('#');
-  const file = (hashIdx > 0 ? baseToken.slice(0, hashIdx) : baseToken).trim();
-  const fragment = (hashIdx > 0 ? baseToken.slice(hashIdx + 1) : '').trim();
+  const file = (hashIdx > 0 ? targetToken.slice(0, hashIdx) : targetToken).trim();
+  const fragment = (hashIdx > 0 ? targetToken.slice(hashIdx + 1) : '').trim();
   if (!file) return null;
 
-  const lowerFile = file.toLowerCase();
+  const extMatch = file.match(/\.([a-z0-9]+)$/i);
+  const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : '';
 
-  // 3.5 Inline Image Embed: [[photo.png]] or [[photo.png|w=420]]
-  if (/\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(lowerFile)) {
-    const found = findWorkspaceFileItem(file);
-    if (found?.path) {
-      return buildImageEmbedCard(file, found.path, widthPx, fullMatch || `[[${token}]]`);
+  // 6. Extension-First Routing (do NOT let fragment regex hijack .md/.txt/code/office files)
+  // 6a. PDF: .pdf
+  if (ext === '.pdf') {
+    let page = '';
+    if (fragment) {
+      const pageEq = fragment.match(/^page=(\d+)$/i);
+      const pageP = fragment.match(/^p\.?(\d+)$/i);
+      const bareNum = fragment.match(/^(\d+)$/);
+      page = pageEq ? pageEq[1] : pageP ? pageP[1] : bareNum ? bareNum[1] : '';
     }
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'anchor-pill anchor-doc is-broken';
-    btn.dataset.anchorType = 'file';
-    btn.dataset.anchorFile = file;
-    btn.dataset.anchorHeading = '';
-    btn.title = '文件未找到或已移动，点击尝试自动寻回';
-    btn.innerHTML = `${icon('file-text', 13)}<span>${escapeHtml(file)}</span>`;
-    return btn;
-  }
-
-  // 4. PDF anchor: [[file.pdf#page=N]] or [[file.pdf]]
-  if (lowerFile.endsWith('.pdf') || /^page=\d+$/i.test(fragment)) {
-    const pageMatch = fragment.match(/^page=(\d+)$/i);
-    const page = pageMatch ? pageMatch[1] : '';
-    const btn = document.createElement('button');
-    btn.type = 'button';
     btn.className = 'anchor-pill anchor-pdf';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
     btn.dataset.anchorType = 'pdf';
     btn.dataset.anchorFile = file;
     btn.dataset.anchorPage = page;
     btn.dataset.anchorSheet = '';
     btn.dataset.anchorCell = '';
-    btn.innerHTML = `${icon('file-pdf', 13)}<span>${escapeHtml(file)}${page ? ` · P.${escapeHtml(page)}` : ''}</span>`;
+    btn.dataset.anchorRaw = rawFull;
+    const defaultLabel = `${file}${page ? ` · P.${page}` : ''}`;
+    btn.innerHTML = `${icon('file-pdf', 13)}<span>${escapeHtml(aliasLabel || defaultLabel)}</span>`;
     markBrokenIfMissing(btn, file);
     return btn;
   }
 
-  // 5. Excel anchor: [[file.xlsx#Sheet!Cell]] or [[file.xlsx#Cell]] or [[file.xlsx]]
-  if (/\.(xlsx|xlsm|xls|csv)$/i.test(lowerFile) || /^([^!]+!)?[A-Za-z]+\d+$/.test(fragment)) {
+  // 6b. Excel: .xlsx, .xlsm, .xls (NOT .csv!)
+  if (ext === '.xlsx' || ext === '.xlsm' || ext === '.xls') {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'anchor-pill anchor-excel';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
     btn.dataset.anchorType = 'excel';
     btn.dataset.anchorFile = file;
     btn.dataset.anchorPage = '';
+    btn.dataset.anchorRaw = rawFull;
 
-    const sheetCellMatch = fragment.match(/^([^!]+)!([A-Za-z]+\d+)$/);
-    const cellOnlyMatch = fragment.match(/^([A-Za-z]+\d+)$/);
-    if (sheetCellMatch) {
-      const sheet = sheetCellMatch[1].trim();
-      const cell = sheetCellMatch[2].toUpperCase();
-      btn.dataset.anchorSheet = sheet;
-      btn.dataset.anchorCell = cell;
-      btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)} · ${escapeHtml(sheet)}!${escapeHtml(cell)}</span>`;
-    } else if (cellOnlyMatch) {
-      const cell = cellOnlyMatch[1].toUpperCase();
-      btn.dataset.anchorSheet = '';
-      btn.dataset.anchorCell = cell;
-      btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)} · ${escapeHtml(cell)}</span>`;
-    } else {
-      btn.dataset.anchorSheet = '';
-      btn.dataset.anchorCell = '';
-      btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)}</span>`;
+    let sheet = '';
+    let cell = '';
+    if (fragment) {
+      const sheetCellMatch = fragment.match(/^([^!]+)!([A-Za-z]+\d+)$/);
+      const cellOnlyMatch = fragment.match(/^([A-Za-z]+\d+)$/);
+      if (sheetCellMatch) {
+        sheet = sheetCellMatch[1].trim();
+        cell = sheetCellMatch[2].toUpperCase();
+      } else if (cellOnlyMatch) {
+        cell = cellOnlyMatch[1].toUpperCase();
+      } else {
+        sheet = fragment.replace(/!+$/, '').trim();
+      }
     }
+
+    btn.dataset.anchorSheet = sheet;
+    btn.dataset.anchorCell = cell;
+    const fragLabel = sheet && cell ? `${sheet}!${cell}` : cell ? cell : sheet ? sheet : '';
+    const defaultLabel = fragLabel ? `${file} · ${fragLabel}` : file;
+    btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(aliasLabel || defaultLabel)}</span>`;
     markBrokenIfMissing(btn, file);
     return btn;
   }
 
-  // 6. Video Poster Embed & Audio/Media anchor
-  if (/\.(mp4|webm|mov)$/i.test(lowerFile)) {
-    const timeMatch = fragment.match(/^t=([\d:]+(?:\.\d+)?)$/i);
-    const timeStr = timeMatch ? timeMatch[1] : fragment.replace(/^t=/i, '');
+  // 6c. Image: .png, .jpg, .jpeg, .webp, .gif, .bmp, .svg
+  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg'].includes(ext)) {
     const found = findWorkspaceFileItem(file);
-    if (found?.path) {
-      return buildVideoEmbedCard(file, found.path, timeStr || '', widthPx, fullMatch || `[[${token}]]`);
+    if (found?.path && !compactMedia) {
+      return buildImageEmbedCard(file, found.path, widthPx, rawFull);
     }
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'anchor-pill anchor-media is-broken';
-    btn.dataset.anchorType = 'media';
-    btn.dataset.anchorFile = file;
-    btn.dataset.anchorTime = timeStr || '';
-    btn.title = '文件未找到或已移动，点击尝试自动寻回';
-    btn.innerHTML = `${icon('play', 12)}<span>${escapeHtml(file)}${timeStr ? ` · ${escapeHtml(timeStr)}` : ''}</span>`;
-    return btn;
-  }
-
-  if (/\.(m4v|mkv|mp3|wav|m4a|ogg|flac|aac)$/i.test(lowerFile) || /^t=[\d:]+$/i.test(fragment)) {
-    const timeMatch = fragment.match(/^t=([\d:]+(?:\.\d+)?)$/i);
-    const timeStr = timeMatch ? timeMatch[1] : fragment.replace(/^t=/i, '');
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'anchor-pill anchor-media';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
     btn.dataset.anchorType = 'media';
     btn.dataset.anchorFile = file;
-    btn.dataset.anchorTime = timeStr || '';
-    btn.innerHTML = `${icon('play', 12)}<span>${escapeHtml(file)}${timeStr ? ` · ${escapeHtml(timeStr)}` : ''}</span>`;
+    btn.dataset.anchorTime = '';
+    btn.dataset.anchorRaw = rawFull;
+    btn.innerHTML = `${icon('image', 13)}<span>${escapeHtml(aliasLabel || file)}</span>`;
+    if (!found?.path) {
+      markBrokenIfMissing(btn, file);
+    }
+    return btn;
+  }
+
+  // 6d. Video & Audio: .mp4, .webm, .mov, .mkv, .m4v, .avi, .mp3, .wav, .m4a, .ogg, .flac, .aac
+  const VIDEO_INLINE_EXTS = ['.mp4', '.webm', '.mov'];
+  const MEDIA_ALL_EXTS = ['.mp4', '.webm', '.mov', '.mkv', '.m4v', '.avi', '.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac'];
+  if (MEDIA_ALL_EXTS.includes(ext)) {
+    let timeStr = '';
+    if (fragment) {
+      const timeMatch = fragment.match(/^t=([\d:]+(?:\.\d+)?)$/i);
+      const bareTimeMatch = fragment.match(/^(\d+(?::\d+)*(?:\.\d+)?)$/);
+      if (timeMatch) timeStr = timeMatch[1];
+      else if (bareTimeMatch) timeStr = bareTimeMatch[1];
+    }
+    if (VIDEO_INLINE_EXTS.includes(ext)) {
+      const found = findWorkspaceFileItem(file);
+      if (found?.path && !compactMedia) {
+        return buildVideoEmbedCard(file, found.path, timeStr, widthPx, rawFull);
+      }
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-media';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
+    btn.dataset.anchorType = 'media';
+    btn.dataset.anchorFile = file;
+    btn.dataset.anchorTime = timeStr;
+    btn.dataset.anchorRaw = rawFull;
+    const defaultLabel = `${file}${timeStr ? ` · ${timeStr}` : ''}`;
+    btn.innerHTML = `${icon('play', 12)}<span>${escapeHtml(aliasLabel || defaultLabel)}</span>`;
     markBrokenIfMissing(btn, file);
     return btn;
   }
 
-  // 7. Generic document / file portal: [[note.md]], [[note.md#Heading]], [[filename.ext]]
-  if (file.includes('.')) {
+  // 6e. Documents, code files (.md, .txt, .csv, .docx, .pptx, etc.), or extensionless note names
+  const isKnownOrValidNoteName =
+    file.includes('.') ||
+    Boolean(findWorkspaceFileItem(file)) ||
+    (/^[^/\\:*?"<>|]+$/.test(file) && !file.startsWith('!'));
+
+  if (isKnownOrValidNoteName) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'anchor-pill anchor-doc';
+    btn.draggable = true;
+    btn.setAttribute('draggable', 'true');
     btn.dataset.anchorType = 'file';
     btn.dataset.anchorFile = file;
     btn.dataset.anchorHeading = fragment;
-    btn.innerHTML = `${icon('file-text', 13)}<span>${escapeHtml(file)}${fragment ? ` · #${escapeHtml(fragment)}` : ''}</span>`;
+    btn.dataset.anchorRaw = rawFull;
+    const defaultLabel = `${file}${fragment ? ` · #${fragment}` : ''}`;
+    btn.innerHTML = `${icon('file-text', 13)}<span>${escapeHtml(aliasLabel || defaultLabel)}</span>`;
     markBrokenIfMissing(btn, file);
     return btn;
   }
@@ -1497,7 +1702,7 @@ function transformBareUrlsInDom(root) {
   }
 }
 
-function transformAnchorsInDom(root) {
+function transformAnchorsInDom(root, opts = {}) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const textNodes = [];
   let node;
@@ -1519,13 +1724,145 @@ function transformAnchorsInDom(root) {
     const frag = document.createDocumentFragment();
 
     while ((match = anchorRegex.exec(text)) !== null) {
-      const pill = buildAnchorPillNode(match[1], match[0]);
+      const pill = buildAnchorPillNode(match[1], match[0], opts);
       if (!pill) continue;
       replaced = true;
       if (match.index > lastIdx) {
         frag.appendChild(document.createTextNode(text.slice(lastIdx, match.index)));
       }
       frag.appendChild(pill);
+      lastIdx = match.index + match[0].length;
+    }
+
+    if (replaced) {
+      if (lastIdx < text.length) {
+        frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+      }
+      textNode.replaceWith(frag);
+    }
+  }
+}
+
+function findExactBacktickClose(str, fromIdx, count) {
+  let i = fromIdx;
+  while (i < str.length) {
+    if (str[i] === '`') {
+      let end = i;
+      while (end < str.length && str[end] === '`') end += 1;
+      if (end - i === count) return i;
+      i = end;
+    } else {
+      i += 1;
+    }
+  }
+  return -1;
+}
+
+function shieldAnchorsOutsideCode(raw) {
+  const tokens = [];
+  const src = String(raw ?? '').replace(/\r\n/g, '\n');
+  const lines = src.split('\n');
+  const outLines = [];
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
+
+  for (let li = 0; li < lines.length; li += 1) {
+    const line = lines[li];
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+    if (!inFence && fenceMatch) {
+      const marker = fenceMatch[1];
+      const info = fenceMatch[2] || '';
+      if (!(marker[0] === '`' && info.includes('`'))) {
+        inFence = true;
+        fenceChar = marker[0];
+        fenceLen = marker.length;
+        outLines.push(line);
+        continue;
+      }
+    } else if (inFence) {
+      const closeMatch = line.match(/^\s{0,3}(`{3,}|~{3,})\s*$/);
+      if (closeMatch && closeMatch[1][0] === fenceChar && closeMatch[1].length >= fenceLen) {
+        inFence = false;
+        fenceChar = '';
+        fenceLen = 0;
+      }
+      outLines.push(line);
+      continue;
+    }
+
+    let res = '';
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === '`') {
+        let tickEnd = i;
+        while (tickEnd < line.length && line[tickEnd] === '`') tickEnd += 1;
+        const tickCount = tickEnd - i;
+        const closeIdx = findExactBacktickClose(line, tickEnd, tickCount);
+        if (closeIdx >= 0) {
+          res += line.slice(i, closeIdx + tickCount);
+          i = closeIdx + tickCount;
+          continue;
+        }
+        res += line.slice(i, tickEnd);
+        i = tickEnd;
+        continue;
+      }
+      if (line[i] === '[' && line[i + 1] === '[') {
+        const m = line.slice(i).match(/^\[\[([^[\]]+?)\]\]/);
+        if (m) {
+          const idx = tokens.length;
+          tokens.push({ inner: m[1], raw: m[0] });
+          res += `SLNANCHORTOKEN${idx}END`;
+          i += m[0].length;
+          continue;
+        }
+      }
+      res += line[i];
+      i += 1;
+    }
+    outLines.push(res);
+  }
+
+  return { shielded: outLines.join('\n'), tokens };
+}
+
+function restoreShieldedAnchorsInDom(root, tokens, opts = {}) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    if (!node.nodeValue || !node.nodeValue.includes('SLNANCHORTOKEN')) continue;
+    const parentTag = node.parentElement?.tagName;
+    if (parentTag === 'SCRIPT' || parentTag === 'STYLE') continue;
+    textNodes.push(node);
+  }
+
+  const tokenRegex = /SLNANCHORTOKEN(\d+)END/g;
+  for (const textNode of textNodes) {
+    const text = textNode.nodeValue;
+    const inCodeBlock = Boolean(textNode.parentElement?.closest('pre, code'));
+    tokenRegex.lastIndex = 0;
+    let match;
+    let lastIdx = 0;
+    let replaced = false;
+    const frag = document.createDocumentFragment();
+
+    while ((match = tokenRegex.exec(text)) !== null) {
+      const idx = Number.parseInt(match[1], 10);
+      const tok = tokens[idx];
+      if (!tok) continue;
+      replaced = true;
+      if (match.index > lastIdx) {
+        frag.appendChild(document.createTextNode(text.slice(lastIdx, match.index)));
+      }
+      if (inCodeBlock) {
+        frag.appendChild(document.createTextNode(tok.raw));
+      } else {
+        const pill = buildAnchorPillNode(tok.inner, tok.raw, opts);
+        frag.appendChild(pill || document.createTextNode(tok.raw));
+      }
       lastIdx = match.index + match[0].length;
     }
 
@@ -1711,20 +2048,22 @@ function annotateTopLevelBlockLines(root, mdText) {
  */
 export function renderMarkdownSafe(mdText, opts = {}) {
   const raw = String(mdText ?? '');
+  const { shielded, tokens } = shieldAnchorsOutsideCode(raw);
   let parsedHtml = '';
 
   if (typeof window !== 'undefined' && window.marked && typeof window.marked.parse === 'function') {
     try {
-      parsedHtml = window.marked.parse(raw, { breaks: true, gfm: true });
+      parsedHtml = window.marked.parse(shielded, { breaks: true, gfm: true });
     } catch {
-      parsedHtml = simpleMarkdownFallback(raw);
+      parsedHtml = simpleMarkdownFallback(shielded);
     }
   } else {
-    parsedHtml = simpleMarkdownFallback(raw);
+    parsedHtml = simpleMarkdownFallback(shielded);
   }
 
   if (typeof document === 'undefined') {
-    return parsedHtml.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+    const restored = parsedHtml.replace(/SLNANCHORTOKEN(\d+)END/g, (m, i) => escapeHtml(tokens[Number(i)]?.raw || m));
+    return restored.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
   }
 
   const tpl = document.createElement('template');
@@ -1733,7 +2072,8 @@ export function renderMarkdownSafe(mdText, opts = {}) {
   transformMarkdownImagesInDom(tpl.content);
   transformCalloutsInDom(tpl.content);
   transformBareUrlsInDom(tpl.content);
-  transformAnchorsInDom(tpl.content);
+  restoreShieldedAnchorsInDom(tpl.content, tokens, { compactMedia: !!opts?.compactMedia });
+  transformAnchorsInDom(tpl.content, { compactMedia: !!opts?.compactMedia });
   if (opts && opts.withLineMap === true) {
     annotateTopLevelBlockLines(tpl.content, raw);
   }

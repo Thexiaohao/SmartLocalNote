@@ -113,6 +113,33 @@ function clearDragPayload() {
   store.state.activeDragPayload = null;
 }
 
+function readDragPayload(e) {
+  if (typeof storeMod.readDragPayload === 'function') {
+    return storeMod.readDragPayload(e);
+  }
+  const dt = e?.dataTransfer;
+  if (dt) {
+    try {
+      const raw = dt.getData('application/x-sln-block');
+      if (raw) return JSON.parse(raw);
+    } catch {
+      // ignore
+    }
+  }
+  if (store.state.activeDragPayload) {
+    return store.state.activeDragPayload;
+  }
+  if (dt) {
+    try {
+      const text = dt.getData('text/plain');
+      if (text) return { type: 'text', markdown: text, text };
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
 function normalizeTabsOrder(rawOrder) {
   const valid = ['summary', 'chat', 'tools'];
   const result = [];
@@ -313,6 +340,17 @@ function getFormatEmoji(pathStr) {
   if (ext === '.xlsx' || ext === '.xlsm' || ext === '.csv') return '📊';
   if (ext === '.md' || ext === '.txt') return '📝';
   return '📄';
+}
+
+function buildFileAnchorMarkdown(pathStr, nameStr) {
+  const name = nameStr || getBaseName(pathStr);
+  const ext = getFileExt(name || pathStr).replace(/^\./, '');
+  if (ext === 'pdf') return `[[${name}#page=1]]`;
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'xlsm') return `[[${name}#A2]]`;
+  if (['mp4', 'mp3', 'wav', 'm4a', 'webm', 'mov', 'mkv', 'ogg', 'flac', 'aac'].includes(ext)) {
+    return `[[${name}#t=00:00]]`;
+  }
+  return `[[${name}]]`;
 }
 
 function getExcelFiles() {
@@ -597,6 +635,9 @@ export function initRightPanel(containerEl) {
       </div>
     `;
   }
+
+  // Mark right panel as drop zone for cross-panel file & text blocks
+  containerEl.setAttribute('data-drop-zone', 'right-ai');
 
   // Build persistent shell so .right-mode-header & .segmented-thumb animate smoothly without DOM destruction
   containerEl.innerHTML = `
@@ -1026,7 +1067,7 @@ export function initRightPanel(containerEl) {
           </div>
 
           <div class="md-preview" style="padding:0;font-size:13.5px;line-height:1.6;">
-            ${renderMarkdownSafe(res.summary || '')}
+            ${renderMarkdownSafe(res.summary || '', { compactMedia: true })}
           </div>
 
           ${
@@ -1127,7 +1168,7 @@ export function initRightPanel(containerEl) {
                 ${matchedFiles
                   .map(
                     (fp) => `
-                    <button type="button" class="app-launcher-pill" data-action="open-matched-file" data-path="${escapeHtml(fp)}" style="background:var(--accent-soft);color:var(--accent);border-color:transparent;">
+                    <button type="button" class="app-launcher-pill matched-file-pill" draggable="true" data-action="open-matched-file" data-path="${escapeHtml(fp)}" data-name="${escapeHtml(getBaseName(fp))}" title="点击打开，或直接拖进中间笔记生成锚点" style="background:var(--accent-soft);color:var(--accent);border-color:transparent;">
                       <span>${getFormatEmoji(fp)}</span>
                       <span>${escapeHtml(getBaseName(fp))}</span>
                     </button>
@@ -1466,7 +1507,7 @@ export function initRightPanel(containerEl) {
 
     const isCompleted = !msg.streaming && Boolean(msg.content.trim());
     const bodyHtml = msg.content
-      ? renderMarkdownSafe(msg.content)
+      ? renderMarkdownSafe(msg.content, { compactMedia: true })
       : `<span style="color:var(--text-tertiary);">正在抽取跨格式上下文并思考...</span>`;
 
     const actionsHtml = isCompleted
@@ -1539,7 +1580,7 @@ export function initRightPanel(containerEl) {
     }
     const bodyEl = bubble.querySelector('.chat-bubble-body');
     if (bodyEl) {
-      bodyEl.innerHTML = renderMarkdownSafe(msg.content);
+      bodyEl.innerHTML = renderMarkdownSafe(msg.content, { compactMedia: true });
     }
     scrollChatToBottom();
   }
@@ -1775,7 +1816,7 @@ export function initRightPanel(containerEl) {
                   ${res?.provider_label ? `<span class="file-ext-badge">${escapeHtml(res.provider_label)}</span>` : ''}
                 </div>
                 <div class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
-                  ${renderMarkdownSafe(outline)}
+                  ${renderMarkdownSafe(outline, { compactMedia: true })}
                 </div>
               </div>
             `;
@@ -1904,7 +1945,7 @@ export function initRightPanel(containerEl) {
                   </div>
                 </div>
                 <div data-role="rp-pol-preview" class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
-                  ${renderMarkdownSafe(polished)}
+                  ${renderMarkdownSafe(polished, { compactMedia: true })}
                 </div>
                 <textarea data-role="rp-pol-raw" class="apple-textarea" rows="12" style="display:none;font-family:var(--font-mono);font-size:12.5px;">${escapeHtml(polished)}</textarea>
               </div>
@@ -2458,7 +2499,7 @@ export function initRightPanel(containerEl) {
                             return `
                               <tr>
                                 <td style="padding:5px 8px;border-bottom:1px solid var(--border-hairline);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                  <button type="button" data-action="tree-open-file" data-path="${escapeHtml(row.path)}" data-name="${escapeHtml(row.file_name)}" style="color:var(--accent);font-weight:500;text-align:left;">
+                                  <button type="button" draggable="true" data-action="tree-open-file" data-path="${escapeHtml(row.path)}" data-name="${escapeHtml(row.file_name)}" title="点击打开，或拖入笔记生成锚点" style="color:var(--accent);font-weight:500;text-align:left;">
                                     ${escapeHtml(row.file_name)}
                                   </button>
                                 </td>
@@ -2511,7 +2552,7 @@ export function initRightPanel(containerEl) {
                                       const statusOpts = Array.from(new Set([...TREE_STATUS_OPTIONS, curStatus]));
                                       return `
                                         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 6px;border-radius:8px;background:var(--bg-island);">
-                                          <button type="button" data-action="tree-open-file" data-path="${escapeHtml(f.path)}" data-name="${escapeHtml(fname)}" style="min-width:0;flex:1 1 auto;text-align:left;font-size:12px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                          <button type="button" draggable="true" data-action="tree-open-file" data-path="${escapeHtml(f.path)}" data-name="${escapeHtml(fname)}" title="点击打开，或拖入笔记生成锚点" style="min-width:0;flex:1 1 auto;text-align:left;font-size:12px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                                             ${getFormatEmoji(f.path)} ${escapeHtml(fname)}
                                           </button>
                                           <select class="apple-select" data-action="tree-status-change" data-node-id="${escapeHtml(node.id)}" data-path="${escapeHtml(f.path)}" style="width:auto;padding:2px 5px;font-size:11px;height:22px;">
@@ -2892,7 +2933,27 @@ export function initRightPanel(containerEl) {
   // ---------------------------------------------------------------------------
 
   containerEl.addEventListener('dragstart', (e) => {
-    // 0. Draggable local app capsule -> drop [[app:AppName]] into Center Note
+    // 0a. Draggable matched file / knowledge-tree bound file -> drop [[filename]] into Center Note
+    const filePill = e.target.closest('[data-action="open-matched-file"], [data-action="tree-open-file"]');
+    if (filePill) {
+      e.stopPropagation();
+      const path = filePill.dataset.path || '';
+      const name = filePill.dataset.name || getBaseName(path);
+      if (!path && !name) {
+        e.preventDefault();
+        return;
+      }
+      setDragPayload(e, {
+        type: 'file-anchor',
+        label: name,
+        path,
+        markdown: buildFileAnchorMarkdown(path, name),
+      });
+      store.emit('drag:active', true);
+      return;
+    }
+
+    // 0b. Draggable local app capsule -> drop [[app:AppName]] into Center Note
     const appPill = e.target.closest('.app-launcher-pill[data-app-id]');
     if (appPill) {
       e.stopPropagation();
@@ -2906,6 +2967,7 @@ export function initRightPanel(containerEl) {
         label: appName,
         markdown: '[[app:' + appName + ']]',
       });
+      store.emit('drag:active', true);
       return;
     }
 
@@ -2927,6 +2989,7 @@ export function initRightPanel(containerEl) {
         '- [ ] ' + todo.title + (todo.suggested_time ? '（' + todo.suggested_time + '）' : '');
       setDragPayload(e, { type: 'ai-todo', label: todo.title, markdown });
       todoItem.classList.add('is-dragging');
+      store.emit('drag:active', true);
       return;
     }
 
@@ -2945,6 +3008,7 @@ export function initRightPanel(containerEl) {
       }
       setDragPayload(e, { type: 'ai-summary', label: 'AI 总结卡片', markdown: md });
       summaryCard.classList.add('is-dragging');
+      store.emit('drag:active', true);
       return;
     }
 
@@ -2964,6 +3028,7 @@ export function initRightPanel(containerEl) {
       }
       setDragPayload(e, { type: 'ai-chat', label: 'AI 问答回复', markdown: msg.content });
       chatBubble.classList.add('is-dragging');
+      store.emit('drag:active', true);
       return;
     }
 
@@ -3029,12 +3094,107 @@ export function initRightPanel(containerEl) {
     draggedToolModuleId = null;
   });
 
+  function handleRightDrop(payload) {
+    if (!payload || typeof payload !== 'object' || payload.type === 'module-reorder') return;
+
+    if (payload.path) {
+      const targetPath = String(payload.path).trim();
+      if (!targetPath) return;
+      const existing = store.state.selectedContextPaths || [];
+      let ok = existing.includes(targetPath);
+      if (!ok) {
+        ok = toggleContextPath(targetPath);
+      }
+      if (ok) {
+        ensureVisibleOnMobileOrCollapsed();
+        switchMode('chat', { emitEvent: true });
+        showToast('已加入右侧 AI 联合问答上下文', 'success');
+      }
+      return;
+    }
+
+    const rawText = String(payload.markdown ?? payload.text ?? payload.content ?? '').trim();
+    if (!rawText) return;
+
+    ensureVisibleOnMobileOrCollapsed();
+    if (state.mode === 'summary') {
+      state.summaryInputText = state.summaryInputText
+        ? `${state.summaryInputText.replace(/\s+$/, '')}\n${rawText}`
+        : rawText;
+      const sumTa = summaryEl?.querySelector('#right-summary-input');
+      if (sumTa) {
+        sumTa.value = state.summaryInputText;
+        sumTa.focus();
+        sumTa.selectionStart = sumTa.selectionEnd = sumTa.value.length;
+      } else {
+        renderSummaryMode();
+        window.requestAnimationFrame(() => {
+          const nextTa = summaryEl?.querySelector('#right-summary-input');
+          nextTa?.focus();
+        });
+      }
+    } else {
+      if (state.mode !== 'chat') {
+        switchMode('chat', { emitEvent: true });
+      }
+      state.chatDraft = state.chatDraft
+        ? `${state.chatDraft.replace(/\s+$/, '')}\n${rawText}`
+        : rawText;
+      const chatTa = chatEl?.querySelector('#chat-input');
+      if (chatTa) {
+        chatTa.value = state.chatDraft;
+        chatTa.focus();
+        chatTa.selectionStart = chatTa.selectionEnd = chatTa.value.length;
+      } else {
+        renderChatMode();
+        window.requestAnimationFrame(() => {
+          const nextTa = chatEl?.querySelector('#chat-input');
+          nextTa?.focus();
+        });
+      }
+    }
+    showToast('已填入右侧 AI 输入框', 'success');
+  }
+
+  containerEl.addEventListener('dragover', (e) => {
+    if (draggedToolModuleId) return;
+    const activePayload = store.state.activeDragPayload;
+    if (activePayload?.type === 'module-reorder') return;
+    const hasBlock =
+      Boolean(activePayload) ||
+      Boolean(e.dataTransfer?.types && Array.from(e.dataTransfer.types).some((t) => t === 'application/x-sln-block' || t === 'text/plain'));
+    if (!hasBlock) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    containerEl.classList.add('is-drop-hover');
+  });
+
+  containerEl.addEventListener('dragleave', (e) => {
+    if (!containerEl.contains(e.relatedTarget)) {
+      containerEl.classList.remove('is-drop-hover');
+    }
+  });
+
+  containerEl.addEventListener('drop', (e) => {
+    containerEl.classList.remove('is-drop-hover');
+    if (draggedToolModuleId) return;
+    const payload = readDragPayload(e);
+    if (!payload || payload.type === 'module-reorder') return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearDragPayload();
+    store.emit('drag:active', false);
+    handleRightDrop(payload);
+  });
+
   containerEl.addEventListener('dragend', () => {
     draggedToolModuleId = null;
+    containerEl.classList.remove('is-drop-hover');
     containerEl.querySelectorAll('.is-dragging, .is-drag-over').forEach((el) => {
       el.classList.remove('is-dragging', 'is-drag-over');
     });
     clearDragPayload();
+    store.emit('drag:active', false);
   });
 
   // ---------------------------------------------------------------------------
@@ -3600,10 +3760,13 @@ export function initRightPanel(containerEl) {
     renderSummaryMode();
   });
 
-  store.on('file:open', () => {
+  const syncRightOnFileChange = () => {
     renderSummaryMode();
     syncExcelSelection();
-  });
+  };
+  store.on('file:open', syncRightOnFileChange);
+  store.on('file:opened', syncRightOnFileChange);
+  store.on('right:drop-payload', handleRightDrop);
 
   store.on('state:changed', ({ keys }) => {
     if (keys?.includes('activeFile')) {

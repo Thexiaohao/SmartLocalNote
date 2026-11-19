@@ -156,29 +156,33 @@ def atomic_write_json(path: Path, data: Any) -> None:
         raise
 
 
-def _seed_demo_workspace_if_empty() -> None:
-    """On first launch of a fresh install/.exe, populate out-of-the-box demo files & indexes."""
-    marker = DATA_DIR / ".initialized"
-    if marker.exists() or not DEMO_SEED_DIR.exists():
-        return
-    has_user_notes = any(p.is_file() for p in DEFAULT_NOTES_DIR.iterdir())
-    if has_user_notes:
-        marker.write_text("seeded\n", encoding="utf-8")
-        return
+def seed_test_suite(reset: bool = True) -> dict[str, Any]:
+    """Copy V5 all-format test fixtures into `<default_notes_dir>/V5_实测流程` without touching external user notes."""
+    if not DEMO_SEED_DIR.exists():
+        raise FileNotFoundError(f"未找到测试套件模板目录：{DEMO_SEED_DIR}")
 
-    for src in DEMO_SEED_DIR.iterdir():
-        if src.is_file():
-            dst = DEFAULT_NOTES_DIR / src.name
-            if not dst.exists():
-                shutil.copy2(src, dst)
+    notes_dir = get_default_notes_dir()
+    suite_dir = (notes_dir / "V5_实测流程").resolve()
+    suite_dir.mkdir(parents=True, exist_ok=True)
 
-    md_path = (DEFAULT_NOTES_DIR / "高数复习笔记.md").resolve()
-    pdf_path = (DEFAULT_NOTES_DIR / "高数重点讲义.pdf").resolve()
-    xlsx_path = (DEFAULT_NOTES_DIR / "高数刷题进度表.xlsx").resolve()
+    synced_files: list[str] = []
+    for src in sorted(DEMO_SEED_DIR.iterdir(), key=lambda p: p.name):
+        if not src.is_file():
+            continue
+        dst = (suite_dir / src.name).resolve()
+        if reset or not dst.exists():
+            shutil.copy2(src, dst)
+        synced_files.append(str(dst))
+
+    entry_path = (suite_dir / "00_V5全流程实测清单.md").resolve()
+    req_path = (suite_dir / "01_项目需求拆解.md").resolve()
+    xlsx_path = (suite_dir / "05_迭代进度表.xlsx").resolve()
+    pdf_path = (suite_dir / "06_产品方案简报.pdf").resolve()
+    docx_path = (suite_dir / "07_接口文档.docx").resolve()
     now_iso = datetime.now().isoformat(timespec="seconds")
 
     cfg = load_config()
-    if xlsx_path.exists() and not cfg.get("default_progress_excel"):
+    if xlsx_path.exists() and not str(cfg.get("default_progress_excel") or "").strip():
         cfg["default_progress_excel"] = str(xlsx_path)
         atomic_write_json(CONFIG_FILE, cfg)
 
@@ -189,15 +193,15 @@ def _seed_demo_workspace_if_empty() -> None:
     if not apps_raw.get("apps") and not apps_raw.get("workspaces"):
         atomic_write_json(APPS_FILE, {
             "apps": [
-                {"id": "app_demo_calc", "name": "系统计算器", "aliases": ["计算器", "calc"], "path": "calc.exe", "args": ""},
                 {"id": "app_demo_notepad", "name": "记事本", "aliases": ["notepad", "文本"], "path": "notepad.exe", "args": ""},
+                {"id": "app_demo_calc", "name": "计算器", "aliases": ["系统计算器", "calc"], "path": "calc.exe", "args": ""},
             ],
             "workspaces": [
                 {
-                    "id": "ws_demo_math",
-                    "name": "高数冲刺复习模式",
-                    "app_ids": ["app_demo_calc"],
-                    "file_paths": [str(p) for p in (md_path, pdf_path, xlsx_path) if p.exists()],
+                    "id": "ws_demo_v5",
+                    "name": "V5 全功能体验场景",
+                    "app_ids": ["app_demo_notepad"],
+                    "file_paths": [str(p) for p in (entry_path, req_path, xlsx_path, pdf_path) if p.exists()],
                 }
             ],
         })
@@ -210,24 +214,45 @@ def _seed_demo_workspace_if_empty() -> None:
         atomic_write_json(TREE_FILE, {
             "nodes": [
                 {
-                    "id": "node_math_root",
-                    "name": "高等数学",
+                    "id": "node_v5_root",
+                    "name": "V5 实测流程",
                     "parent_id": None,
                     "files": [
-                        {"path": str(md_path), "status": "复习中", "updated_at": now_iso},
-                        {"path": str(pdf_path), "status": "复习中", "updated_at": now_iso},
-                        {"path": str(xlsx_path), "status": "进行中", "updated_at": now_iso},
+                        {"path": str(p), "status": "进行中", "updated_at": now_iso}
+                        for p in (entry_path, req_path) if p.exists()
                     ],
                 },
                 {
-                    "id": "node_math_ch3",
-                    "name": "第三章·中值定理专项",
-                    "parent_id": "node_math_root",
-                    "files": [{"path": str(pdf_path), "status": "重点攻克", "updated_at": now_iso}],
+                    "id": "node_v5_docs",
+                    "name": "核心文档与表格",
+                    "parent_id": "node_v5_root",
+                    "files": [
+                        {"path": str(p), "status": "待验收", "updated_at": now_iso}
+                        for p in (xlsx_path, pdf_path, docx_path) if p.exists()
+                    ],
                 },
             ]
         })
 
+    return {
+        "dir": str(suite_dir),
+        "files_count": len(synced_files),
+        "entry_path": str(entry_path) if entry_path.exists() else (synced_files[0] if synced_files else ""),
+        "files": synced_files,
+    }
+
+
+def _seed_demo_workspace_if_empty() -> None:
+    """On first launch of a fresh install/.exe, populate out-of-the-box V5 demo files & indexes."""
+    marker = DATA_DIR / ".initialized"
+    if marker.exists() or not DEMO_SEED_DIR.exists():
+        return
+    has_user_notes = any(p.is_file() for p in DEFAULT_NOTES_DIR.iterdir())
+    if has_user_notes:
+        marker.write_text("seeded\n", encoding="utf-8")
+        return
+
+    seed_test_suite(reset=False)
     marker.write_text("seeded\n", encoding="utf-8")
 
 

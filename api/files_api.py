@@ -86,6 +86,17 @@ def read_file(path: str = Query(...)) -> dict:
     return ok(doc_engine.read_document(path))
 
 
+@router.get("/expand-content")
+def expand_file_content(
+    path: str = Query(...),
+    page: int | None = Query(default=None),
+    sheet: str | None = Query(default=None),
+    cell: str | None = Query(default=None),
+    member: str | None = Query(default=None),
+) -> dict:
+    return ok(doc_engine.extract_inline_content(path, page=page, sheet=sheet, cell=cell, member=member))
+
+
 @router.put("/write")
 def write_file(body: WriteFileBody) -> dict:
     return ok(doc_engine.write_text_document(body.path, body.content))

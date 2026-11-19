@@ -29,6 +29,6 @@ if errorlevel 1 (
 echo.
 echo [4/4] 编译完成！
 echo 可执行文件位置: %cd%\dist\SmartLocalNote.exe
-echo 双击即可运行，首次启动会自动在同级目录创建 data\ 并释放高数演示样本。
+echo 双击即可运行，首次启动会自动在同级目录创建 data\ 并释放 V5 全格式实测流程包。
 pause
 endlocal

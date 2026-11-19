@@ -25,6 +25,7 @@ _CHUNK_CACHE_LOCK = threading.Lock()
 _PDF_MAX_PAGES = 40
 _XLSX_MAX_ROWS_PER_SHEET = 120
 _TEXT_CHUNK_TARGET = 260
+_TEXT_INDEX_MAX_BYTES = 512 * 1024
 
 _SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
     ("错题", "错因", "做错", "错误", "易错", "卡壳", "失误", "重做", "复盘"),
@@ -41,8 +42,12 @@ for _gid, _grp in enumerate(_SYNONYM_GROUPS):
         _SYNONYM_LOOKUP[_term.lower()] = (_gid, _grp)
 
 
-def _read_text_file(target: Path) -> str:
-    raw = target.read_bytes()
+def _read_text_file(target: Path, max_bytes: int | None = None) -> str:
+    if max_bytes is not None and max_bytes > 0:
+        with open(target, "rb") as fh:
+            raw = fh.read(max_bytes)
+    else:
+        raw = target.read_bytes()
     for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
         try:
             return raw.decode(enc)
@@ -77,7 +82,7 @@ def _make_chunk(
 
 
 def _chunk_text_document(target: Path) -> list[dict[str, Any]]:
-    text = _read_text_file(target)
+    text = _read_text_file(target, max_bytes=_TEXT_INDEX_MAX_BYTES)
     if not text.strip():
         return []
 
@@ -246,6 +251,64 @@ def _chunk_xlsx_document(target: Path) -> list[dict[str, Any]]:
     return chunks
 
 
+def _chunk_office_document(target: Path) -> list[dict[str, Any]]:
+    md = doc_engine._extract_office_preview_markdown(target).strip()
+    if not md or md in (
+        "（DOCX 文档中未找到正文 XML 内容）",
+        "（DOCX 文档暂无可提取的纯文本段落）",
+        "（PPTX 演示文稿暂无可提取的文本内容）",
+    ):
+        return []
+
+    path_str = str(target)
+    name = target.name
+    ext = target.suffix.lower()
+    chunks: list[dict[str, Any]] = []
+
+    if ext == ".pptx":
+        sections = re.split(r"(?=^## Slide \d+\b)", md, flags=re.MULTILINE)
+        for sec in sections:
+            part = sec.strip()
+            if not part:
+                continue
+            m = re.match(r"^## Slide (\d+)\b", part)
+            anchor = f"[[{name}#Slide {m.group(1)}]]" if m else f"[[{name}]]"
+            line_num = int(m.group(1)) if m else None
+            for pos in range(0, len(part), _TEXT_CHUNK_TARGET):
+                sub = part[pos : pos + _TEXT_CHUNK_TARGET].strip()
+                if sub:
+                    chunks.append(
+                        _make_chunk(
+                            path=path_str,
+                            name=name,
+                            ext=ext,
+                            chunk_text=sub,
+                            anchor=anchor,
+                            line=line_num,
+                        )
+                    )
+        return chunks
+
+    buf = ""
+    for para in re.split(r"\n{2,}", md):
+        p = para.strip()
+        if not p:
+            continue
+        if buf and len(buf) + 2 + len(p) > _TEXT_CHUNK_TARGET:
+            chunks.append(_make_chunk(path=path_str, name=name, ext=ext, chunk_text=buf, anchor=f"[[{name}]]"))
+            buf = ""
+        if len(p) > _TEXT_CHUNK_TARGET:
+            for pos in range(0, len(p), _TEXT_CHUNK_TARGET):
+                sub = p[pos : pos + _TEXT_CHUNK_TARGET].strip()
+                if sub:
+                    chunks.append(_make_chunk(path=path_str, name=name, ext=ext, chunk_text=sub, anchor=f"[[{name}]]"))
+        else:
+            buf = f"{buf}\n\n{p}" if buf else p
+    if buf:
+        chunks.append(_make_chunk(path=path_str, name=name, ext=ext, chunk_text=buf, anchor=f"[[{name}]]"))
+    return chunks
+
+
 def _get_file_chunks(path_str: str) -> list[dict[str, Any]]:
     """Return mtime-cached chunks for an authorized file via `core.safe_io`."""
     try:
@@ -262,12 +325,14 @@ def _get_file_chunks(path_str: str) -> list[dict[str, Any]]:
 
     ext = target.suffix.lower()
     try:
-        if ext in (".md", ".txt"):
+        if ext in safe_io.TEXT_EDIT_EXTS:
             chunks = _chunk_text_document(target)
         elif ext == ".pdf":
             chunks = _chunk_pdf_document(target)
         elif ext == ".xlsx":
             chunks = _chunk_xlsx_document(target)
+        elif ext in safe_io.OFFICE_PREVIEW_EXTS:
+            chunks = _chunk_office_document(target)
         else:
             chunks = []
     except Exception:

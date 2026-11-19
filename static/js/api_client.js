@@ -71,6 +71,23 @@ export async function apiRequest(path, options = {}) {
   return payload;
 }
 
+export function expandFileContent({ path, page, sheet, cell, member } = {}) {
+  const params = new URLSearchParams();
+  if (path !== undefined && path !== null && path !== '') params.set('path', String(path));
+  if (page !== undefined && page !== null && page !== '') params.set('page', String(page));
+  if (sheet !== undefined && sheet !== null && sheet !== '') params.set('sheet', String(sheet));
+  if (cell !== undefined && cell !== null && cell !== '') params.set('cell', String(cell));
+  if (member !== undefined && member !== null && member !== '') params.set('member', String(member));
+  return apiRequest(`/api/files/expand-content?${params.toString()}`, { method: 'GET' });
+}
+
+export function seedTestSuite({ reset = true } = {}) {
+  return apiRequest('/api/system/seed-test-suite', {
+    method: 'POST',
+    body: { reset: Boolean(reset) },
+  });
+}
+
 export const api = {
   get(url, options = {}) {
     return apiRequest(url, { ...options, method: 'GET' });
@@ -87,6 +104,8 @@ export const api = {
   del(url, body, options = {}) {
     return apiRequest(url, { ...options, method: 'DELETE', body });
   },
+  expandFileContent,
+  seedTestSuite,
 };
 
 /**

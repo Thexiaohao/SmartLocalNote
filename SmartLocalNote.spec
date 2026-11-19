@@ -62,6 +62,7 @@ hiddenimports = [
     # Stdlib modules used dynamically / in frozen bundle
     "zipfile",
     "tarfile",
+    "csv",
     "xml.etree.ElementTree",
     "webbrowser",
     # Document engines

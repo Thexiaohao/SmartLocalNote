@@ -457,7 +457,8 @@ function syncContextCheckboxes(containerEl) {
   const selected = new Set(store.state.selectedContextPaths || []);
 
   containerEl.querySelectorAll('[data-role="ctx-count-badge"]').forEach((badge) => {
-    badge.textContent = `已勾 ${selected.size}/${MAX_CONTEXT_FILES}`;
+    badge.textContent = `${selected.size}/${MAX_CONTEXT_FILES}`;
+    badge.title = `已勾选参与联合问答文件数 (${selected.size}/${MAX_CONTEXT_FILES})`;
   });
 
   containerEl.querySelectorAll('.tree-file-item').forEach((row) => {
@@ -551,11 +552,13 @@ function renderFilesSection(items, selectedSet, activePath) {
                         <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
                           ${icon(getFileIconName(ext), 15)}
                         </span>
-                        <span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px;">
+                        <span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;">
                           <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点 · 右键更多操作）">${escapeHtml(name)}</span>
-                          ${mtimeText ? `<span class="file-meta-time" style="font-size:10.5px;color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(mtimeText)}</span>` : ''}
+                          <span style="display:flex;align-items:center;gap:5px;min-width:0;">
+                            <span class="file-ext-badge" style="padding:0 5px;font-size:9.5px;">${escapeHtml(ext)}</span>
+                            ${mtimeText ? `<span class="file-meta-time" style="font-size:10px;color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(mtimeText)}</span>` : ''}
+                          </span>
                         </span>
-                        <span class="file-ext-badge">${escapeHtml(ext)}</span>
                         <button
                           type="button"
                           class="lock-toggle-btn ${isPriv ? 'lock-badge' : ''}"
@@ -618,7 +621,7 @@ function renderWorkspacesSection(workspaces) {
         const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
         const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
         return `
-        <div class="workspace-card" data-workspace-id="${escapeHtml(ws.id)}">
+        <div class="workspace-card" draggable="true" data-workspace-id="${escapeHtml(ws.id)}" title="按住拖入中间笔记生成工作区锚点">
           <div class="workspace-card-head">
             <span class="workspace-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span>
             <span class="workspace-meta">${appCount} 软件 · ${fileCount} 文档</span>
@@ -816,31 +819,28 @@ function renderPomodoroMiniSection() {
   `;
 }
 
-function getModuleQuickActionsHtml(modId, selectedCount, itemsCount) {
+function getModuleQuickActionsHtml(modId, _selectedCount, itemsCount) {
   if (modId === 'files') {
-    return `
-      <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数">已勾 ${selectedCount}/${MAX_CONTEXT_FILES}</span>
-      <span data-role="files-count-label" style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>
-    `;
+    return `<span data-role="files-count-label" style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>`;
   }
   if (modId === 'workspaces') {
     return `
-      <button type="button" class="pill-btn pill-btn-sm" data-action="capture-scene" style="height:22px;padding:0 8px;font-size:11px;">
-        ${icon('camera', 11)} 捕获现场
+      <button type="button" class="left-icon-btn is-xs" data-action="capture-scene" title="捕获当前桌面现场，生成一键场景包" aria-label="捕获现场">
+        ${icon('camera', 13)}
       </button>
     `;
   }
   if (modId === 'apps') {
     return `
-      <button type="button" class="pill-btn pill-btn-sm" data-action="add-app" style="height:22px;padding:0 8px;font-size:11px;">
-        ${icon('plus', 11)} 软件
+      <button type="button" class="left-icon-btn is-xs" data-action="add-app" title="添加本地软件" aria-label="添加软件">
+        ${icon('plus', 13)}
       </button>
     `;
   }
   if (modId === 'tree') {
     return `
-      <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="manage-tree" style="height:22px;padding:0 7px;font-size:11px;">
-        ${icon('settings', 11)} 管理
+      <button type="button" class="left-icon-btn is-xs" data-action="manage-tree" title="管理虚拟知识树" aria-label="管理知识树">
+        ${icon('settings', 13)}
       </button>
     `;
   }
@@ -868,61 +868,133 @@ function renderModuleBodyHtml(modId, ctx) {
   }
 }
 
+const SORT_FIELD_OPTIONS = [
+  { by: 'name', label: '按名称' },
+  { by: 'mtime', label: '按修改时间' },
+  { by: 'ext', label: '按文件类型' },
+  { by: 'size', label: '按文件大小' },
+];
+
+function renderSortPopoverContentHtml(sortCfg = getLeftFileSort()) {
+  const by = sortCfg?.by || 'name';
+  const dir = sortCfg?.dir === 'desc' ? 'desc' : 'asc';
+  return `
+    <div class="left-sort-group">
+      ${SORT_FIELD_OPTIONS.map(
+        (opt) => `
+          <button
+            type="button"
+            class="left-sort-option ${by === opt.by ? 'is-active' : ''}"
+            data-action="sort-by-opt"
+            data-sort-by="${opt.by}"
+            role="menuitemradio"
+            aria-checked="${by === opt.by ? 'true' : 'false'}"
+          >
+            <span>${opt.label}</span>
+            ${by === opt.by ? icon('check', 12) : ''}
+          </button>
+        `
+      ).join('')}
+    </div>
+    <div class="left-sort-divider" role="separator"></div>
+    <div class="left-sort-dir-row">
+      <button
+        type="button"
+        class="left-sort-dir-btn ${dir === 'asc' ? 'is-active' : ''}"
+        data-action="sort-dir-opt"
+        data-sort-dir="asc"
+        aria-pressed="${dir === 'asc' ? 'true' : 'false'}"
+      >
+        ${icon('arrow-up', 12)} 升序 (A→Z / 旧→新)
+      </button>
+      <button
+        type="button"
+        class="left-sort-dir-btn ${dir === 'desc' ? 'is-active' : ''}"
+        data-action="sort-dir-opt"
+        data-sort-dir="desc"
+        aria-pressed="${dir === 'desc' ? 'true' : 'false'}"
+      >
+        ${icon('arrow-down', 12)} 降序 (Z→A / 新→旧)
+      </button>
+    </div>
+  `;
+}
+
 function renderStickyTopHtml(selectedCount) {
   const hasFilter = Boolean(leftFilterQuery);
+  const sort = getLeftFileSort();
+  const hasActiveSort = sort.by !== 'name' || sort.dir !== 'asc';
   return `
-    <div class="left-sticky-top" style="flex-shrink:0;position:sticky;top:0;z-index:5;background:var(--bg-glass);backdrop-filter:var(--blur-glass);-webkit-backdrop-filter:var(--blur-glass);border-bottom:1px solid var(--border-hairline);">
-      <div class="panel-header" style="border-bottom:none;padding:10px 12px 6px;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;">
-        <span class="panel-title">资料与工作区</span>
-        <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数">已勾 ${selectedCount}/${MAX_CONTEXT_FILES}</span>
+    <div class="left-sticky-top">
+      <div class="left-header-row">
+        <div class="left-header-title-wrap">
+          <span class="panel-title">工作区</span>
+          <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数 (${selectedCount}/${MAX_CONTEXT_FILES})">${selectedCount}/${MAX_CONTEXT_FILES}</span>
+        </div>
+        <div class="left-header-icons">
+          <button type="button" class="left-icon-btn" data-action="new-note" title="新建笔记 (Ctrl+N)" aria-label="新建笔记 (Ctrl+N)">
+            ${icon('plus', 14)}
+          </button>
+          <button type="button" class="left-icon-btn" data-action="import-open" title="导入文件 / 挂载目录" aria-label="导入文件 / 挂载目录">
+            ${icon('download', 14)}
+          </button>
+          <button type="button" class="left-icon-btn" data-action="spawn-sticky-note" title="召唤闪念便签 (Alt+N)" aria-label="召唤闪念便签 (Alt+N)">
+            ${icon('pin', 14)}
+          </button>
+          <button type="button" class="left-icon-btn" data-action="customize-modules" title="自定义模块" aria-label="自定义模块">
+            ${icon('settings', 14)}
+          </button>
+          <button type="button" class="left-icon-btn" data-action="reset-layout" title="恢复默认布局" aria-label="恢复默认布局">
+            ${icon('rotate-ccw', 14)}
+          </button>
+        </div>
       </div>
-      <div class="left-toolbar" style="padding:2px 12px 8px;border-bottom:none;display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
-        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="new-note">
-          ${icon('plus', 13)} 笔记
-        </button>
-        <button type="button" class="pill-btn pill-btn-sm" data-action="import-open">
-          ${icon('download', 13)} 导入
-        </button>
-        <button type="button" class="pill-btn pill-btn-sm" data-action="spawn-sticky-note" title="在屏幕中央召唤悬浮便签 (Alt+N)，也可随时在任意位置右键唤出">
-          📌 闪念
-        </button>
-        <button type="button" class="pill-btn pill-btn-sm" data-action="customize-modules" title="添加、隐藏或排序左侧工作区模块">
-          ${icon('settings', 13)} 模块
-        </button>
-        <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="reset-layout" title="一键恢复默认三栏宽度与模块尺寸" aria-label="一键恢复默认布局" style="padding:0 8px;">
-          ↺
-        </button>
-      </div>
-      <div class="left-filter-wrap" style="display:flex;align-items:center;gap:5px;padding:0 12px 10px;">
-        <div style="position:relative;flex:1 1 auto;min-width:0;display:flex;align-items:center;">
+      <div class="left-filter-row">
+        <div class="left-filter-wrap">
+          <span class="left-filter-icon" aria-hidden="true">${icon('search', 13)}</span>
           <input
             type="text"
             class="apple-input left-filter-input"
             data-role="left-filter-input"
             value="${escapeHtml(leftFilterQuery)}"
-            placeholder="目录内搜索文件名 / 类型 / 路径…"
+            placeholder="筛选文件…"
             autocomplete="off"
             spellcheck="false"
-            style="height:30px;padding:4px 26px 4px 10px;font-size:12px;border-radius:var(--radius-pill);"
           />
           <button
             type="button"
             class="left-filter-clear"
             data-action="clear-filter"
-            title="清空搜索"
-            aria-label="清空搜索"
+            title="清空筛选"
+            aria-label="清空筛选"
             ${hasFilter ? '' : 'hidden'}
-            style="position:absolute;right:6px;width:18px;height:18px;border-radius:9999px;display:${hasFilter ? 'inline-flex' : 'none'};align-items:center;justify-content:center;font-size:11px;color:var(--text-tertiary);background:var(--bg-hover);"
-          >✕</button>
+          >×</button>
+        </div>
+        <div class="left-sort-wrap">
+          <button
+            type="button"
+            class="left-icon-btn left-sort-trigger ${hasActiveSort ? 'has-active-sort' : ''}"
+            data-action="toggle-sort-popover"
+            title="排序方式"
+            aria-label="排序方式"
+            aria-expanded="false"
+            aria-haspopup="menu"
+          >
+            ${icon('arrow-up-down', 14)}
+          </button>
+          <div class="left-sort-popover" data-role="left-sort-popover" role="menu" hidden>
+            ${renderSortPopoverContentHtml(sort)}
+          </div>
         </div>
         <button
           type="button"
-          class="pill-btn pill-btn-sm"
+          class="left-icon-btn"
           data-action="scroll-top"
-          title="回到目录顶部"
+          title="回到顶部"
           aria-label="回到顶部"
-          style="height:30px;padding:0 9px;font-size:12px;flex-shrink:0;"
-        >↑</button>
+        >
+          ${icon('arrow-up', 14)}
+        </button>
       </div>
     </div>
   `;
@@ -938,7 +1010,6 @@ function buildModulesHtml() {
   const recentFiles = store.state.recentFiles || [];
   const leftModules = getLeftModules();
   const visibleModules = leftModules.filter((m) => m.visible !== false);
-  const sort = getLeftFileSort();
 
   const ctx = { items, selectedSet, activePath, apps, workspaces, treeNodes, recentFiles };
 
@@ -962,39 +1033,12 @@ function buildModulesHtml() {
         ? `height:${customH}px;max-height:${customH}px;overflow-y:auto;`
         : '';
 
-      const sortBarHtml =
-        mod.id === 'files'
-          ? `
-            <div class="left-sort-bar" style="display:flex;align-items:center;gap:6px;width:100%;padding-top:4px;">
-              <select
-                class="apple-select"
-                data-action="sort-by"
-                aria-label="文件排序方式"
-                style="flex:1 1 auto;min-width:0;height:26px;padding:2px 8px;font-size:11.5px;border-radius:var(--radius-pill);"
-              >
-                <option value="name" ${sort.by === 'name' ? 'selected' : ''}>按名称 (A-Z)</option>
-                <option value="mtime" ${sort.by === 'mtime' ? 'selected' : ''}>按修改时间</option>
-                <option value="ext" ${sort.by === 'ext' ? 'selected' : ''}>按文件类型</option>
-                <option value="size" ${sort.by === 'size' ? 'selected' : ''}>按文件大小</option>
-              </select>
-              <button
-                type="button"
-                class="pill-btn pill-btn-sm"
-                data-action="sort-dir"
-                data-sort-dir="${escapeHtml(sort.dir)}"
-                title="切换升序 / 降序"
-                style="height:26px;padding:0 9px;font-size:11.5px;flex-shrink:0;"
-              >${sort.dir === 'asc' ? '↑ 升序' : '↓ 降序'}</button>
-            </div>
-          `
-          : '';
-
       return `
         <section
           class="module-block ${collapsed ? 'is-collapsed' : ''}"
           data-module-id="${escapeHtml(mod.id)}"
         >
-          <div class="module-header" style="${mod.id === 'files' ? 'flex-wrap:wrap;' : ''}">
+          <div class="module-header">
             <div style="display:flex;align-items:center;gap:4px;min-width:0;flex:1;">
               <span
                 class="module-drag-handle"
@@ -1003,7 +1047,7 @@ function buildModulesHtml() {
                 title="拖拽调整模块顺序"
                 aria-label="拖拽调整 ${escapeHtml(mod.title)} 顺序"
               >
-                ⠿
+                ${icon('grip-vertical', 12)}
               </span>
               <button
                 type="button"
@@ -1019,7 +1063,6 @@ function buildModulesHtml() {
             <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
               ${getModuleQuickActionsHtml(mod.id, selectedSet.size, items.length)}
             </div>
-            ${sortBarHtml}
           </div>
           <div class="module-content">
             <div
@@ -1032,13 +1075,44 @@ function buildModulesHtml() {
             ${
               collapsed
                 ? ''
-                : `<div class="module-height-resizer" data-resize-module="${escapeHtml(mod.id)}" title="上下拖动调节模块高度（双击恢复自动）" role="separator" aria-orientation="horizontal" style="height:8px;cursor:row-resize;display:flex;align-items:center;justify-content:center;user-select:none;touch-action:none;"><span style="width:28px;height:3px;border-radius:9999px;background:var(--border-hairline);pointer-events:none;"></span></div>`
+                : `<div class="module-height-resizer" data-resize-module="${escapeHtml(mod.id)}" title="上下拖动调节模块高度（双击恢复自动）" role="separator" aria-orientation="horizontal"></div>`
             }
           </div>
         </section>
       `;
     })
     .join('');
+}
+
+function syncSortPopoverUi(containerEl) {
+  if (!containerEl) return;
+  const sort = getLeftFileSort();
+  const hasActiveSort = sort.by !== 'name' || sort.dir !== 'asc';
+  const trigger = containerEl.querySelector('[data-action="toggle-sort-popover"]');
+  if (trigger) {
+    trigger.classList.toggle('has-active-sort', hasActiveSort);
+  }
+  const popover = containerEl.querySelector('[data-role="left-sort-popover"]');
+  if (popover) {
+    popover.innerHTML = renderSortPopoverContentHtml(sort);
+  }
+}
+
+function setSortPopoverOpen(containerEl, open) {
+  if (!containerEl) return;
+  const trigger = containerEl.querySelector('[data-action="toggle-sort-popover"]');
+  const popover = containerEl.querySelector('[data-role="left-sort-popover"]');
+  if (!popover) return;
+  if (open) {
+    syncSortPopoverUi(containerEl);
+    popover.hidden = false;
+    popover.classList.add('is-open');
+    trigger?.setAttribute('aria-expanded', 'true');
+  } else {
+    popover.classList.remove('is-open');
+    popover.hidden = true;
+    trigger?.setAttribute('aria-expanded', 'false');
+  }
 }
 
 function updateFilterUiState(containerEl) {
@@ -1078,16 +1152,7 @@ function updateFilesSectionOnly(containerEl) {
     countLabel.textContent = leftFilterQuery.trim() ? `${filteredCount}/${items.length}` : `${items.length}`;
   }
 
-  const sort = getLeftFileSort();
-  const sortSelect = containerEl.querySelector('[data-action="sort-by"]');
-  if (sortSelect && sortSelect.value !== sort.by) {
-    sortSelect.value = sort.by;
-  }
-  const sortDirBtn = containerEl.querySelector('[data-action="sort-dir"]');
-  if (sortDirBtn) {
-    sortDirBtn.dataset.sortDir = sort.dir;
-    sortDirBtn.textContent = sort.dir === 'asc' ? '↑ 升序' : '↓ 降序';
-  }
+  syncSortPopoverUi(containerEl);
 }
 
 function renderPanelBody(containerEl) {
@@ -1351,6 +1416,13 @@ function openImportSheet() {
             <span>作为目录挂载（自动扫描目录下所有支持格式）</span>
           </label>
         </div>
+
+        <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--text-secondary);">想快速体验全格式预览与跨模态跳转？</span>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="import-seed-test-btn">
+            🧪 一键加载 V5 全格式实测流程包
+          </button>
+        </div>
       </div>
     `,
     footerHtml: `
@@ -1442,6 +1514,33 @@ function openImportSheet() {
         if (e.key === 'Enter') {
           e.preventDefault();
           doManualSubmit();
+        }
+      });
+
+      const seedBtn = card.querySelector('#import-seed-test-btn');
+      seedBtn?.addEventListener('click', async () => {
+        seedBtn.disabled = true;
+        try {
+          const res = await api.seedTestSuite({ reset: true });
+          await loadFiles();
+          emitWithGuard('files', store.state.files);
+          renderLeftPanel(containerRef);
+          closeSheet();
+          const checklist =
+            (store.state.files?.items || []).find(
+              (f) => f.name === '00_V5全流程实测清单.md' || String(f.path || '').endsWith('00_V5全流程实测清单.md')
+            ) ||
+            (res?.checklist_path
+              ? { path: res.checklist_path, name: '00_V5全流程实测清单.md', ext: '.md' }
+              : null);
+          if (checklist?.path) {
+            handleOpenFilePath(checklist.path);
+          }
+          showToast('已加载 V5 全格式实测流程包', 'success');
+        } catch (err) {
+          showToast(`加载实测流程包失败：${err?.message || '未知错误'}`, 'error');
+        } finally {
+          seedBtn.disabled = false;
         }
       });
     },
@@ -1916,8 +2015,6 @@ function handleOpenFilePath(filePath) {
     name: getBasename(filePath),
     ext: `.${getFileExt({ path: filePath })}`,
   };
-  store.state.activeFile = item;
-  syncActiveFileHighlight(containerRef, item.path);
   store.emit('file:open', item);
 }
 
@@ -2303,7 +2400,7 @@ export function initLeftTree(containerEl) {
 
   // Sync checkboxes & active highlight cleanly without full re-render flicker
   store.on('context:changed', () => syncContextCheckboxes(containerEl));
-  store.on('file:open', (file) => syncActiveFileHighlight(containerEl, file?.path));
+  store.on('file:opened', (file) => syncActiveFileHighlight(containerEl, file?.path));
   store.on('capture:open', () => openCaptureSceneSheet());
   store.on('files:sort-changed', () => updateFilesSectionOnly(containerEl));
   store.on('ui:layout-changed', () => {
@@ -2407,6 +2504,7 @@ export function initLeftTree(containerEl) {
         label: '灵感便签',
         markdown: text,
       });
+      store.emit('drag:active', true);
       return;
     }
 
@@ -2419,7 +2517,31 @@ export function initLeftTree(containerEl) {
           label: appName,
           markdown: '[[app:' + appName + ']]',
         });
+        store.emit('drag:active', true);
       }
+      return;
+    }
+
+    const wsCard = e.target.closest('.workspace-card[data-workspace-id]');
+    if (wsCard) {
+      if (e.target.closest('button, select, input, a')) {
+        e.preventDefault();
+        return;
+      }
+      const wsId = wsCard.dataset.workspaceId;
+      const ws = (store.state.workspaces || []).find((w) => String(w.id) === String(wsId));
+      if (!ws) return;
+      const appMap = new Map((store.state.apps || []).map((a) => [String(a.id), a.name]));
+      const appLinks = (ws.app_ids || []).map((id) => `[[app:${appMap.get(String(id)) || id}]]`);
+      const fileLinks = (ws.file_paths || []).map((fp) => buildFileAnchorMarkdown(fp));
+      const parts = [`### 工作区：${ws.name}`, ...appLinks, ...fileLinks].filter(Boolean);
+      setDragPayload(e, {
+        type: 'workspace',
+        label: ws.name,
+        workspaceId: ws.id,
+        markdown: parts.join('\n'),
+      });
+      store.emit('drag:active', true);
       return;
     }
 
@@ -2439,6 +2561,7 @@ export function initLeftTree(containerEl) {
         path,
         markdown,
       });
+      store.emit('drag:active', true);
     }
   });
 
@@ -2497,7 +2620,26 @@ export function initLeftTree(containerEl) {
       el.classList.remove('is-drag-over', 'is-dragging');
     });
     clearDragPayload();
+    store.emit('drag:active', false);
   });
+
+  if (!containerEl.dataset.sortDismissBound) {
+    containerEl.dataset.sortDismissBound = '1';
+    document.addEventListener('pointerdown', (e) => {
+      const pop = containerEl.querySelector('[data-role="left-sort-popover"]');
+      if (!pop || pop.hidden) return;
+      if (!e.target.closest('.left-sort-wrap')) {
+        setSortPopoverOpen(containerEl, false);
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const pop = containerEl.querySelector('[data-role="left-sort-popover"]');
+      if (pop && !pop.hidden) {
+        setSortPopoverOpen(containerEl, false);
+      }
+    });
+  }
 
   // Prevent checkbox clicks from triggering row file:open
   containerEl.addEventListener('click', (e) => {
@@ -2510,6 +2652,30 @@ export function initLeftTree(containerEl) {
     const actionEl = e.target.closest('[data-action]');
     if (!actionEl) return;
     const action = actionEl.dataset.action;
+
+    if (action === 'toggle-sort-popover') {
+      e.stopPropagation();
+      const pop = containerEl.querySelector('[data-role="left-sort-popover"]');
+      const shouldOpen = pop ? pop.hidden : false;
+      setSortPopoverOpen(containerEl, shouldOpen);
+      return;
+    }
+
+    if (action === 'sort-by-opt') {
+      const nextBy = actionEl.dataset.sortBy;
+      if (nextBy) {
+        persistLeftFileSort({ by: nextBy });
+        updateFilesSectionOnly(containerEl);
+      }
+      return;
+    }
+
+    if (action === 'sort-dir-opt') {
+      const nextDir = actionEl.dataset.sortDir === 'desc' ? 'desc' : 'asc';
+      persistLeftFileSort({ dir: nextDir });
+      updateFilesSectionOnly(containerEl);
+      return;
+    }
 
     if (action === 'sort-by') {
       return;

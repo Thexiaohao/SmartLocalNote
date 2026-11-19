@@ -658,7 +658,7 @@ export function renderMindMap(containerEl, opts = {}) {
         el.style.minHeight = `${n.h}px`;
 
         // Render inline Markdown/portal pills cleanly inside node label without block <p> wrappers
-        const renderedHtml = renderMarkdownSafe(nodeData.text || '节点')
+        const renderedHtml = renderMarkdownSafe(nodeData.text || '节点', { compactMedia: true })
           .replace(/^<p>([\s\S]*)<\/p>\n?$/i, '$1');
 
         const statusDot =
@@ -830,6 +830,22 @@ export function renderMindMap(containerEl, opts = {}) {
         return;
       }
 
+      const mediaEl = e.target.closest('[data-media-file]');
+      if (mediaEl) {
+        e.stopPropagation();
+        const payload = {
+          type: 'media',
+          file: mediaEl.dataset.mediaFile || '',
+          time: mediaEl.dataset.mediaTime || '',
+        };
+        if (typeof opts.onAnchorClick === 'function') {
+          opts.onAnchorClick(payload);
+        } else {
+          store.emit('anchor:jump', payload);
+        }
+        return;
+      }
+
       // 2. Collapse/expand branch button
       const foldBtn = e.target.closest('[data-mm-fold]');
       if (foldBtn) {
@@ -855,7 +871,7 @@ export function renderMindMap(containerEl, opts = {}) {
 
     stageEl.addEventListener('dblclick', (e) => {
       const nodeEl = e.target.closest('.mindmap-node');
-      if (!nodeEl || e.target.closest('.anchor-pill, button, input')) return;
+      if (!nodeEl || e.target.closest('.anchor-pill, [data-media-file], button, input')) return;
       const nodeData = findNodeById(nodeEl.dataset.nodeId);
       if (nodeData) {
         startInlineRename(nodeEl, nodeData);

@@ -31,8 +31,10 @@ import {
   openSheet,
   closeSheet,
   applyDocTypography,
+  setDragPayload,
   readDragPayload,
   clearDragPayload,
+  findWorkspaceFileItem,
   DRAG_MIME,
 } from './store.js';
 import { api } from './api_client.js';
@@ -94,6 +96,24 @@ function normalizePath(pathStr) {
 function isSamePath(a, b) {
   if (!a || !b) return false;
   return normalizePath(a) === normalizePath(b);
+}
+
+const CODE_OR_TEXT_EXTS = new Set([
+  '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
+  '.json', '.csv', '.css', '.scss', '.html', '.htm', '.xml',
+  '.yaml', '.yml', '.ini', '.toml', '.log', '.sql', '.sh', '.bat', '.ps1',
+]);
+
+function isCodeOrPlainTextExt(ext) {
+  return CODE_OR_TEXT_EXTS.has(String(ext || '').toLowerCase());
+}
+
+function normalizeHeadingKey(str) {
+  return String(str || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^[#\s]+/, '')
+    .replace(/[\s\-_.,，。、：:()（）【】[\]`*_~]+/g, '');
 }
 
 function docIconName(type, ext) {
@@ -647,18 +667,7 @@ export function initCenterView(containerEl) {
   }
 
   function findWorkspaceFile(queryNameOrPath) {
-    const target = String(queryNameOrPath || '').trim();
-    if (!target) return null;
-    const items = store.state.files?.items || [];
-    const targetNorm = normalizePath(target);
-    const targetBase = getBaseName(target).toLowerCase();
-
-    return (
-      items.find((f) => isSamePath(f.path, targetNorm)) ||
-      items.find((f) => String(f.name || '').toLowerCase() === targetBase) ||
-      items.find((f) => getBaseName(f.path).toLowerCase() === targetBase) ||
-      null
-    );
+    return findWorkspaceFileItem(queryNameOrPath);
   }
 
   function buildExcelSummaryText() {
@@ -756,6 +765,7 @@ export function initCenterView(containerEl) {
                   const srcName = item.source_name || item.name || getBaseName(srcPath) || '未命名笔记';
                   const snippet = item.snippet || item.context || item.line_text || '';
                   const anchor = item.anchor || item.token || '';
+                  const rawLine = item.line ?? item.line_num ?? item.lineNum ?? item.lineno ?? '';
                   return `
                     <div class="glass-card" style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
                       <div style="min-width:0;flex:1;">
@@ -766,7 +776,7 @@ export function initCenterView(containerEl) {
                         </div>
                         ${snippet ? `<div class="search-snippet" style="margin-top:4px;word-break:break-word;">${escapeHtml(snippet)}</div>` : ''}
                       </div>
-                      <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-backlink-open="${escapeHtml(srcPath)}">打开</button>
+                      <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-backlink-open="${escapeHtml(srcPath)}" data-backlink-line="${escapeHtml(rawLine)}">打开</button>
                     </div>
                   `;
                 })
@@ -781,8 +791,9 @@ export function initCenterView(containerEl) {
           if (!btn) return;
           const targetPath = btn.dataset.backlinkOpen;
           if (!targetPath) return;
+          const lineNum = Number.parseInt(btn.dataset.backlinkLine || '', 10);
           closeSheet();
-          await openFile(targetPath);
+          await openFile(targetPath, Number.isFinite(lineNum) ? { line: lineNum } : {});
         });
       },
     });
@@ -885,27 +896,29 @@ export function initCenterView(containerEl) {
           </p>
         `,
         footerHtml: `
-          <button type="button" class="pill-btn" data-guard-act="cancel">取消</button>
-          <button type="button" class="pill-btn pill-btn-danger" data-guard-act="discard">放弃修改</button>
-          <button type="button" class="pill-btn pill-btn-primary" data-guard-act="save">💾 保存并切换</button>
+          <div class="sheet-footer-split">
+            <button type="button" class="pill-btn pill-btn-primary" data-guard-act="save">💾 保存并退出</button>
+            <button type="button" class="pill-btn pill-btn-danger" data-guard-act="discard">放弃修改</button>
+            <button type="button" class="pill-btn" data-guard-act="cancel">取消</button>
+          </div>
         `,
         onMount(card) {
           card.querySelector('[data-guard-act="cancel"]')?.addEventListener('click', () => {
-            closeSheet();
             finish(false);
+            closeSheet();
           });
           card.querySelector('[data-guard-act="discard"]')?.addEventListener('click', () => {
             clearUnsavedFlags();
-            closeSheet();
             finish(true);
+            closeSheet();
           });
           const saveBtn = card.querySelector('[data-guard-act="save"]');
           saveBtn?.addEventListener('click', async () => {
             if (saveBtn) saveBtn.disabled = true;
             const ok = await saveCurrentDirtyDoc({ silent: true, toastMessage: '已保存修改' });
             if (ok) {
-              closeSheet();
               finish(true);
+              closeSheet();
             } else if (saveBtn) {
               saveBtn.disabled = false;
             }
@@ -2320,7 +2333,9 @@ export function initCenterView(containerEl) {
 
   function commitMediaCardWidth(card, rawWidthPx) {
     const doc = state.activeDoc;
-    if (!card || !doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    const isMainEditable = doc && (doc.type === 'markdown' || doc.type === 'text');
+    const isCompanion = doc && !isMainEditable && hasCompanionNote(doc);
+    if (!card || (!isMainEditable && !isCompanion)) return;
     const newW = Math.max(160, Math.min(960, Math.round(Number(rawWidthPx) || 420)));
     card.style.width = `${newW}px`;
     card.style.maxWidth = '100%';
@@ -2330,6 +2345,7 @@ export function initCenterView(containerEl) {
     if (widthLabel) widthLabel.textContent = `${newW}px`;
 
     const rawTokAttr =
+      card.dataset.anchorRaw ||
       card.dataset.mediaRaw ||
       card.dataset.mediaToken ||
       card.dataset.rawToken ||
@@ -2369,8 +2385,8 @@ export function initCenterView(containerEl) {
       return null;
     };
 
-    const prevContent = String(doc.content || '');
-    const blockEl = card.closest('.lp-block[data-md-start]');
+    const prevContent = isMainEditable ? String(doc.content || '') : String(doc.companionContent || '');
+    const blockEl = isMainEditable ? card.closest('.lp-block[data-md-start]') : null;
     let updated = null;
 
     if (blockEl) {
@@ -2400,15 +2416,26 @@ export function initCenterView(containerEl) {
     }
 
     if (updated && updated.text !== prevContent) {
-      pushUndoSnapshot(prevContent, { immediate: true });
-      doc.content = updated.text;
-      state.dirty = true;
-      store.state.activeDocumentText = updated.text;
-      card.dataset.mediaRaw = `[[${updated.nextInner}]]`;
+      const nextToken = `[[${updated.nextInner}]]`;
+      card.dataset.mediaRaw = nextToken;
+      card.dataset.anchorRaw = nextToken;
       if (card.dataset.mediaToken !== undefined) card.dataset.mediaToken = updated.nextInner;
-      if (card.dataset.rawToken !== undefined) card.dataset.rawToken = `[[${updated.nextInner}]]`;
+      if (card.dataset.rawToken !== undefined) card.dataset.rawToken = nextToken;
       if (card.dataset.token !== undefined) card.dataset.token = updated.nextInner;
-      updateMdDirtyIndicators();
+
+      if (isMainEditable) {
+        pushUndoSnapshot(prevContent, { immediate: true });
+        doc.content = updated.text;
+        state.dirty = true;
+        store.state.activeDocumentText = updated.text;
+        updateMdDirtyIndicators();
+      } else {
+        doc.companionContent = updated.text;
+        state.pdf.companionDirty = true;
+        store.state.activeDocumentText = updated.text;
+        const compTa = containerEl.querySelector('[data-role="pdf-companion-editor"]');
+        if (compTa) compTa.value = updated.text;
+      }
       showToast(`已调整预览宽度：${newW}px`, 'success', { duration: 1600 });
     }
   }
@@ -2790,9 +2817,11 @@ export function initCenterView(containerEl) {
         title: '切换工作表确认',
         bodyHtml: `<p style="margin:0; color:var(--text-secondary);">当前工作表「${escapeHtml(state.excel.currentSheet)}」有 <strong>${count}</strong> 项未保存修改，切换将丢失这些修改。</p>`,
         footerHtml: `
-          <button type="button" class="pill-btn" data-sheet-act="cancel">取消</button>
-          <button type="button" class="pill-btn pill-btn-danger" data-sheet-act="discard">丢弃并切换</button>
-          <button type="button" class="pill-btn pill-btn-primary" data-sheet-act="save">保存并切换</button>
+          <div class="sheet-footer-split">
+            <button type="button" class="pill-btn pill-btn-primary" data-sheet-act="save">💾 保存并切换</button>
+            <button type="button" class="pill-btn pill-btn-danger" data-sheet-act="discard">丢弃并切换</button>
+            <button type="button" class="pill-btn" data-sheet-act="cancel">取消</button>
+          </div>
         `,
         onMount(card) {
           card.querySelector('[data-sheet-act="cancel"]')?.addEventListener('click', closeSheet);
@@ -3400,7 +3429,7 @@ export function initCenterView(containerEl) {
                     return `
                       <div
                         class="tree-file-item ${isSelected ? 'is-selected' : ''}"
-                        ${previewable ? `data-archive-member="${escapeHtml(memberName)}"` : ''}
+                        ${previewable ? `data-archive-member="${escapeHtml(memberName)}" draggable="true"` : ''}
                         style="padding:6px 8px; gap:6px; opacity:${previewable ? '1' : isDir ? '0.85' : '0.55'}; cursor:${previewable ? 'pointer' : 'default'};"
                         title="${escapeHtml(memberName)}"
                       >
@@ -3747,16 +3776,25 @@ export function initCenterView(containerEl) {
   }
 
   function scrollToMarkdownHeading(headingText) {
-    const query = String(headingText || '').trim().toLowerCase();
-    if (!query) return false;
+    const rawQuery = String(headingText || '').trim();
+    const query = rawQuery.toLowerCase();
+    const normQuery = normalizeHeadingKey(rawQuery);
+    if (!query && !normQuery) return false;
     const previewEl = containerEl.querySelector('.lp-container') || containerEl.querySelector('.md-preview');
     if (!previewEl) return false;
     const headings = Array.from(previewEl.querySelectorAll('h1, h2, h3, h4, h5, h6'));
     const match =
       headings.find((h) => h.textContent.trim().toLowerCase() === query) ||
-      headings.find((h) => h.textContent.trim().toLowerCase().includes(query));
+      (normQuery ? headings.find((h) => normalizeHeadingKey(h.textContent) === normQuery) : null) ||
+      headings.find((h) => h.textContent.trim().toLowerCase().includes(query)) ||
+      (normQuery ? headings.find((h) => normalizeHeadingKey(h.textContent).includes(normQuery)) : null);
     if (!match) return false;
     match.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const blk = match.closest('.lp-block');
+    if (blk) {
+      blk.classList.add('just-dropped');
+      window.setTimeout(() => blk.classList.remove('just-dropped'), 1300);
+    }
     const prevTransition = match.style.transition;
     const prevBg = match.style.backgroundColor;
     const prevRadius = match.style.borderRadius;
@@ -3773,6 +3811,57 @@ export function initCenterView(containerEl) {
     return true;
   }
 
+  function scrollToMarkdownLine(rawLine) {
+    const lineNum = Number.parseInt(rawLine, 10);
+    if (!Number.isFinite(lineNum)) return false;
+    const targetLine0 = Math.max(0, lineNum > 0 ? lineNum - 1 : 0);
+
+    if (state.mdMode === 'source') {
+      const ta = containerEl.querySelector('.md-editor:not([data-role])');
+      if (!ta) return false;
+      const lines = String(ta.value || '').split('\n');
+      const clamped = Math.min(Math.max(0, targetLine0), Math.max(0, lines.length - 1));
+      let offset = 0;
+      for (let i = 0; i < clamped; i += 1) {
+        offset += lines[i].length + 1;
+      }
+      const lineLen = lines[clamped]?.length || 0;
+      ta.focus();
+      ta.setSelectionRange(offset, offset + lineLen);
+      const ratio = lines.length > 1 ? clamped / lines.length : 0;
+      ta.scrollTop = Math.max(0, Math.round(ta.scrollHeight * ratio - ta.clientHeight * 0.35));
+      return true;
+    }
+
+    const lp = containerEl.querySelector('.lp-container');
+    if (!lp) return false;
+    const blocks = Array.from(lp.querySelectorAll('.lp-block[data-md-start]'));
+    if (blocks.length === 0) return false;
+    const targetBlk =
+      blocks.find((b) => {
+        const s = Number.parseInt(b.dataset.mdStart, 10);
+        const e = Number.parseInt(b.dataset.mdEnd ?? b.dataset.mdStart, 10);
+        return Number.isFinite(s) && targetLine0 >= s && targetLine0 <= e;
+      }) ||
+      blocks.find((b) => Number.parseInt(b.dataset.mdStart, 10) >= targetLine0) ||
+      blocks[blocks.length - 1];
+    if (!targetBlk) return false;
+    targetBlk.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    targetBlk.classList.add('just-dropped');
+    window.setTimeout(() => targetBlk.classList.remove('just-dropped'), 1300);
+    return true;
+  }
+
+  function emitFileOpened(doc) {
+    if (!doc) return;
+    store.emit('file:opened', {
+      path: doc.path,
+      name: doc.name,
+      ext: doc.ext,
+      type: doc.type,
+    });
+  }
+
   async function openFile(pathStr, opts = {}) {
     const targetPath = String(pathStr || '').trim();
     if (!targetPath) return null;
@@ -3785,17 +3874,34 @@ export function initCenterView(containerEl) {
       !opts.skipUnsavedGuard
     ) {
       const t = state.activeDoc.type;
-      if ((t === 'markdown' || t === 'text') && (opts.mode || opts.heading)) {
+      if (t === 'markdown' || t === 'text') {
+        const hasEditingBlock =
+          state.editingBlockRange !== null ||
+          state.editingBlockIdx !== null ||
+          state.editingDraftNewBlock;
+        if (hasEditingBlock) {
+          commitActiveBlock({ reRender: true });
+        }
         const mappedMode = opts.mode === 'preview' ? 'live' : opts.mode === 'edit' ? 'source' : opts.mode;
-        const nextMode = opts.heading ? 'live' : (mappedMode || state.mdMode);
+        let nextMode = state.mdMode;
+        if (opts.heading) {
+          nextMode = 'live';
+        } else if (mappedMode && ['live', 'source', 'mindmap'].includes(mappedMode)) {
+          nextMode = mappedMode;
+        } else if (state.mdMode === 'mindmap' && opts.mode !== 'mindmap') {
+          nextMode = 'live';
+        }
         if (nextMode !== state.mdMode) {
-          commitActiveBlock({ reRender: false });
           state.mdMode = nextMode;
           renderMarkdownMode();
         }
         if (opts.heading) {
           window.requestAnimationFrame(() => scrollToMarkdownHeading(opts.heading));
+        } else if (opts.line != null && opts.line !== '') {
+          window.requestAnimationFrame(() => scrollToMarkdownLine(opts.line));
         }
+      } else if (t === 'office_preview' && opts.heading) {
+        window.requestAnimationFrame(() => scrollToMarkdownHeading(opts.heading));
       } else if (t === 'pdf' && opts.initialPage) {
         setPdfPage(opts.initialPage);
       } else if (t === 'archive' && opts.member) {
@@ -3879,6 +3985,8 @@ export function initCenterView(containerEl) {
           state.mdMode = 'live';
         } else if (reqMode === 'live' || reqMode === 'source' || (reqMode === 'mindmap' && type === 'markdown')) {
           state.mdMode = reqMode;
+        } else if (isCodeOrPlainTextExt(ext)) {
+          state.mdMode = 'source';
         } else {
           state.mdMode = 'live';
         }
@@ -3886,8 +3994,11 @@ export function initCenterView(containerEl) {
         renderMarkdownMode();
         if (opts.heading) {
           window.requestAnimationFrame(() => scrollToMarkdownHeading(opts.heading));
+        } else if (opts.line != null && opts.line !== '') {
+          window.requestAnimationFrame(() => scrollToMarkdownLine(opts.line));
         }
         ensureDocTabOnMobile();
+        emitFileOpened(state.activeDoc);
         return state.activeDoc;
       }
 
@@ -3910,6 +4021,7 @@ export function initCenterView(containerEl) {
         syncActiveFileStore();
         renderPdfMode();
         ensureDocTabOnMobile();
+        emitFileOpened(state.activeDoc);
         return state.activeDoc;
       }
 
@@ -3946,6 +4058,7 @@ export function initCenterView(containerEl) {
         renderExcelMode();
         await loadExcelRows();
         ensureDocTabOnMobile();
+        emitFileOpened(state.activeDoc);
         return state.activeDoc;
       }
 
@@ -3979,6 +4092,7 @@ export function initCenterView(containerEl) {
           await previewArchiveMember(opts.member);
         }
         ensureDocTabOnMobile();
+        emitFileOpened(state.activeDoc);
         return state.activeDoc;
       }
 
@@ -3991,6 +4105,7 @@ export function initCenterView(containerEl) {
         syncActiveFileStore();
         renderImageMode();
         ensureDocTabOnMobile();
+        emitFileOpened(state.activeDoc);
         return state.activeDoc;
       }
 
@@ -4002,12 +4117,17 @@ export function initCenterView(containerEl) {
         syncActiveFileStore();
         renderMediaMode();
         ensureDocTabOnMobile();
+        emitFileOpened(state.activeDoc);
         return state.activeDoc;
       }
 
       syncActiveFileStore();
       renderActiveView();
+      if (type === 'office_preview' && opts.heading) {
+        window.requestAnimationFrame(() => scrollToMarkdownHeading(opts.heading));
+      }
       ensureDocTabOnMobile();
+      emitFileOpened(state.activeDoc);
       return state.activeDoc;
     } catch (err) {
       if (seq !== state.openSeq) return null;
@@ -4233,6 +4353,7 @@ export function initCenterView(containerEl) {
       else if (ds.anchorCell || ds.anchorSheet) type = 'excel';
       else if (ds.anchorMember) type = 'archive';
       else if (ds.anchorTime) type = 'media';
+      else if (!ds.anchorFile && ds.anchorHeading) type = 'heading';
       else if (ds.anchorFile) type = 'file';
     }
     store.emit('anchor:jump', {
@@ -4246,6 +4367,7 @@ export function initCenterView(containerEl) {
       time: ds.anchorTime || '',
       app: ds.anchorApp || '',
       url: ds.anchorUrl || '',
+      raw: ds.anchorRaw || '',
       broken: btn.classList.contains('is-broken'),
     });
   }
@@ -4444,6 +4566,25 @@ export function initCenterView(containerEl) {
     insertDroppedMarkdown({ markdown, label: payload.label || '内容块' });
   });
 
+  // V5 Drag Staging Shelf: insert single or batch items into current note
+  store.on('shelf:insert-current', (payload = {}) => {
+    if (Array.isArray(payload?.items) && payload.items.length > 0) {
+      const joined = payload.items
+        .map((it) => String(it?.markdown ?? it?.text ?? it?.content ?? '').trim())
+        .filter(Boolean)
+        .join('\n\n');
+      if (!joined) return;
+      insertDroppedMarkdown({
+        markdown: joined,
+        label: payload.label || `${payload.items.length} 项暂存内容`,
+      });
+      return;
+    }
+    const markdown = String(payload?.markdown ?? payload?.text ?? payload?.content ?? '').trim();
+    if (!markdown) return;
+    insertDroppedMarkdown({ markdown, label: payload?.label || '暂存内容' });
+  });
+
   // Center Right-Click Menu: AI Polish
   store.on('center:polish-doc', () => triggerAiPolish());
 
@@ -4498,7 +4639,12 @@ export function initCenterView(containerEl) {
         return;
       }
       try {
-        await api.post('/api/apps/launch', { app_id: matched.id });
+        const res = await api.post('/api/apps/launch', { app_id: matched.id });
+        if ((Array.isArray(res?.failed) && res.failed.length > 0) || (Array.isArray(res?.launched) && res.launched.length === 0)) {
+          const reason = res?.failed?.[0]?.reason || `启动 ${matched.name} 失败`;
+          showToast(reason, 'error');
+          return;
+        }
         showToast(`已直达启动：${matched.name}`, 'success');
       } catch (err) {
         showToast(getErrorMsg(err, `启动 ${matched.name} 失败`), 'error');
@@ -4516,6 +4662,44 @@ export function initCenterView(containerEl) {
       } catch {
         window.open(targetUrl, '_blank', 'noopener,noreferrer');
         showToast('已打开外部链接', 'info');
+      }
+      return;
+    }
+
+    // Case C: Same-file heading anchor [[#章节名]]
+    if (anchorType === 'heading' || (!String(payload.file || '').trim() && String(payload.heading || '').trim())) {
+      const heading = String(payload.heading || '').trim();
+      if (!heading) return;
+      if (!state.activeDoc) {
+        showToast('请先打开一篇文档', 'warning');
+        return;
+      }
+      const t = state.activeDoc.type;
+      if (t === 'markdown' || t === 'text') {
+        const hasEditing =
+          state.editingBlockRange !== null ||
+          state.editingBlockIdx !== null ||
+          state.editingDraftNewBlock;
+        if (hasEditing) {
+          commitActiveBlock({ reRender: true });
+        }
+        if (state.mdMode === 'mindmap') {
+          state.mdMode = 'live';
+          renderMarkdownMode();
+        }
+        window.requestAnimationFrame(() => {
+          const ok = scrollToMarkdownHeading(heading);
+          if (ok) {
+            showToast(`已定位至 # ${heading}`, 'success', { duration: 1800 });
+          } else {
+            showToast(`当前文档未找到标题：${heading}`, 'warning');
+          }
+        });
+      } else if (t === 'office_preview') {
+        const ok = scrollToMarkdownHeading(heading);
+        if (!ok) showToast(`当前文档未找到标题：${heading}`, 'warning');
+      } else {
+        showToast('当前文档类型不支持标题锚点跳转', 'warning');
       }
       return;
     }
@@ -4552,25 +4736,49 @@ export function initCenterView(containerEl) {
 
       // Case 1: PDF Page Anchor
       if (anchorType === 'pdf' || payload.page) {
-        const targetPage = Math.max(1, Number.parseInt(payload.page, 10) || 1);
+        const hasExplicitPage = String(payload.page || '').trim() !== '';
+        const parsedPage = hasExplicitPage ? Math.max(1, Number.parseInt(payload.page, 10) || 1) : null;
         const isAlreadyOpen = state.activeDoc?.type === 'pdf' && isSamePath(state.activeDoc.path, targetItem.path);
         if (!isAlreadyOpen) {
-          const opened = await openFile(targetItem.path, { initialPage: targetPage });
+          const opened = await openFile(targetItem.path, parsedPage ? { initialPage: parsedPage } : {});
           if (!opened) return;
-        } else {
-          const clamped = Math.min(targetPage, state.pdf.totalPages || targetPage);
+        } else if (parsedPage) {
+          const clamped = Math.min(parsedPage, state.pdf.totalPages || parsedPage);
           state.pdf.currentPage = clamped;
           updatePdfFrameAndControls();
         }
-        showToast(`已精准跳转至 ${targetItem.name} 第 ${state.pdf.currentPage} 页`, 'success');
+        showToast(
+          parsedPage
+            ? `已精准跳转至 ${targetItem.name} 第 ${state.pdf.currentPage} 页`
+            : `已打开 ${targetItem.name}（第 ${state.pdf.currentPage} 页）`,
+          'success'
+        );
         return;
       }
 
-      // Case 2: Excel Cell Anchor
-      if (anchorType === 'excel' || payload.cell) {
-        const ref = parseExcelCellRef(payload.cell);
+      // Case 2: Excel Cell / Sheet Anchor
+      if (anchorType === 'excel' || payload.cell || payload.sheet) {
+        const rawCell = String(payload.cell || '').trim();
+        const rawSheet = String(payload.sheet || '').trim();
+        if (!rawCell) {
+          const isAlreadyOpen = state.activeDoc?.type === 'excel' && isSamePath(state.activeDoc.path, targetItem.path);
+          if (!isAlreadyOpen) {
+            const opened = await openFile(targetItem.path, rawSheet ? { sheet: rawSheet } : {});
+            if (!opened) return;
+          } else if (rawSheet && rawSheet !== state.excel.currentSheet) {
+            await switchExcelSheet(rawSheet);
+          }
+          const finalSheet = state.excel.currentSheet || rawSheet;
+          showToast(
+            finalSheet ? `已直达表格：${targetItem.name} · ${finalSheet}` : `已直达表格：${targetItem.name}`,
+            'success'
+          );
+          return;
+        }
+
+        const ref = parseExcelCellRef(rawCell);
         if (!ref) {
-          showToast(`无效的单元格坐标：${payload.cell}`, 'warning');
+          showToast(`无效的单元格坐标：${rawCell}`, 'warning');
           return;
         }
 
@@ -4579,16 +4787,16 @@ export function initCenterView(containerEl) {
 
         if (!isAlreadyOpen) {
           const opened = await openFile(targetItem.path, {
-            sheet: payload.sheet || '',
+            sheet: rawSheet,
             page: targetPage,
           });
           if (!opened) return;
         } else {
           const sheets = state.excel.sheets || [];
           const wantedSheet =
-            payload.sheet && sheets.some((s) => s.name === payload.sheet)
-              ? payload.sheet
-              : payload.sheet || state.excel.currentSheet || sheets[0]?.name || '';
+            rawSheet && sheets.some((s) => s.name === rawSheet)
+              ? rawSheet
+              : rawSheet || state.excel.currentSheet || sheets[0]?.name || '';
 
           state.excel.currentSheet = wantedSheet;
           state.excel.q = '';
@@ -4601,7 +4809,7 @@ export function initCenterView(containerEl) {
           await loadExcelRows({ preservePending: true });
         }
 
-        const finalSheet = state.excel.currentSheet || payload.sheet || 'Sheet1';
+        const finalSheet = state.excel.currentSheet || rawSheet || 'Sheet1';
         window.requestAnimationFrame(() => {
           if (highlightExcelCell(ref.row, ref.col, finalSheet)) {
             showToast(`已精准定位至 ${targetItem.name} · ${finalSheet}!${ref.colLetter}${ref.row}`, 'success');
@@ -4659,11 +4867,11 @@ export function initCenterView(containerEl) {
   function isAcceptableBlockDrag(e) {
     const activePayload = store.state.activeDragPayload;
     if (activePayload) {
-      if (activePayload.type === 'module-reorder') return false;
+      if (activePayload.type === 'module-reorder' || activePayload.type === 'tool-module') return false;
       return true;
     }
     const types = Array.from(e.dataTransfer?.types || []);
-    return types.includes(DRAG_MIME);
+    return types.includes(DRAG_MIME) || types.includes('text/plain');
   }
 
   function updatePrecisionDropLine(e) {
@@ -4887,10 +5095,82 @@ export function initCenterView(containerEl) {
     insertDroppedMarkdown(payload, { lineIdx: savedLineIdx, dropEvent: e });
   });
 
+  function buildRawTokenFromEl(el) {
+    if (!el) return '';
+    const raw = el.dataset.anchorRaw || el.dataset.mediaRaw || '';
+    if (raw) return raw;
+    const ds = el.dataset || {};
+    if (ds.anchorType === 'app' && ds.anchorApp) return `[[app:${ds.anchorApp}]]`;
+    if (ds.anchorType === 'url' && ds.anchorUrl) return `[[url:${ds.anchorUrl}]]`;
+    if (ds.anchorType === 'heading' && ds.anchorHeading) return `[[#${ds.anchorHeading}]]`;
+    const file = ds.anchorFile || ds.mediaFile || '';
+    if (!file) return '';
+    if (ds.anchorType === 'pdf') return ds.anchorPage ? `[[${file}#page=${ds.anchorPage}]]` : `[[${file}]]`;
+    if (ds.anchorType === 'excel') {
+      const frag = ds.anchorSheet && ds.anchorCell ? `${ds.anchorSheet}!${ds.anchorCell}` : ds.anchorCell || ds.anchorSheet || '';
+      return frag ? `[[${file}#${frag}]]` : `[[${file}]]`;
+    }
+    if (ds.anchorType === 'archive') return ds.anchorMember ? `[[${file}!${ds.anchorMember}]]` : `[[${file}]]`;
+    if (ds.anchorType === 'media' || el.classList.contains('media-embed-card')) {
+      const t = ds.anchorTime || ds.mediaTime || '';
+      return t ? `[[${file}#t=${t}]]` : `[[${file}]]`;
+    }
+    return ds.anchorHeading ? `[[${file}#${ds.anchorHeading}]]` : `[[${file}]]`;
+  }
+
+  containerEl.addEventListener('dragstart', (e) => {
+    if (e.target.closest('.media-resize-handle, .is-resizing')) {
+      e.preventDefault();
+      return;
+    }
+    const capEl = e.target.closest('.anchor-pill[draggable="true"], .media-embed-card[draggable="true"]');
+    if (capEl) {
+      const rawToken = buildRawTokenFromEl(capEl);
+      if (!rawToken) return;
+      const fileRef = capEl.dataset.anchorFile || capEl.dataset.mediaFile || '';
+      const resolved = fileRef ? findWorkspaceFile(fileRef) : null;
+      const filePath = resolved?.path || capEl.dataset.mediaPath || '';
+      const label =
+        capEl.querySelector('span')?.textContent?.trim() ||
+        capEl.dataset.mediaFile ||
+        capEl.dataset.anchorFile ||
+        capEl.dataset.anchorApp ||
+        '直达胶囊';
+      const blockEl = capEl.closest('.lp-block[data-md-start]');
+      const sourceBlockStart = blockEl ? Number.parseInt(blockEl.dataset.mdStart, 10) : undefined;
+      setDragPayload(e, {
+        type: 'capsule',
+        label,
+        markdown: rawToken,
+        path: filePath,
+        sourceDocPath: state.activeDoc?.path || '',
+        ...(Number.isFinite(sourceBlockStart) ? { sourceBlockStart } : {}),
+      });
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const archiveMemberEl = e.target.closest('[data-archive-member][draggable="true"]');
+    if (archiveMemberEl && state.activeDoc?.type === 'archive') {
+      const member = archiveMemberEl.dataset.archiveMember;
+      if (!member) return;
+      const md = `[[${state.activeDoc.name}!${member}]]`;
+      setDragPayload(e, {
+        type: 'archive-member',
+        label: member,
+        markdown: md,
+        path: state.activeDoc.path,
+      });
+      store.emit('drag:active', true);
+    }
+  });
+
   window.addEventListener('dragend', () => {
     dragDepth = 0;
     showDropOverlay(false);
     removeDropInsertLine();
+    clearDragPayload();
+    store.emit('drag:active', false);
   });
 
   // =========================================================================
@@ -5082,41 +5362,604 @@ export function initCenterView(containerEl) {
     maybeShowPreviewFormatBar();
   });
 
-  // V4 #6: Drag Resize Handle (.media-resize-handle) pointerdown -> pointermove -> pointerup
+  let suppressNextBlockClick = false;
+  let activeHoldSession = null;
+
+  function cancelActiveHoldSession() {
+    if (!activeHoldSession) return;
+    const sess = activeHoldSession;
+    activeHoldSession = null;
+    if (sess.armTimer) window.clearTimeout(sess.armTimer);
+    if (sess.holdTimer) window.clearTimeout(sess.holdTimer);
+    if (sess.blockEl) {
+      sess.blockEl.classList.remove('is-hold-arming', 'is-dragging-source');
+    }
+    if (sess.ghostEl) sess.ghostEl.remove();
+    document.querySelectorAll('#drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
+      el.classList.remove('is-drag-over');
+    });
+    removeDropInsertLine();
+    window.removeEventListener('pointermove', sess.onMove);
+    window.removeEventListener('pointerup', sess.onUp);
+    window.removeEventListener('pointercancel', sess.onCancel);
+    window.removeEventListener('scroll', sess.onCancel, true);
+    window.removeEventListener('keydown', sess.onKeyDown);
+    if (sess.active) {
+      clearDragPayload();
+      store.emit('drag:active', false);
+    }
+  }
+
+  function reorderLiveBlock(startLine, endLine, rawBlock, targetInsertLine) {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    pushUndoSnapshot(doc.content, { immediate: true });
+    const lines = String(doc.content ?? '').replace(/\r\n/g, '\n').split('\n');
+    let delStart = Math.max(0, startLine);
+    let delCount = Math.max(1, endLine - delStart + 1);
+
+    if (
+      delStart > 0 &&
+      lines[delStart - 1]?.trim() === '' &&
+      delStart + delCount < lines.length &&
+      lines[delStart + delCount]?.trim() === ''
+    ) {
+      delCount += 1;
+    } else if (delStart === 0 && delStart + delCount < lines.length && lines[delStart + delCount]?.trim() === '') {
+      delCount += 1;
+    }
+
+    lines.splice(delStart, delCount);
+
+    let adjustedTarget = targetInsertLine;
+    if (adjustedTarget > delStart) {
+      adjustedTarget -= Math.min(delCount, adjustedTarget - delStart);
+    }
+    const remaining = lines.join('\n').replace(/^\n+/, '');
+    const remLines = remaining ? remaining.split('\n') : [];
+    const clampedTarget = Math.max(0, Math.min(remLines.length, adjustedTarget));
+    const beforeSlice = remLines.slice(0, clampedTarget).join('\n').replace(/\n+$/g, '');
+    const actualStartLine = beforeSlice.trim() ? beforeSlice.split('\n').length + 1 : 0;
+    const firstLinePrefix = rawBlock.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 16);
+
+    doc.content = insertMarkdownWithPadding(remaining, clampedTarget, rawBlock);
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.justDroppedTarget = { lineIdx: clampedTarget, actualStartLine, prefix: firstLinePrefix };
+    store.state.activeDocumentText = doc.content;
+    renderMarkdownMode();
+    showToast('已调整段落顺序（Ctrl+Z 可撤回）', 'success');
+  }
+
+  // V4 #6: Drag Resize Handle (.media-resize-handle) & V5 1s Long-Press Block Drag
   containerEl.addEventListener('pointerdown', (e) => {
     const handle = e.target.closest('.media-resize-handle');
-    if (!handle) return;
-    const card = handle.closest('.media-embed-card');
-    if (!card) return;
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (handle) {
+      const card = handle.closest('.media-embed-card');
+      if (!card) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const startX = e.clientX;
+      const startW = card.getBoundingClientRect().width || 420;
+      let currentW = Math.round(Math.max(160, Math.min(960, startW)));
+      card.classList.add('is-resizing');
+
+      const onMove = (ev) => {
+        const dx = ev.clientX - startX;
+        currentW = Math.round(Math.max(160, Math.min(960, startW + dx)));
+        card.style.width = `${currentW}px`;
+        card.style.maxWidth = '100%';
+        const wLabel = card.querySelector('[data-role="media-width-label"]');
+        if (wLabel) wLabel.textContent = `${currentW}px`;
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        card.classList.remove('is-resizing');
+        commitMediaCardWidth(card, currentW);
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
+
+    // V5 1-Second Long-Press Block Dragging (Pointer-Hold Engine)
+    if (e.button !== 0) return;
+    if (!state.activeDoc || (state.activeDoc.type !== 'markdown' && state.activeDoc.type !== 'text')) return;
+    if (state.mdMode !== 'live') return;
+    const blockEl = e.target.closest('.lp-container .lp-block:not(.is-editing)');
+    if (!blockEl) return;
+    if (
+      e.target.closest(
+        '.anchor-pill, .media-embed-card, button, a, input, textarea, select, video, audio, .media-resize-handle, .media-embed-toolbar'
+      )
+    ) {
+      return;
+    }
+
+    const startLine = Number.parseInt(blockEl.dataset.mdStart, 10);
+    const endLineRaw = Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10);
+    if (!Number.isFinite(startLine)) return;
+    const endLine = Number.isFinite(endLineRaw) ? Math.max(startLine, endLineRaw) : startLine;
+    const raw = getMdLines().slice(startLine, endLine + 1).join('\n');
+    if (!raw.trim()) return;
+
+    cancelActiveHoldSession();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const firstLinePreview = raw.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 32) || '笔记段落';
+
+    const sess = {
+      active: false,
+      blockEl,
+      ghostEl: null,
+      armTimer: null,
+      holdTimer: null,
+      payload: {
+        type: 'lp-block',
+        label: firstLinePreview,
+        markdown: raw,
+        sourceDocPath: state.activeDoc.path,
+        startLine,
+        endLine,
+      },
+      onMove: null,
+      onUp: null,
+      onCancel: null,
+      onKeyDown: null,
+    };
+
+    const hasTextSel = () => {
+      const sel = window.getSelection();
+      return Boolean(sel && !sel.isCollapsed && sel.toString().trim().length > 0);
+    };
+
+    sess.onMove = (ev) => {
+      if (!activeHoldSession || activeHoldSession !== sess) return;
+      if (!sess.active) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 6 || hasTextSel()) {
+          cancelActiveHoldSession();
+        }
+        return;
+      }
+      ev.preventDefault();
+      if (sess.ghostEl) {
+        sess.ghostEl.style.transform = `translate3d(${Math.round(ev.clientX + 14)}px, ${Math.round(ev.clientY + 14)}px, 0)`;
+      }
+
+      document.querySelectorAll('#drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
+        el.classList.remove('is-drag-over');
+      });
+
+      const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
+      const shelfEl = hitEl?.closest('#drag-shelf, [data-drop-zone="drag-shelf"]');
+      const rightEl = hitEl?.closest('#right-panel, [data-drop-zone="right-ai"]');
+      if (shelfEl) {
+        shelfEl.classList.add('is-drag-over');
+        removeDropInsertLine();
+      } else if (rightEl) {
+        rightEl.classList.add('is-drag-over');
+        removeDropInsertLine();
+      } else if (containerEl.contains(hitEl) && state.mdMode === 'live') {
+        updatePrecisionDropLine(ev);
+      } else {
+        removeDropInsertLine();
+      }
+    };
+
+    sess.onUp = (ev) => {
+      if (!activeHoldSession || activeHoldSession !== sess) return;
+      if (!sess.active) {
+        cancelActiveHoldSession();
+        return;
+      }
+      const savedLineIdx = dropTargetLineIdx;
+      const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
+      const payload = sess.payload;
+      cancelActiveHoldSession();
+      window.setTimeout(() => {
+        suppressNextBlockClick = false;
+      }, 120);
+
+      if (hitEl?.closest('#drag-shelf, [data-drop-zone="drag-shelf"]')) {
+        store.addToShelf(payload);
+        showToast('已放入拖拽暂存栏', 'success');
+        return;
+      }
+      if (hitEl?.closest('#right-panel, [data-drop-zone="right-ai"]')) {
+        store.emit('right:drop-payload', payload);
+        return;
+      }
+      if (containerEl.contains(hitEl) && Number.isFinite(savedLineIdx)) {
+        if (savedLineIdx < startLine || savedLineIdx > endLine + 1) {
+          reorderLiveBlock(startLine, endLine, raw, savedLineIdx);
+        }
+      }
+    };
+
+    sess.onCancel = () => {
+      if (activeHoldSession === sess) {
+        cancelActiveHoldSession();
+        window.setTimeout(() => {
+          suppressNextBlockClick = false;
+        }, 80);
+      }
+    };
+
+    sess.onKeyDown = (ev) => {
+      if (ev.key === 'Escape' && activeHoldSession === sess) {
+        ev.preventDefault();
+        cancelActiveHoldSession();
+        window.setTimeout(() => {
+          suppressNextBlockClick = false;
+        }, 80);
+      }
+    };
+
+    activeHoldSession = sess;
+    window.addEventListener('pointermove', sess.onMove);
+    window.addEventListener('pointerup', sess.onUp);
+    window.addEventListener('pointercancel', sess.onCancel);
+    window.addEventListener('scroll', sess.onCancel, true);
+    window.addEventListener('keydown', sess.onKeyDown);
+
+    sess.armTimer = window.setTimeout(() => {
+      if (activeHoldSession !== sess || sess.active) return;
+      if (hasTextSel()) {
+        cancelActiveHoldSession();
+        return;
+      }
+      blockEl.classList.add('is-hold-arming');
+    }, 220);
+
+    sess.holdTimer = window.setTimeout(() => {
+      if (activeHoldSession !== sess) return;
+      if (hasTextSel()) {
+        cancelActiveHoldSession();
+        return;
+      }
+      sess.active = true;
+      suppressNextBlockClick = true;
+      hideFormatBar();
+      window.getSelection()?.removeAllRanges?.();
+      blockEl.classList.remove('is-hold-arming');
+      blockEl.classList.add('is-dragging-source');
+      store.state.activeDragPayload = sess.payload;
+
+      const ghost = document.createElement('div');
+      ghost.className = 'lp-drag-ghost';
+      ghost.style.pointerEvents = 'none';
+      ghost.style.transform = `translate3d(${Math.round(startX + 14)}px, ${Math.round(startY + 14)}px, 0)`;
+      ghost.textContent = `⠿ ${firstLinePreview}`;
+      document.body.appendChild(ghost);
+      sess.ghostEl = ghost;
+      store.emit('drag:active', true);
+    }, 1000);
+  });
+
+  // =========================================================================
+  // V5 Capsule / Media Card Right-Click Context Menu (#capsule-context-menu)
+  // =========================================================================
+  let capsuleMenuTarget = null;
+  let capsuleMenuListenersBound = false;
+
+  function ensureCapsuleMenuEl() {
+    let menu = document.getElementById('capsule-context-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'capsule-context-menu';
+      menu.className = 'context-menu capsule-context-menu';
+      menu.hidden = true;
+      document.body.appendChild(menu);
+    }
+    if (!capsuleMenuListenersBound) {
+      capsuleMenuListenersBound = true;
+      document.addEventListener('mousedown', (ev) => {
+        const cur = document.getElementById('capsule-context-menu');
+        if (cur && !cur.hidden && !cur.contains(ev.target)) {
+          hideCapsuleContextMenu();
+        }
+      });
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') hideCapsuleContextMenu();
+      });
+      window.addEventListener('blur', hideCapsuleContextMenu);
+      window.addEventListener('resize', hideCapsuleContextMenu);
+    }
+    return menu;
+  }
+
+  function hideCapsuleContextMenu() {
+    capsuleMenuTarget = null;
+    const menu = document.getElementById('capsule-context-menu');
+    if (!menu) return;
+    menu.hidden = true;
+    menu.classList.remove('is-open');
+    menu.innerHTML = '';
+  }
+
+  function replaceOrRemoveTokenInDoc(rawToken, replacementMd, blockRange) {
+    const doc = state.activeDoc;
+    if (!doc || !rawToken) return false;
+    const fullText = String(doc.content ?? '').replace(/\r\n/g, '\n');
+
+    const applyInSlice = (sliceStr) => {
+      const idx = sliceStr.indexOf(rawToken);
+      if (idx < 0) return null;
+      const before = sliceStr.slice(0, idx);
+      const after = sliceStr.slice(idx + rawToken.length);
+      if (!replacementMd) {
+        // Removing token cleanly
+        const joined = `${before}${after}`;
+        return joined
+          .split('\n')
+          .filter((ln, i, arr) => !(ln.trim() === '' && arr.length > 1 && (i === 0 || arr[i - 1].trim() === '')))
+          .join('\n');
+      }
+      const bTrim = before.replace(/[ \t]+$/g, '');
+      const aTrim = after.replace(/^[ \t]+/g, '');
+      const pre = bTrim ? `${bTrim.replace(/\n+$/g, '')}\n\n` : '';
+      const suf = aTrim ? `\n\n${aTrim.replace(/^\n+/g, '')}` : '';
+      return `${pre}${replacementMd.trim()}${suf}`;
+    };
+
+    let nextFull = null;
+    if (blockRange && Number.isFinite(blockRange.startLine)) {
+      const lines = fullText.split('\n');
+      const sIdx = Math.max(0, blockRange.startLine);
+      const eIdx = Math.min(lines.length - 1, Math.max(sIdx, blockRange.endLine ?? sIdx));
+      const slice = lines.slice(sIdx, eIdx + 1).join('\n');
+      const replacedSlice = applyInSlice(slice);
+      if (replacedSlice !== null) {
+        const repLines = replacedSlice ? replacedSlice.split('\n') : [];
+        lines.splice(sIdx, eIdx - sIdx + 1, ...repLines);
+        nextFull = lines.join('\n');
+      }
+    }
+
+    if (nextFull === null) {
+      nextFull = applyInSlice(fullText);
+    }
+    if (nextFull === null) return false;
+
+    nextFull = nextFull.replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
+    if (nextFull && !nextFull.endsWith('\n')) nextFull += '\n';
+
+    pushUndoSnapshot(doc.content, { immediate: true });
+    doc.content = nextFull;
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    store.state.activeDocumentText = nextFull;
+    renderMarkdownMode();
+    return true;
+  }
+
+  async function handleCapsuleMenuAction(act) {
+    const info = capsuleMenuTarget;
+    hideCapsuleContextMenu();
+    if (!info) return;
+
+    const { el, anchorType, rawToken, fileRef, page, sheet, cell, member, label, blockRange } = info;
+    const doc = state.activeDoc;
+    const isEditableDoc = Boolean(doc && (doc.type === 'markdown' || doc.type === 'text'));
+
+    if (act === 'open') {
+      if (el.classList.contains('media-embed-card')) {
+        const mediaPath = el.dataset.mediaPath || '';
+        const timeStr = el.dataset.mediaTime || '';
+        const sec = timeStr ? parseMediaTimeSeconds(timeStr) : 0;
+        const target = (mediaPath ? { path: mediaPath, name: getBaseName(mediaPath) } : null) || findWorkspaceFile(fileRef);
+        if (target?.path) {
+          await openFile(target.path, sec > 0 ? { initialTime: sec, autoPlay: true } : {});
+        } else if (fileRef) {
+          store.emit('anchor:jump', { type: 'media', file: fileRef, time: timeStr });
+        }
+      } else {
+        handleAnchorClick(el);
+      }
+      return;
+    }
+
+    if (act === 'copy') {
+      copyInternal(rawToken, '已复制直达语法');
+      return;
+    }
+
+    if (act === 'to-shelf') {
+      const target = fileRef ? findWorkspaceFile(fileRef) : null;
+      store.addToShelf({
+        type: 'capsule',
+        label: label || fileRef || '直达胶囊',
+        markdown: rawToken,
+        path: target?.path || el.dataset.mediaPath || '',
+      });
+      showToast('已放入拖拽暂存栏', 'success');
+      return;
+    }
+
+    if (act === 'remove') {
+      if (!isEditableDoc) return;
+      commitActiveBlock({ reRender: false });
+      const ok = replaceOrRemoveTokenInDoc(rawToken, '', blockRange);
+      if (ok) {
+        showToast('已从笔记移除此模块（Ctrl+Z 可撤回）', 'success');
+      } else {
+        showToast('未能在原文定位该胶囊语法', 'warning');
+      }
+      return;
+    }
+
+    if (act === 'expand-replace' || act === 'expand-keep') {
+      if (!isEditableDoc) {
+        showToast('当前文档不支持展开写入', 'warning');
+        return;
+      }
+      if (anchorType === 'app' || anchorType === 'url') {
+        showToast('不支持将软件或网址直达胶囊展开为文件内容', 'warning');
+        return;
+      }
+      if (anchorType === 'heading' || !fileRef) {
+        showToast('仅支持将关联文件胶囊展开为文件内容', 'warning');
+        return;
+      }
+
+      let targetItem = findWorkspaceFile(fileRef);
+      if (!targetItem) {
+        targetItem = await tryRelocateMissingFile(fileRef);
+      }
+      if (!targetItem?.path) {
+        showToast(`未找到目标文件：${fileRef}`, 'warning');
+        return;
+      }
+
+      try {
+        const reqPayload = {
+          path: targetItem.path,
+          ...(page ? { page: Number.parseInt(page, 10) || undefined } : {}),
+          ...(sheet ? { sheet } : {}),
+          ...(cell ? { cell } : {}),
+          ...(member ? { member } : {}),
+        };
+        const res =
+          typeof api.expandFileContent === 'function'
+            ? await api.expandFileContent(reqPayload)
+            : await api.post('/api/files/expand-content', reqPayload);
+
+        if (!res?.supported) {
+          showToast(res?.reason || '不支持此文件类型展开', 'warning');
+          return;
+        }
+        const expandedMd = String(res.markdown || '').trim();
+        if (!expandedMd) {
+          showToast('目标文件内容为空，无可展开内容', 'warning');
+          return;
+        }
+
+        commitActiveBlock({ reRender: false });
+        if (act === 'expand-replace') {
+          const ok = replaceOrRemoveTokenInDoc(rawToken, expandedMd, blockRange);
+          if (ok) {
+            showToast('已展开内容填入（Ctrl+Z 可一键还原）', 'success');
+          } else {
+            showToast('未能定位原胶囊，无法替换', 'warning');
+          }
+        } else {
+          pushUndoSnapshot(doc.content, { immediate: true });
+          const lines = getMdLines();
+          const insertLine = blockRange && Number.isFinite(blockRange.endLine) ? blockRange.endLine + 1 : lines.length;
+          doc.content = insertMarkdownWithPadding(doc.content || '', insertLine, expandedMd);
+          state.dirty = true;
+          state.editingBlockIdx = null;
+          state.editingBlockRange = null;
+          store.state.activeDocumentText = doc.content;
+          renderMarkdownMode();
+          showToast('已展开内容并保留原胶囊（Ctrl+Z 可一键还原）', 'success');
+        }
+      } catch (err) {
+        showToast(getErrorMsg(err, '展开文件内容失败'), 'error');
+      }
+    }
+  }
+
+  containerEl.addEventListener('contextmenu', (e) => {
+    const capEl = e.target.closest('.anchor-pill, .media-embed-card');
+    if (!capEl) return;
     e.preventDefault();
     e.stopPropagation();
 
-    const startX = e.clientX;
-    const startW = card.getBoundingClientRect().width || 420;
-    let currentW = Math.round(Math.max(160, Math.min(960, startW)));
-    card.classList.add('is-resizing');
+    const globalMenu = document.getElementById('context-menu');
+    if (globalMenu) {
+      globalMenu.classList.add('hidden');
+      globalMenu.classList.remove('is-open');
+    }
 
-    const onMove = (ev) => {
-      const dx = ev.clientX - startX;
-      currentW = Math.round(Math.max(160, Math.min(960, startW + dx)));
-      card.style.width = `${currentW}px`;
-      card.style.maxWidth = '100%';
-      const wLabel = card.querySelector('[data-role="media-width-label"]');
-      if (wLabel) wLabel.textContent = `${currentW}px`;
+    const ds = capEl.dataset || {};
+    const anchorType =
+      ds.anchorType ||
+      (capEl.classList.contains('media-embed-card') ? 'media' : ds.anchorApp ? 'app' : ds.anchorUrl ? 'url' : 'file');
+    const rawToken = buildRawTokenFromEl(capEl);
+    const fileRef = ds.anchorFile || ds.mediaFile || '';
+    const blockEl = capEl.closest('.lp-block[data-md-start]');
+    const blockRange = blockEl
+      ? {
+          startLine: Number.parseInt(blockEl.dataset.mdStart, 10),
+          endLine: Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10),
+        }
+      : null;
+    const isEditableDoc = Boolean(state.activeDoc && (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text'));
+
+    capsuleMenuTarget = {
+      el: capEl,
+      anchorType,
+      rawToken,
+      fileRef,
+      page: ds.anchorPage || '',
+      sheet: ds.anchorSheet || '',
+      cell: ds.anchorCell || '',
+      member: ds.anchorMember || '',
+      label: capEl.querySelector('span, .media-embed-label')?.textContent?.trim() || fileRef || ds.anchorApp || '直达胶囊',
+      blockRange,
     };
 
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-      card.classList.remove('is-resizing');
-      commitMediaCardWidth(card, currentW);
-    };
+    const menu = ensureCapsuleMenuEl();
+    menu.innerHTML = `
+      ${
+        isEditableDoc
+          ? `
+            <button type="button" class="context-menu-item" data-cap-act="expand-replace" role="menuitem">
+              <span class="ctx-item-left"><span>📄</span><span>一键展开内容填入此处</span></span>
+            </button>
+            <button type="button" class="context-menu-item" data-cap-act="expand-keep" role="menuitem">
+              <span class="ctx-item-left"><span>📎</span><span>展开并保留原胶囊</span></span>
+            </button>
+            <div class="context-menu-sep" role="separator"></div>
+          `
+          : ''
+      }
+      <button type="button" class="context-menu-item" data-cap-act="open" role="menuitem">
+        <span class="ctx-item-left"><span>↗</span><span>打开原文件</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-cap-act="to-shelf" role="menuitem">
+        <span class="ctx-item-left"><span>📥</span><span>放入拖拽暂存栏</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-cap-act="copy" role="menuitem">
+        <span class="ctx-item-left"><span>📋</span><span>复制直达语法</span></span>
+      </button>
+      ${
+        isEditableDoc
+          ? `
+            <div class="context-menu-sep" role="separator"></div>
+            <button type="button" class="context-menu-item" data-cap-act="remove" role="menuitem" style="color:var(--danger);">
+              <span class="ctx-item-left"><span>🗑</span><span>从笔记移除此模块</span></span>
+            </button>
+          `
+          : ''
+      }
+    `;
 
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
+    menu.querySelectorAll('[data-cap-act]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        handleCapsuleMenuAction(btn.dataset.capAct);
+      });
+    });
+
+    menu.hidden = false;
+    menu.classList.remove('hidden');
+    menu.classList.add('is-open');
+    const rect = menu.getBoundingClientRect();
+    const maxX = Math.max(8, window.innerWidth - (rect.width || 220) - 10);
+    const maxY = Math.max(8, window.innerHeight - (rect.height || 200) - 10);
+    menu.style.left = `${Math.min(maxX, Math.max(8, e.clientX))}px`;
+    menu.style.top = `${Math.min(maxY, Math.max(8, e.clientY))}px`;
   });
 
   document.addEventListener('mousedown', (e) => {
@@ -5223,6 +6066,64 @@ export function initCenterView(containerEl) {
     const anchorPill = e.target.closest('.anchor-pill');
     if (anchorPill) {
       handleAnchorClick(anchorPill);
+      return;
+    }
+
+    // 1a. Standard Markdown <a href="..."> link interceptor (prevent WebView2 404 navigation)
+    const mdLink = e.target.closest('.md-preview a[href], .lp-container a[href]');
+    if (mdLink && !mdLink.closest('.anchor-pill')) {
+      const rawHref = (mdLink.getAttribute('href') || '').trim();
+      if (!rawHref) {
+        e.preventDefault();
+        return;
+      }
+      if (/^mailto:/i.test(rawHref)) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      if (/^https?:\/\//i.test(rawHref)) {
+        store.emit('anchor:jump', { type: 'url', url: rawHref });
+        return;
+      }
+      if (rawHref.startsWith('#')) {
+        let heading = rawHref.slice(1);
+        try {
+          heading = decodeURIComponent(heading);
+        } catch {
+          // keep raw
+        }
+        store.emit('anchor:jump', { type: 'heading', file: '', heading });
+        return;
+      }
+      const hashPos = rawHref.indexOf('#');
+      let filePart = hashPos >= 0 ? rawHref.slice(0, hashPos) : rawHref;
+      let fragPart = hashPos >= 0 ? rawHref.slice(hashPos + 1) : '';
+      try {
+        filePart = decodeURIComponent(filePart);
+        fragPart = decodeURIComponent(fragPart);
+      } catch {
+        // keep raw
+      }
+      const linkExt = getExtLower(filePart);
+      if (linkExt === '.pdf') {
+        const pm = fragPart.match(/^(?:page=|p\.?)?(\d+)$/i);
+        store.emit('anchor:jump', { type: 'pdf', file: filePart, page: pm ? pm[1] : '' });
+      } else if (['.xlsx', '.xlsm', '.xls'].includes(linkExt)) {
+        const sc = fragPart.match(/^([^!]+)!([A-Za-z]+\d+)$/);
+        const co = fragPart.match(/^([A-Za-z]+\d+)$/);
+        store.emit('anchor:jump', {
+          type: 'excel',
+          file: filePart,
+          sheet: sc ? sc[1] : (!co && fragPart ? fragPart : ''),
+          cell: sc ? sc[2].toUpperCase() : co ? co[1].toUpperCase() : '',
+        });
+      } else if (['.mp4', '.webm', '.mov', '.mkv', '.mp3', '.wav', '.m4a', '.ogg'].includes(linkExt)) {
+        const tm = fragPart.match(/^t=(.+)$/i);
+        store.emit('anchor:jump', { type: 'media', file: filePart, time: tm ? tm[1] : fragPart });
+      } else {
+        store.emit('anchor:jump', { type: 'file', file: filePart, heading: fragPart });
+      }
       return;
     }
 
@@ -5548,6 +6449,10 @@ export function initCenterView(containerEl) {
       (state.activeDoc?.type === 'markdown' || state.activeDoc?.type === 'text') &&
       state.mdMode === 'live'
     ) {
+      if (suppressNextBlockClick) {
+        suppressNextBlockClick = false;
+        return;
+      }
       const lpBlock = e.target.closest('.lp-container .lp-block');
       if (lpBlock && !lpBlock.classList.contains('is-editing')) {
         if (

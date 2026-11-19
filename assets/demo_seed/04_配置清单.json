@@ -1,0 +1,24 @@
+{
+  "project": "SmartLocalNote",
+  "version": "5.0.0",
+  "architecture": {
+    "backend": "FastAPI + Thick Core (zero FastAPI in core/)",
+    "frontend": "Vanilla ES6 Modules + CSS Design Tokens",
+    "safe_io": "Whitelist + Atomic Replace + Max 15 .bak Snapshots"
+  },
+  "supported_formats": [
+    ".md",
+    ".txt",
+    ".py",
+    ".json",
+    ".xlsx",
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".zip",
+    ".png",
+    ".wav",
+    ".mp4"
+  ],
+  "test_entry": "00_V5全流程实测清单.md"
+}

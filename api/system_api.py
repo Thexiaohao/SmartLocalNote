@@ -7,12 +7,12 @@ import os
 import sys
 from typing import Any, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api import ok
-from config import FREE_AI_PRESETS, get_default_notes_dir, get_local_ip, load_config, update_config
+from config import FREE_AI_PRESETS, get_default_notes_dir, get_local_ip, load_config, seed_test_suite, update_config
 from core import app_launcher, scheduler
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -36,6 +36,10 @@ class ConfigPatch(BaseModel):
 
 class PickPathBody(BaseModel):
     mode: Literal["file", "folder", "app"] = "file"
+
+
+class SeedTestSuiteBody(BaseModel):
+    reset: bool = True
 
 
 @router.get("/system/info")
@@ -69,6 +73,12 @@ def put_system_config(payload: ConfigPatch) -> dict:
 @router.post("/system/pick-path")
 def pick_path(payload: PickPathBody) -> dict:
     return ok(app_launcher.pick_local_path(payload.mode))
+
+
+@router.post("/system/seed-test-suite")
+def post_seed_test_suite(payload: SeedTestSuiteBody | None = Body(default=None)) -> dict:
+    reset = True if payload is None else bool(payload.reset)
+    return ok(seed_test_suite(reset=reset), message="V5 全格式实测流程包已同步")
 
 
 @router.get("/events")

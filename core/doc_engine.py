@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+import csv
+import io
 import json
 import mimetypes
 import os
@@ -46,6 +48,7 @@ _EXTRA_MIME_TYPES = {
     ".webp": "image/webp",
     ".svg": "image/svg+xml",
     ".bmp": "image/bmp",
+    ".aac": "audio/aac",
     ".m4a": "audio/mp4",
     ".ogg": "audio/ogg",
     ".flac": "audio/flac",
@@ -55,6 +58,8 @@ _EXTRA_MIME_TYPES = {
     ".webm": "video/webm",
     ".mov": "video/quicktime",
     ".mkv": "video/x-matroska",
+    ".m4v": "video/x-m4v",
+    ".avi": "video/x-msvideo",
 }
 
 
@@ -239,9 +244,34 @@ def create_note(title: str, content: str = "", node_id: str | None = None) -> di
     }
 
 
+def companion_note_path_for(target_path: Path) -> Path:
+    """Map a file to its companion Markdown note inside default_notes_dir without cross-format collisions."""
+    notes_dir = get_default_notes_dir()
+    ext = target_path.suffix.lower()
+    if ext == ".pdf" or not ext:
+        return (notes_dir / f"{target_path.stem}_伴生笔记.md").resolve()
+
+    ext_no_dot = re.sub(r"[^a-zA-Z0-9_-]", "", ext.lstrip(".")) or "file"
+    typed_path = (notes_dir / f"{target_path.stem}_{ext_no_dot}_伴生笔记.md").resolve()
+    if typed_path.exists():
+        return typed_path
+
+    same_stem_pdf = target_path.with_suffix(".pdf")
+    legacy_path = (notes_dir / f"{target_path.stem}_伴生笔记.md").resolve()
+    if not same_stem_pdf.exists() and legacy_path.exists():
+        try:
+            legacy_text = _read_text_with_fallback(legacy_path)
+            if f"[[{target_path.name}" in legacy_text and f"[[{target_path.stem}.pdf" not in legacy_text:
+                return legacy_path
+        except OSError:
+            pass
+
+    return typed_path
+
+
 def companion_note_path_for_pdf(pdf_path: Path) -> Path:
-    """Map a file to its companion Markdown note inside default_notes_dir."""
-    return (get_default_notes_dir() / f"{pdf_path.stem}_伴生笔记.md").resolve()
+    """Backward-compatible wrapper mapping a file to its companion Markdown note."""
+    return companion_note_path_for(pdf_path)
 
 
 def guess_mime_type(path: Path | str) -> str:
@@ -379,9 +409,10 @@ def _inspect_archive(target: Path) -> dict[str, Any]:
     }
 
 
-def _extract_office_preview_markdown(target: Path) -> str:
+def _extract_office_preview_markdown(target: Path, max_chars: int = _OFFICE_PREVIEW_MAX_CHARS) -> str:
     """Extract readable paragraphs/slides from .docx or .pptx using stdlib zipfile + ElementTree."""
     ext = target.suffix.lower()
+    limit = max(200, int(max_chars or _OFFICE_PREVIEW_MAX_CHARS))
     try:
         with zipfile.ZipFile(target, "r") as zf:
             if ext == ".docx":
@@ -400,7 +431,7 @@ def _extract_office_preview_markdown(target: Path) -> str:
                         if line:
                             paragraphs.append(line)
                 combined = "\n\n".join(paragraphs) if paragraphs else "（DOCX 文档暂无可提取的纯文本段落）"
-                return combined[:_OFFICE_PREVIEW_MAX_CHARS]
+                return combined[:limit]
 
             if ext == ".pptx":
                 slide_names = [
@@ -424,7 +455,7 @@ def _extract_office_preview_markdown(target: Path) -> str:
                     body = "\n".join(f"- {ln}" for ln in lines) if lines else "（本页暂无文本）"
                     slides_md.append(f"## Slide {s_idx}\n{body}")
                 combined = "\n\n".join(slides_md) if slides_md else "（PPTX 演示文稿暂无可提取的文本内容）"
-                return combined[:_OFFICE_PREVIEW_MAX_CHARS]
+                return combined[:limit]
     except (zipfile.BadZipFile, ET.ParseError, OSError) as exc:
         raise ValueError(f"无法解析 Office 文档：{exc}") from exc
 
@@ -571,10 +602,17 @@ def read_document(path_str: str) -> dict[str, Any]:
     }
 
 
+def _norm_archive_member_name(name: str) -> str:
+    cleaned = str(name or "").replace("\\", "/").strip().lstrip("/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:].lstrip("/")
+    return cleaned
+
+
 def read_archive_entry(path_str: str, member: str) -> dict[str, Any]:
     """Read a single member from a `.zip`/`.tar*`/`.gz` archive strictly in memory (max 512KB)."""
     target = safe_io.resolve_safe_path(path_str, must_exist=True)
-    clean_member = str(member or "").replace("\\", "/").lstrip("/")
+    clean_member = _norm_archive_member_name(member)
     if not clean_member or "\x00" in clean_member or ".." in Path(clean_member).parts:
         raise PermissionError("非法压缩包成员路径")
 
@@ -587,7 +625,7 @@ def read_archive_entry(path_str: str, member: str) -> dict[str, Any]:
         with zipfile.ZipFile(target, "r") as zf:
             matched_info: zipfile.ZipInfo | None = None
             for info in zf.infolist():
-                decoded_name = _decode_zip_member_name(info).replace("\\", "/").lstrip("/")
+                decoded_name = _norm_archive_member_name(_decode_zip_member_name(info))
                 if info.filename == member or decoded_name == clean_member:
                     matched_info = info
                     break
@@ -605,7 +643,7 @@ def read_archive_entry(path_str: str, member: str) -> dict[str, Any]:
         with tarfile.open(target, "r:*") as tf:
             matched_member: tarfile.TarInfo | None = None
             for m in tf.getmembers():
-                if m.name == member or m.name.replace("\\", "/").lstrip("/") == clean_member:
+                if m.name == member or _norm_archive_member_name(m.name) == clean_member:
                     matched_member = m
                     break
             if matched_member is None:
@@ -1074,3 +1112,317 @@ def render_pdf_page_png(path_str: str, page: int = 1, zoom: float = 1.6) -> byte
             _PDF_PAGE_CACHE.popitem(last=False)
 
     return png_bytes
+
+
+_INLINE_CODE_LANG_MAP = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".json": "json",
+    ".css": "css",
+    ".html": "html",
+    ".xml": "xml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".ini": "ini",
+    ".toml": "toml",
+    ".log": "log",
+    ".sql": "sql",
+    ".sh": "bash",
+    ".bat": "bat",
+    ".csv": "csv",
+}
+
+_OFFICE_EMPTY_SENTINELS = {
+    "（DOCX 文档中未找到正文 XML 内容）",
+    "（DOCX 文档暂无可提取的纯文本段落）",
+    "（PPTX 演示文稿暂无可提取的文本内容）",
+}
+
+
+def _truncate_inline_markdown(text: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, False
+    notice = f"\n\n> *（内容超过 {max_chars} 字，已自动截断）*"
+    budget = max(80, max_chars - len(notice))
+    cut = text[:budget]
+    nl = cut.rfind("\n")
+    if nl > int(budget * 0.6):
+        cut = cut[:nl]
+    return cut.rstrip() + notice, True
+
+
+def _wrap_fenced_code(code: str, lang: str, max_chars: int) -> tuple[str, bool]:
+    trimmed = code.rstrip()
+    fence = "````" if "```" in trimmed else "```"
+    overhead = len(fence) * 2 + len(lang) + 2
+    truncated = False
+    if len(trimmed) + overhead > max_chars:
+        notice = "\n# ...（内容已截断）"
+        budget = max(80, max_chars - overhead - len(notice))
+        cut = trimmed[:budget]
+        nl = cut.rfind("\n")
+        if nl > int(budget * 0.6):
+            cut = cut[:nl]
+        trimmed = cut.rstrip() + notice
+        truncated = True
+    return f"{fence}{lang}\n{trimmed}\n{fence}", truncated
+
+
+def _csv_to_markdown(csv_text: str, max_chars: int) -> tuple[str, bool]:
+    rows = [r for r in csv.reader(io.StringIO(csv_text)) if any(str(c).strip() for c in r)]
+    if not rows:
+        return "（CSV 文件为空）", False
+    max_cols = max(len(r) for r in rows)
+    if max_cols <= 1:
+        return _wrap_fenced_code(csv_text, "csv", max_chars)
+
+    shown_cols = min(max_cols, 12)
+    header = rows[0]
+    data_rows = rows[1:]
+    max_data_rows = 35
+    shown_data = data_rows[:max_data_rows]
+
+    def _fmt_cell(val: str) -> str:
+        return str(val or "").replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+    head_cells = [_fmt_cell(header[i] if i < len(header) else f"列{i + 1}") or f"列{i + 1}" for i in range(shown_cols)]
+    lines = [
+        "| " + " | ".join(head_cells) + " |",
+        "| " + " | ".join(["---"] * shown_cols) + " |",
+    ]
+    for r in shown_data:
+        cells = [_fmt_cell(r[i] if i < len(r) else "") for i in range(shown_cols)]
+        lines.append("| " + " | ".join(cells) + " |")
+
+    truncated = len(data_rows) > max_data_rows or max_cols > shown_cols
+    if truncated:
+        lines.append(f"\n> *（CSV 共 {len(data_rows)} 行 × {max_cols} 列，已展示前 {len(shown_data)} 行 × {shown_cols} 列）*")
+
+    md, char_trunc = _truncate_inline_markdown("\n".join(lines), max_chars)
+    return md, truncated or char_trunc
+
+
+def _format_inline_text_payload(raw_text: str, ext: str, max_chars: int) -> tuple[str, bool]:
+    cleaned = raw_text.rstrip()
+    if ext in (".md", ".txt", ""):
+        return _truncate_inline_markdown(cleaned, max_chars)
+    if ext == ".csv":
+        return _csv_to_markdown(cleaned, max_chars)
+    lang = _INLINE_CODE_LANG_MAP.get(ext, "")
+    return _wrap_fenced_code(cleaned, lang, max_chars)
+
+
+def _extract_xlsx_inline(
+    target: Path,
+    sheet: str | None,
+    cell: str | None,
+    max_chars: int,
+) -> dict[str, Any]:
+    from core import excel_engine
+
+    sheets_meta = excel_engine.get_sheets(str(target))
+    sheets_list = sheets_meta.get("sheets", [])
+    if not sheets_list:
+        return {"supported": False, "source_name": target.name, "reason": "Excel 文件不包含任何工作表"}
+
+    target_sheet = (sheet or "").strip() or sheets_list[0]["name"]
+    rows_res = excel_engine.get_rows(str(target), sheet=target_sheet, page=1, page_size=500)
+    headers: list[str] = rows_res.get("headers") or []
+    all_rows: list[dict[str, Any]] = rows_res.get("rows") or []
+    total_rows = int(rows_res.get("total_rows") or len(all_rows))
+
+    target_row_num: int | None = None
+    if cell:
+        m = re.search(r"(\d+)$", str(cell).strip())
+        if m:
+            target_row_num = int(m.group(1))
+
+    if target_row_num is not None and target_row_num >= 2 and all_rows:
+        hit_idx = 0
+        for idx, r in enumerate(all_rows):
+            if r.get("row_num") == target_row_num:
+                hit_idx = idx
+                break
+        start = max(0, hit_idx - 10)
+        selected_rows = all_rows[start : start + 25]
+    else:
+        selected_rows = all_rows[:40]
+
+    shown_cols = min(max(1, len(headers)), 12)
+    head_labels = [str(h).replace("|", "\\|").replace("\n", " ").strip() for h in headers[:shown_cols]]
+    if not head_labels:
+        head_labels = [f"列{i + 1}" for i in range(shown_cols)]
+
+    lines = [
+        f"### {target.name} · {target_sheet}" + (f"（定位 `{cell}`）" if cell else ""),
+        "",
+        "| 行号 | " + " | ".join(head_labels) + " |",
+        "| --- | " + " | ".join(["---"] * shown_cols) + " |",
+    ]
+    for r in selected_rows:
+        cells = r.get("cells") or []
+        formatted = [
+            str(cells[i] if i < len(cells) else "").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+            for i in range(shown_cols)
+        ]
+        lines.append(f"| {r.get('row_num', '')} | " + " | ".join(formatted) + " |")
+
+    if not selected_rows:
+        lines.append("| - | " + " | ".join(["（空）"] * shown_cols) + " |")
+
+    truncated = total_rows > len(selected_rows) or len(headers) > shown_cols
+    if truncated:
+        lines.append(f"\n> *（工作表「{target_sheet}」共 {total_rows} 行数据，当前展示 {len(selected_rows)} 行）*")
+
+    md, char_trunc = _truncate_inline_markdown("\n".join(lines), max_chars)
+    return {
+        "supported": True,
+        "kind": "xlsx",
+        "source_name": target.name,
+        "title": f"{target.name} · {target_sheet}",
+        "markdown": md,
+        "truncated": truncated or char_trunc,
+    }
+
+
+def _extract_pdf_inline(target: Path, page: int | None, max_chars: int) -> dict[str, Any]:
+    import pymupdf
+
+    doc = pymupdf.open(target)
+    try:
+        total_pages = len(doc)
+        if total_pages == 0:
+            return {"supported": False, "source_name": target.name, "reason": "该 PDF 文件为空，无可读页面"}
+
+        if page is not None:
+            page_num = int(page)
+            if page_num < 1 or page_num > total_pages:
+                raise ValueError(f"页码越界：{page_num}（PDF 共 {total_pages} 页）")
+            text = (doc[page_num - 1].get_text("text") or "").strip()
+            if not text:
+                return {
+                    "supported": False,
+                    "source_name": target.name,
+                    "reason": "该 PDF 无可提取的文字层（可能为纯图片扫描件），不支持直接展开为文本",
+                }
+            md, trunc = _truncate_inline_markdown(f"### {target.name} · 第 {page_num} 页\n\n{text}", max_chars)
+            return {
+                "supported": True,
+                "kind": "pdf",
+                "source_name": target.name,
+                "title": f"{target.name} · 第 {page_num} 页",
+                "markdown": md,
+                "truncated": trunc,
+            }
+
+        limit = min(5, total_pages)
+        blocks: list[str] = []
+        for idx in range(limit):
+            text = (doc[idx].get_text("text") or "").strip()
+            if text:
+                blocks.append(f"#### 第 {idx + 1} 页\n\n{text}")
+        if not blocks:
+            return {
+                "supported": False,
+                "source_name": target.name,
+                "reason": "该 PDF 无可提取的文字层（可能为纯图片扫描件），不支持直接展开为文本",
+            }
+        truncated = total_pages > limit
+        if truncated:
+            blocks.append(f"> *（PDF 共 {total_pages} 页，已展开前 {limit} 页）*")
+        md, char_trunc = _truncate_inline_markdown("\n\n".join(blocks), max_chars)
+        return {
+            "supported": True,
+            "kind": "pdf",
+            "source_name": target.name,
+            "title": f"{target.name}（前 {limit} 页）",
+            "markdown": md,
+            "truncated": truncated or char_trunc,
+        }
+    finally:
+        doc.close()
+
+
+def extract_inline_content(
+    path_str: str,
+    page: int | None = None,
+    sheet: str | None = None,
+    cell: str | None = None,
+    member: str | None = None,
+    max_chars: int = 12000,
+) -> dict[str, Any]:
+    """Extract clean Markdown for inline note expansion across local formats (no privacy gate for local insertion)."""
+    target = safe_io.resolve_safe_path(path_str, must_exist=True)
+    ext = target.suffix.lower()
+    char_limit = max(200, int(max_chars or 12000))
+
+    if ext in safe_io.TEXT_EDIT_EXTS:
+        raw_text = _read_text_with_fallback(target)
+        md, truncated = _format_inline_text_payload(raw_text, ext, char_limit)
+        kind = "markdown" if ext == ".md" else ("csv" if ext == ".csv" else ("text" if ext == ".txt" else "code"))
+        return {
+            "supported": True,
+            "kind": kind,
+            "source_name": target.name,
+            "title": target.name,
+            "markdown": md,
+            "truncated": truncated,
+        }
+
+    if ext == ".xlsx":
+        return _extract_xlsx_inline(target, sheet=sheet, cell=cell, max_chars=char_limit)
+
+    if ext == ".pdf":
+        return _extract_pdf_inline(target, page=page, max_chars=char_limit)
+
+    if ext in safe_io.OFFICE_PREVIEW_EXTS:
+        md = _extract_office_preview_markdown(target, max_chars=char_limit).strip()
+        if not md or md in _OFFICE_EMPTY_SENTINELS:
+            return {
+                "supported": False,
+                "source_name": target.name,
+                "reason": "该 Office 文档未提取到可展开的文本内容",
+            }
+        md_final, trunc = _truncate_inline_markdown(md, char_limit)
+        return {
+            "supported": True,
+            "kind": ext.lstrip("."),
+            "source_name": target.name,
+            "title": target.name,
+            "markdown": md_final,
+            "truncated": trunc or len(md) >= char_limit,
+        }
+
+    if ext in safe_io.ARCHIVE_EXTS or target.name.lower().endswith(".tar.gz"):
+        clean_member = str(member or "").strip()
+        if not clean_member:
+            return {
+                "supported": False,
+                "source_name": target.name,
+                "reason": "压缩包整体不支持直接展开，请定位并展开其中的具体文本文件（如 [[压缩包.zip!README.txt]]）",
+            }
+        entry = read_archive_entry(path_str, clean_member)
+        if entry.get("kind") != "text":
+            return {
+                "supported": False,
+                "source_name": clean_member,
+                "reason": "压缩包内该条目为非文本/二进制文件，不支持直接展开填入",
+            }
+        m_name = str(entry.get("member") or clean_member)
+        m_ext = Path(m_name).suffix.lower()
+        md, trunc = _format_inline_text_payload(str(entry.get("content") or ""), m_ext, char_limit)
+        return {
+            "supported": True,
+            "kind": "archive_entry",
+            "source_name": m_name,
+            "title": f"{target.name}!{m_name}",
+            "markdown": md,
+            "truncated": bool(entry.get("truncated")) or trunc,
+        }
+
+    return {
+        "supported": False,
+        "source_name": target.name,
+        "reason": f"不支持将此文件类型（{ext or '二进制文件'}）直接展开填入笔记",
+    }

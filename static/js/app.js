@@ -23,6 +23,7 @@ import { initCenterView } from './center_view.js';
 import { initRightPanel } from './right_panel.js';
 import { initSpotlight } from './spotlight.js';
 import { initStickies } from './stickies.js';
+import { initDragShelf } from './drag_shelf.js';
 
 function syncLayoutClasses() {
   const shell = document.getElementById('app-shell') || document.body;
@@ -91,7 +92,7 @@ function bindTopBarControls() {
     const widths = store.state.paneWidths || { left: 260, right: 360 };
     applyPaneWidths(widths.left ?? 260, widths.right ?? 360);
   });
-  store.on('file:open', (fileInfo) => {
+  store.on('file:opened', (fileInfo) => {
     if (fileInfo) {
       recordRecentFile(fileInfo);
     }
@@ -407,13 +408,17 @@ async function bootstrap() {
   safeMount('right_panel', () => initRightPanel(rightEl));
   safeMount('spotlight', () => initSpotlight());
   safeMount('stickies', () => initStickies());
+  safeMount('drag_shelf', () => initDragShelf());
 
   // 3. Bind shell controls, pane resizers, drag cleanup & responsive state
   bindTopBarControls();
   bindGlobalShortcuts();
   bindPaneResizers();
   bindMobileControls();
-  window.addEventListener('dragend', () => clearDragPayload());
+  window.addEventListener('dragend', () => {
+    clearDragPayload();
+    store.emit('drag:active', false);
+  });
   syncLayoutClasses();
 
   // 4. Initialize Dynamic Island to idle

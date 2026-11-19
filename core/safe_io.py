@@ -35,8 +35,8 @@ TEXT_EDIT_EXTS = {
     ".xml", ".yaml", ".yml", ".ini", ".toml", ".log", ".sql", ".sh", ".bat",
 }
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
-AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
-VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"}
+VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"}
 ARCHIVE_EXTS = {".zip", ".tar", ".tgz", ".gz"}
 OFFICE_PREVIEW_EXTS = {".docx", ".pptx"}
 SUPPORTED_DOC_EXTS = (
