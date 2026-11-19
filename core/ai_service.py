@@ -16,7 +16,9 @@ import importlib
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any, AsyncGenerator
+from urllib.parse import urlparse
 
 import httpx
 
@@ -259,38 +261,137 @@ def _parse_json_robust(raw_text: str) -> dict[str, Any]:
     raise ValueError("Unable to parse JSON object from AI response")
 
 
-def _ai_settings() -> dict[str, str]:
+_OLLAMA_PROBE_TTL = 60.0
+_ollama_probe_cache: dict[str, Any] = {"ts": 0.0, "model": None}
+_FREE_PUBLIC_BASE_URL = "https://text.pollinations.ai/openai"
+_OFFLINE_LABEL = "本地离线增强引擎"
+
+
+def _is_localhost_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").strip().lower()
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _build_chat_url(base_url: str) -> str:
+    cleaned = base_url.strip().rstrip("/")
+    if cleaned.endswith("/chat/completions"):
+        return cleaned
+    return f"{cleaned}/chat/completions"
+
+
+async def _probe_local_ollama_model() -> str | None:
+    """Probe http://127.0.0.1:11434/api/tags with a 0.3s timeout and 60s TTL cache."""
+    now = time.monotonic()
+    if now - float(_ollama_probe_cache.get("ts") or 0.0) < _OLLAMA_PROBE_TTL:
+        cached = _ollama_probe_cache.get("model")
+        return str(cached) if cached else None
+
+    detected_model: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=0.3) as client:
+            resp = await client.get("http://127.0.0.1:11434/api/tags")
+            if resp.status_code == 200:
+                payload = resp.json()
+                models = payload.get("models") if isinstance(payload, dict) else None
+                if isinstance(models, list) and models:
+                    first = models[0] if isinstance(models[0], dict) else {}
+                    candidate = str(first.get("name") or first.get("model") or "").strip()
+                    if candidate:
+                        detected_model = candidate
+    except Exception:
+        detected_model = None
+
+    _ollama_probe_cache["ts"] = now
+    _ollama_probe_cache["model"] = detected_model
+    return detected_model
+
+
+async def _resolve_ai_runtime() -> dict[str, Any]:
+    """Resolve active AI endpoint using the 3-tier Zero-Key Free AI router."""
     cfg = load_config()
-    ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
-    base_url = str(ai.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1").strip().rstrip("/")
-    api_key = str(ai.get("api_key") or "").strip()
-    model = str(ai.get("model") or "qwen-plus").strip() or "qwen-plus"
-    web_search_param = str(ai.get("web_search_param") or "").strip()
-    return {
-        "base_url": base_url,
-        "api_key": api_key,
-        "model": model,
-        "web_search_param": web_search_param,
-    }
+    ai_cfg = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
+    raw_base_url = str(ai_cfg.get("base_url") or "").strip().rstrip("/")
+    api_key = str(ai_cfg.get("api_key") or "").strip()
+    model = str(ai_cfg.get("model") or "").strip()
+    wsp = str(ai_cfg.get("web_search_param") or "").strip()
+    enable_free_ai = bool(ai_cfg.get("enable_free_ai", True))
+
+    # Tier 1: Configured custom API key or explicit local Ollama URL
+    if api_key:
+        eff_base = raw_base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        eff_model = model or "qwen-plus"
+        return {
+            "mode": "custom",
+            "label": f"自定义模型 ({eff_model})",
+            "base_url": eff_base,
+            "api_key": api_key,
+            "model": eff_model,
+            "web_search_param": wsp,
+            "timeout": 45.0,
+        }
+
+    if _is_localhost_url(raw_base_url):
+        eff_model = model or "qwen2.5:7b"
+        return {
+            "mode": "ollama",
+            "label": f"本机模型 ({eff_model})",
+            "base_url": raw_base_url,
+            "api_key": "ollama",
+            "model": eff_model,
+            "web_search_param": "",
+            "timeout": 35.0,
+        }
+
+    # Tier 2: Zero-key free auto-detection (local Ollama -> free public gateway)
+    if enable_free_ai:
+        ollama_model = await _probe_local_ollama_model()
+        if ollama_model:
+            return {
+                "mode": "ollama_auto",
+                "label": f"本机 Ollama ({ollama_model})",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "api_key": "ollama",
+                "model": ollama_model,
+                "web_search_param": "",
+                "timeout": 35.0,
+            }
+        return {
+            "mode": "free_public",
+            "label": "免 Key 免费基础 AI",
+            "base_url": _FREE_PUBLIC_BASE_URL,
+            "api_key": "",
+            "model": "openai",
+            "web_search_param": "",
+            "timeout": 12.0,
+        }
+
+    # Tier 3: Pure local rule-based offline engine
+    return {"mode": "offline", "label": _OFFLINE_LABEL}
 
 
 async def _call_chat_json(
     system_prompt: str,
     user_prompt: str,
     *,
-    timeout: float = 45.0,
+    runtime: dict[str, Any] | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
-    settings = _ai_settings()
-    if not settings["api_key"]:
-        raise RuntimeError("API key not configured")
+    rt = runtime or await _resolve_ai_runtime()
+    if rt.get("mode") == "offline":
+        raise RuntimeError("AI runtime is in offline mode")
 
-    url = f"{settings['base_url']}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {settings['api_key']}",
-        "Content-Type": "application/json",
-    }
+    url = _build_chat_url(str(rt["base_url"]))
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if rt.get("api_key"):
+        headers["Authorization"] = f"Bearer {rt['api_key']}"
+
     payload: dict[str, Any] = {
-        "model": settings["model"],
+        "model": rt["model"],
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -298,7 +399,8 @@ async def _call_chat_json(
         "temperature": 0.2,
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    eff_timeout = float(rt.get("timeout", 45.0)) if timeout is None else min(float(timeout), float(rt.get("timeout", 45.0)))
+    async with httpx.AsyncClient(timeout=eff_timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
@@ -510,6 +612,7 @@ def _summarize_offline(
     matched_app_ids: list[str],
     matched_files: list[str],
     apps_by_id: dict[str, dict[str, Any]],
+    provider_label: str = _OFFLINE_LABEL,
 ) -> dict[str, Any]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     headings = [ln.lstrip("#").strip() for ln in lines if ln.startswith("#")]
@@ -536,6 +639,7 @@ def _summarize_offline(
         "matched_files": matched_files,
         "matched_apps": [apps_by_id[aid] for aid in matched_app_ids if aid in apps_by_id],
         "offline_mode": True,
+        "provider_label": provider_label,
     }
 
 
@@ -558,9 +662,9 @@ async def summarize_content(text: str = "", file_path: str | None = None) -> dic
     workspace_files = _list_workspace_files()
     local_app_ids, local_files = _match_apps_and_files(combined_text, apps, workspace_files)
 
-    settings = _ai_settings()
-    if not settings["api_key"]:
-        return _summarize_offline(combined_text, local_app_ids, local_files, apps_by_id)
+    runtime = await _resolve_ai_runtime()
+    if runtime.get("mode") == "offline":
+        return _summarize_offline(combined_text, local_app_ids, local_files, apps_by_id, provider_label=runtime["label"])
 
     apps_hint = [
         {"id": a.get("id"), "name": a.get("name"), "aliases": a.get("aliases", [])}
@@ -582,7 +686,7 @@ async def summarize_content(text: str = "", file_path: str | None = None) -> dic
     )
 
     try:
-        parsed = await _call_chat_json(system_prompt, user_prompt, timeout=45.0)
+        parsed = await _call_chat_json(system_prompt, user_prompt, runtime=runtime, timeout=float(runtime.get("timeout", 45.0)))
         summary = str(parsed.get("summary") or "").strip()
         if not summary:
             raise ValueError("Empty summary")
@@ -629,9 +733,10 @@ async def summarize_content(text: str = "", file_path: str | None = None) -> dic
             "matched_files": merged_files,
             "matched_apps": [apps_by_id[aid] for aid in merged_app_ids if aid in apps_by_id],
             "offline_mode": False,
+            "provider_label": runtime["label"],
         }
     except Exception:
-        return _summarize_offline(combined_text, local_app_ids, local_files, apps_by_id)
+        return _summarize_offline(combined_text, local_app_ids, local_files, apps_by_id, provider_label=_OFFLINE_LABEL)
 
 
 # ---------------------------------------------------------------------------
@@ -776,9 +881,9 @@ async def stream_chat(
     """Stream SSE-ready chat events (`delta` then `done`) with automatic offline fallback."""
     docs = context_docs or []
     context_names = [str(d.get("name") or "") for d in docs if d.get("name")]
-    settings = _ai_settings()
+    runtime = await _resolve_ai_runtime()
 
-    if not settings["api_key"]:
+    if runtime.get("mode") == "offline":
         reply = _generate_offline_chat_reply(messages, web_search, docs)
         chunk_size = 14
         for i in range(0, len(reply), chunk_size):
@@ -790,6 +895,7 @@ async def stream_chat(
                 "web_search": web_search,
                 "context_files": context_names,
                 "offline_mode": True,
+                "provider_label": runtime["label"],
             },
         }
         return
@@ -804,27 +910,38 @@ async def stream_chat(
         if content:
             api_messages.append({"role": role, "content": content})
 
-    url = f"{settings['base_url']}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {settings['api_key']}",
-        "Content-Type": "application/json",
-    }
+    url = _build_chat_url(str(runtime["base_url"]))
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if runtime.get("api_key"):
+        headers["Authorization"] = f"Bearer {runtime['api_key']}"
+
     payload: dict[str, Any] = {
-        "model": settings["model"],
+        "model": runtime["model"],
         "messages": api_messages,
         "stream": True,
     }
-    if web_search and settings["web_search_param"]:
-        payload[settings["web_search_param"]] = True
+    if web_search and runtime.get("web_search_param"):
+        payload[str(runtime["web_search_param"])] = True
+
+    rt_timeout = float(runtime.get("timeout", 45.0))
+    if runtime.get("mode") == "free_public":
+        client_timeout = httpx.Timeout(rt_timeout)
+    else:
+        client_timeout = httpx.Timeout(connect=15.0, read=max(rt_timeout, 60.0), write=15.0, pool=15.0)
 
     emitted_any = False
+    raw_lines_buf: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)) as client:
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 resp.raise_for_status()
                 async for raw_line in resp.aiter_lines():
                     line = raw_line.strip()
-                    if not line or not line.startswith("data:"):
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        if len(raw_lines_buf) < 200:
+                            raw_lines_buf.append(line)
                         continue
                     data_str = line[5:].strip()
                     if data_str == "[DONE]":
@@ -838,9 +955,24 @@ async def stream_chat(
                         continue
                     delta = choices[0].get("delta") or {}
                     text_part = delta.get("content")
+                    if text_part is None:
+                        text_part = (choices[0].get("message") or {}).get("content")
                     if text_part:
                         emitted_any = True
                         yield {"type": "delta", "content": str(text_part)}
+
+        if not emitted_any and raw_lines_buf:
+            # Handle gateways returning single JSON completion despite stream=True
+            try:
+                non_stream = json.loads("\n".join(raw_lines_buf))
+                msg_content = str((((non_stream.get("choices") or [{}])[0].get("message") or {}).get("content")) or "")
+                if msg_content:
+                    emitted_any = True
+                    for i in range(0, len(msg_content), 24):
+                        yield {"type": "delta", "content": msg_content[i : i + 24]}
+            except Exception:
+                pass
+
         if not emitted_any:
             raise RuntimeError("Empty stream from remote API")
         yield {
@@ -849,6 +981,7 @@ async def stream_chat(
                 "web_search": web_search,
                 "context_files": context_names,
                 "offline_mode": False,
+                "provider_label": runtime["label"],
             },
         }
     except Exception:
@@ -865,6 +998,7 @@ async def stream_chat(
                 "web_search": web_search,
                 "context_files": context_names,
                 "offline_mode": True,
+                "provider_label": _OFFLINE_LABEL,
             },
         }
 
@@ -969,12 +1103,13 @@ async def extract_table_rows(text: str, headers: list[str]) -> dict[str, Any]:
     if not clean_headers:
         raise ValueError("目标表格表头不能为空")
 
-    settings = _ai_settings()
-    if not settings["api_key"]:
+    runtime = await _resolve_ai_runtime()
+    if runtime.get("mode") == "offline":
         return {
             "headers": clean_headers,
             "rows": _extract_table_rows_offline(clean_text, clean_headers),
             "offline_mode": True,
+            "provider_label": runtime["label"],
         }
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -990,7 +1125,7 @@ async def extract_table_rows(text: str, headers: list[str]) -> dict[str, Any]:
     )
 
     try:
-        parsed = await _call_chat_json(system_prompt, user_prompt, timeout=35.0)
+        parsed = await _call_chat_json(system_prompt, user_prompt, runtime=runtime, timeout=35.0)
         raw_rows = parsed.get("rows")
         if not isinstance(raw_rows, list) or not raw_rows:
             raise ValueError("Empty rows")
@@ -1006,12 +1141,14 @@ async def extract_table_rows(text: str, headers: list[str]) -> dict[str, Any]:
             "headers": clean_headers,
             "rows": normalized_rows,
             "offline_mode": False,
+            "provider_label": runtime["label"],
         }
     except Exception:
         return {
             "headers": clean_headers,
             "rows": _extract_table_rows_offline(clean_text, clean_headers),
             "offline_mode": True,
+            "provider_label": _OFFLINE_LABEL,
         }
 
 
@@ -1023,6 +1160,7 @@ def _classify_offline(
     file_label: str,
     content_preview: str,
     nodes: list[dict[str, Any]],
+    provider_label: str = _OFFLINE_LABEL,
 ) -> dict[str, Any]:
     sample = f"{file_label} {content_preview}".lower()
     if not nodes:
@@ -1043,6 +1181,7 @@ def _classify_offline(
             "recommended_node_name": suggested,
             "reason": "当前知识树尚无节点，建议新建该分类节点。",
             "offline_mode": True,
+            "provider_label": provider_label,
         }
 
     best_node: dict[str, Any] | None = None
@@ -1075,6 +1214,7 @@ def _classify_offline(
             "recommended_node_name": str(best_node.get("name") or ""),
             "reason": f"文件名或内容与现有节点「{best_node.get('name')}」语义关键词匹配。",
             "offline_mode": True,
+            "provider_label": provider_label,
         }
 
     first = nodes[0]
@@ -1083,6 +1223,7 @@ def _classify_offline(
         "recommended_node_name": str(first.get("name") or "默认分类"),
         "reason": "未命中特定关键词，默认推荐归入首个知识树节点。",
         "offline_mode": True,
+        "provider_label": provider_label,
     }
 
 
@@ -1101,9 +1242,9 @@ async def classify_file(file_path: str | None = None, summary: str = "") -> dict
         raise ValueError("请提供文件路径或摘要文本用于知识树分类")
 
     nodes = _get_tree_nodes()
-    settings = _ai_settings()
-    if not settings["api_key"] or not nodes:
-        return _classify_offline(file_label, preview, nodes)
+    runtime = await _resolve_ai_runtime()
+    if runtime.get("mode") == "offline" or not nodes:
+        return _classify_offline(file_label, preview, nodes, provider_label=_OFFLINE_LABEL)
 
     nodes_hint = [{"id": n.get("id"), "name": n.get("name")} for n in nodes]
     system_prompt = (
@@ -1117,7 +1258,7 @@ async def classify_file(file_path: str | None = None, summary: str = "") -> dict
     )
 
     try:
-        parsed = await _call_chat_json(system_prompt, user_prompt, timeout=30.0)
+        parsed = await _call_chat_json(system_prompt, user_prompt, runtime=runtime, timeout=30.0)
         rec_id = parsed.get("recommended_node_id")
         valid_ids = {str(n.get("id")): str(n.get("name") or "") for n in nodes if n.get("id")}
         if rec_id is not None and str(rec_id) in valid_ids:
@@ -1127,6 +1268,7 @@ async def classify_file(file_path: str | None = None, summary: str = "") -> dict
                 "recommended_node_name": str(parsed.get("recommended_node_name") or valid_ids[rec_id_str]),
                 "reason": str(parsed.get("reason") or "由 AI 根据文档主题匹配推荐"),
                 "offline_mode": False,
+                "provider_label": runtime["label"],
             }
         rec_name = str(parsed.get("recommended_node_name") or "").strip()
         if rec_name:
@@ -1135,7 +1277,79 @@ async def classify_file(file_path: str | None = None, summary: str = "") -> dict
                 "recommended_node_name": rec_name,
                 "reason": str(parsed.get("reason") or "建议新建该知识树分类节点"),
                 "offline_mode": False,
+                "provider_label": runtime["label"],
             }
         raise ValueError("Invalid classification output")
     except Exception:
-        return _classify_offline(file_label, preview, nodes)
+        return _classify_offline(file_label, preview, nodes, provider_label=_OFFLINE_LABEL)
+
+
+# ---------------------------------------------------------------------------
+# 6. semantic_rerank (for AI Semantic Description Search)
+# ---------------------------------------------------------------------------
+
+async def semantic_rerank(query: str, candidates: list[dict[str, Any]], limit: int = 8) -> dict[str, Any] | None:
+    """Semantically rerank search candidates against a natural-language description."""
+    clean_query = (query or "").strip()
+    if not clean_query or not candidates:
+        return None
+
+    runtime = await _resolve_ai_runtime()
+    if runtime.get("mode") == "offline":
+        return None
+
+    capped = [c for c in candidates[:24] if isinstance(c, dict)]
+    if not capped:
+        return None
+
+    numbered_items: list[str] = []
+    for idx, item in enumerate(capped):
+        title = str(item.get("name") or item.get("title") or item.get("path") or f"候选{idx}").strip()
+        raw_snip = item.get("snippet") or item.get("text") or item.get("preview") or item.get("content") or ""
+        snippet = re.sub(r"\s+", " ", str(raw_snip)).strip()[:180]
+        numbered_items.append(f"[{idx}] {title} | {snippet}")
+
+    system_prompt = (
+        "你是本地文档语义检索重排助手。根据用户描述从候选片段中筛选最语义相关的条目并打分(0-100)，"
+        "严格返回 JSON：\n"
+        '{"matches": [{"index": 0, "score": 92, "reason": "简短中文解释为什么语义匹配"}]}'
+    )
+    user_prompt = (
+        f"用户描述：{clean_query}\n"
+        f"最多返回 {max(1, int(limit))} 条。\n"
+        "候选条目：\n" + "\n".join(numbered_items)
+    )
+
+    try:
+        parsed = await _call_chat_json(system_prompt, user_prompt, runtime=runtime, timeout=float(runtime.get("timeout", 25.0)))
+        raw_matches = parsed.get("matches")
+        if not isinstance(raw_matches, list):
+            return None
+
+        normalized: list[dict[str, Any]] = []
+        seen_idx: set[int] = set()
+        for m in raw_matches:
+            if not isinstance(m, dict):
+                continue
+            try:
+                idx = int(m.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if idx < 0 or idx >= len(capped) or idx in seen_idx:
+                continue
+            try:
+                score = int(round(float(m.get("score", 0))))
+            except (TypeError, ValueError):
+                score = 0
+            score = max(0, min(100, score))
+            reason = str(m.get("reason") or "语义相关").strip()[:80]
+            seen_idx.add(idx)
+            normalized.append({"index": idx, "score": score, "reason": reason})
+
+        normalized.sort(key=lambda x: -x["score"])
+        return {
+            "matches": normalized[: max(1, int(limit))],
+            "provider_label": runtime["label"],
+        }
+    except Exception:
+        return None

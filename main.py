@@ -55,6 +55,10 @@ from config import (
 
 # Explicit router imports so PyInstaller static analysis always bundles all API & core modules
 from api import ai_api, excel_api, files_api, system_api, tools_api  # noqa: F401
+try:
+    from api import search_api  # noqa: F401
+except ImportError:
+    search_api = None  # type: ignore[assignment]
 from core import scheduler as _core_scheduler  # noqa: F401
 
 STATIC_DIR = RESOURCE_DIR / "static"
@@ -69,6 +73,7 @@ _ROUTER_MODULES = (
     "api.excel_api",
     "api.tools_api",
     "api.ai_api",
+    "api.search_api",
 )
 
 

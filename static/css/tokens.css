@@ -46,7 +46,12 @@
 
   /* 系统原生字体栈（零外部字体加载） */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-serif: "Songti SC", "STSong", "Noto Serif SC", Georgia, Cambria, serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+
+  /* 文档字体动态令牌 */
+  --doc-font-size: 15px;
+  --doc-font-family: var(--font-sans);
 
   /* 物理阻尼动效曲线（严禁动画化 width/height/top/left，只动 transform/opacity） */
   --ease-apple: cubic-bezier(0.22, 1, 0.36, 1);

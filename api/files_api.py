@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from api import ok
@@ -73,6 +73,12 @@ def write_file(body: WriteFileBody) -> dict:
 def stream_pdf(path: str = Query(...)) -> FileResponse:
     target = safe_io.resolve_safe_path(path, must_exist=True)
     return FileResponse(target, media_type="application/pdf", headers={"Content-Disposition": "inline"})
+
+
+@router.get("/pdf-page")
+def render_pdf_page(path: str = Query(...), page: int = Query(1, ge=1), zoom: float = Query(1.6, ge=0.5, le=3.0)) -> Response:
+    png_bytes = doc_engine.render_pdf_page_png(path, page=page, zoom=zoom)
+    return Response(content=png_bytes, media_type="image/png", headers={"Cache-Control": "private, max-age=60"})
 
 
 @router.post("/pdf-annotate")

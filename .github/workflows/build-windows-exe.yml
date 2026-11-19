@@ -72,6 +72,17 @@ jobs:
             $filesRes = (Invoke-WebRequest -Uri "http://127.0.0.1:18765/api/files/list" -UseBasicParsing).Content | ConvertFrom-Json
             Write-Host "Smoke test PASSED! Auto-seeded files count: $($filesRes.data.items.Count)"
             if ($filesRes.data.items.Count -lt 3) { throw "Expected >=3 auto-seeded demo files" }
+            $pdfItem = $filesRes.data.items | Where-Object { $_.ext -eq ".pdf" } | Select-Object -First 1
+            if ($pdfItem) {
+              $pdfEnc = [System.Uri]::EscapeDataString($pdfItem.path)
+              $pngRes = Invoke-WebRequest -Uri "http://127.0.0.1:18765/api/files/pdf-page?path=$pdfEnc&page=1&zoom=1.5" -UseBasicParsing
+              if ($pngRes.StatusCode -ne 200 -or ([string]$pngRes.Headers["Content-Type"]) -notmatch "image/png") { throw "HD PDF render check failed" }
+              Write-Host "HD PDF PNG render PASSED ($($pngRes.RawContentLength) bytes)"
+            }
+            $searchBody = '{"query":"泰勒","mode":"keyword"}'
+            $searchRes = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:18765/api/search" -ContentType "application/json" -Body ([System.Text.Encoding]::UTF8.GetBytes($searchBody)) -UseBasicParsing
+            if ($searchRes.StatusCode -ne 200) { throw "Search endpoint check failed" }
+            Write-Host "Dual search API PASSED!"
           } finally {
             if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
           }

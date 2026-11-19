@@ -1,10 +1,14 @@
 /**
  * SmartLocalNote - Polymorphic Dynamic Island (5 States), Focus-Only Clipboard Sniffing,
- * Focus Countdown -> Progress Excel Writeback, Ctrl+K Spotlight Search,
- * Web Speech Voice Dictation & Settings/LAN Access Modal.
+ * Focus Countdown -> Progress Excel Writeback, Ctrl+K Dual-Mode Spotlight Search,
+ * Web Speech Voice Dictation & Settings/LAN Access + Free AI Presets Modal (V2).
  */
 
-import {
+import * as storeMod from './store.js';
+import { api } from './api_client.js';
+import { icon } from './icons.js';
+
+const {
   store,
   escapeHtml,
   setIsland,
@@ -13,9 +17,7 @@ import {
   closeSheet,
   applyTheme,
   copyInternal,
-} from './store.js';
-import { api } from './api_client.js';
-import { icon } from './icons.js';
+} = storeMod;
 
 let initialized = false;
 
@@ -36,9 +38,86 @@ let lastAlertKey = '';
 // AudioContext singleton (lazy)
 let audioCtx = null;
 
-// Spotlight state
+// Spotlight state (V2 Dual-Mode Search)
+let spotlightMode = 'quick'; // 'quick' | 'keyword' | 'semantic'
 let spotlightItems = [];
 let spotlightActiveIndex = 0;
+let spotlightSearchTimer = null;
+let spotlightLoading = false;
+let spotlightMeta = null;
+let spotlightSeq = 0;
+
+const SPOTLIGHT_MODES = [
+  { id: 'quick', label: '⚡ 快捷跳转' },
+  { id: 'keyword', label: '🔍 关键词全文检索' },
+  { id: 'semantic', label: '✨ AI 语义描述检索' },
+];
+
+const SPOTLIGHT_PLACEHOLDERS = {
+  quick: '搜索文件名、应用、工作区或快捷命令…',
+  keyword: '输入关键词，全文检索所有 MD / TXT / PDF / Excel 内容…',
+  semantic: '用自然语言描述你想找的内容，例如：泰勒展开容易做错的地方在哪？',
+};
+
+const DEFAULT_AI_PRESETS = [
+  {
+    id: 'free_auto',
+    label: '免 Key 免费基础 AI（自动探测本机 Ollama / 免费公共通道 / 本地引擎）',
+    name: '免 Key 免费基础 AI（自动探测本机 Ollama / 免费公共通道 / 本地引擎）',
+    base_url: '',
+    model: 'openai',
+    web_search_param: '',
+    needs_key: false,
+    doc_url: '',
+    hint: '无需注册开箱即用；自动尝试免费基础通道，断网自动回退本地规则引擎',
+  },
+  {
+    id: 'zhipu_free',
+    label: '智谱 GLM-4-Flash（永久免费 · 国内直连）',
+    name: '智谱 GLM-4-Flash（永久免费 · 国内直连）',
+    base_url: 'https://open.bigmodel.cn/api/paas/v4',
+    model: 'glm-4-flash',
+    web_search_param: '',
+    needs_key: true,
+    doc_url: 'https://open.bigmodel.cn/usercenter/apikeys',
+    hint: '国内直连速度快，glm-4-flash 免费开放',
+  },
+  {
+    id: 'siliconflow_free',
+    label: '硅基流动 Qwen2.5-7B（免费额度 · 国内直连）',
+    name: '硅基流动 Qwen2.5-7B（免费额度 · 国内直连）',
+    base_url: 'https://api.siliconflow.cn/v1',
+    model: 'Qwen/Qwen2.5-7B-Instruct',
+    web_search_param: '',
+    needs_key: true,
+    doc_url: 'https://cloud.siliconflow.cn/account/ak',
+    hint: '国内直连，多款 7B/9B 开源模型免费',
+  },
+  {
+    id: 'gemini_free',
+    label: 'Google Gemini 2.5 Flash（免卡每日免费）',
+    name: 'Google Gemini 2.5 Flash（免卡每日免费）',
+    base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    model: 'gemini-2.5-flash',
+    web_search_param: '',
+    needs_key: true,
+    doc_url: 'https://aistudio.google.com/apikey',
+    hint: '免信用卡，官方每日免费 500 次',
+  },
+];
+
+function applyDocTypographySafe(fontSize) {
+  const clamped = Math.min(24, Math.max(12, Number(fontSize) || 15));
+  if (typeof storeMod.applyDocTypography === 'function') {
+    storeMod.applyDocTypography(clamped);
+    return clamped;
+  }
+  store.state.docFontSize = clamped;
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.setProperty('--doc-font-size', `${clamped}px`);
+  }
+  return clamped;
+}
 
 /* --------------------------------------------------------------------------
  * Utilities: Audio Chime, Date Formatting, File & Panel Helpers
@@ -348,7 +427,6 @@ async function submitFocusDoneToExcel(islandEl) {
   if (submitBtn) submitBtn.disabled = true;
 
   try {
-    // Persist default progress Excel silently
     api
       .put('/api/system/config', { default_progress_excel: targetPath })
       .then((updated) => {
@@ -358,7 +436,6 @@ async function submitFocusDoneToExcel(islandEl) {
       })
       .catch(() => {});
 
-    // Fetch first sheet & headers
     const sheetsRes = await api.get(`/api/excel/sheets?path=${encodeURIComponent(targetPath)}`);
     const firstSheet = Array.isArray(sheetsRes?.sheets) ? sheetsRes.sheets[0] : null;
     const sheetName = firstSheet?.name || '';
@@ -367,7 +444,6 @@ async function submitFocusDoneToExcel(islandEl) {
         ? firstSheet.headers
         : ['日期', '任务', '完成内容', '状态'];
 
-    // Extract structured row(s) with deterministic fallback
     let rows = [];
     try {
       const extracted = await api.post('/api/ai/extract-table', {
@@ -445,7 +521,6 @@ function renderDynamicIsland(islandEl, islandState) {
     const remainingSec = Math.max(0, Number(data.remainingSec ?? store.state.focus?.remainingSec ?? totalSec));
     const paused = Boolean(data.paused ?? store.state.focus?.paused);
 
-    // Sync store.state.focus if setIsland('focus', ...) was called directly
     if (!store.state.focus?.active && remainingSec > 0) {
       store.state.focus = {
         active: true,
@@ -525,7 +600,6 @@ function renderDynamicIsland(islandEl, islandState) {
     return;
   }
 
-  // Default: idle
   const activeName = store.state.activeFile?.name || '本地工作台就绪';
   islandEl.innerHTML = `
     <div class="island-idle-view">
@@ -723,7 +797,7 @@ async function openSceneCaptureSheet() {
 }
 
 /* --------------------------------------------------------------------------
- * 5. Ctrl+K / Cmd+K Spotlight Search (#spotlight-overlay)
+ * 5. Ctrl+K / Cmd+K Dual-Mode Spotlight Search (#spotlight-overlay) — Pain Point #6A
  * -------------------------------------------------------------------------- */
 
 function getSpotlightElements() {
@@ -740,7 +814,7 @@ function getSpotlightElements() {
       <div class="spotlight-card">
         <div class="spotlight-input-row">
           ${icon('search', 18)}
-          <input id="spotlight-input" class="spotlight-input" type="search" placeholder="搜索笔记、本地文件或启动应用…" autocomplete="off" spellcheck="false">
+          <input id="spotlight-input" class="spotlight-input" type="search" placeholder="${SPOTLIGHT_PLACEHOLDERS.quick}" autocomplete="off" spellcheck="false">
           <kbd class="kbd-hint">ESC</kbd>
         </div>
         <div id="spotlight-results" class="spotlight-results"></div>
@@ -748,15 +822,103 @@ function getSpotlightElements() {
     `;
     document.body.appendChild(overlay);
   }
+
+  const card = overlay.querySelector('.spotlight-card');
+  const inputRow = overlay.querySelector('.spotlight-input-row');
+  let modeBar = overlay.querySelector('.spotlight-mode-bar');
+  if (!modeBar && card && inputRow) {
+    modeBar = document.createElement('div');
+    modeBar.className = 'spotlight-mode-bar';
+    modeBar.style.cssText =
+      'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border-hairline);background:var(--bg-subtle);flex-wrap:wrap;';
+    inputRow.insertAdjacentElement('afterend', modeBar);
+  }
+
   return {
     overlay,
+    card,
     input: document.getElementById('spotlight-input') || overlay.querySelector('.spotlight-input'),
+    modeBar,
     resultsEl: document.getElementById('spotlight-results') || overlay.querySelector('.spotlight-results'),
   };
 }
 
+function renderSpotlightModeBar() {
+  const { input, modeBar } = getSpotlightElements();
+  if (input) {
+    input.placeholder = SPOTLIGHT_PLACEHOLDERS[spotlightMode] || SPOTLIGHT_PLACEHOLDERS.quick;
+  }
+  if (!modeBar) return;
+
+  modeBar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+      ${SPOTLIGHT_MODES.map((m) => {
+        const active = spotlightMode === m.id;
+        return `
+          <button
+            type="button"
+            class="pill-btn pill-btn-sm ${active ? 'pill-btn-primary is-active' : ''}"
+            data-spotlight-mode="${m.id}"
+            style="height:26px;padding:0 10px;font-size:11.5px;"
+          >${escapeHtml(m.label)}</button>
+        `;
+      }).join('')}
+    </div>
+    ${
+      spotlightMode === 'semantic'
+        ? `<button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="spotlight-semantic-go" style="height:26px;padding:0 10px;font-size:11.5px;">
+            ${icon('sparkles', 12)} 开始语义检索
+          </button>`
+        : ''
+    }
+  `;
+}
+
+function highlightKeywordSnippet(snippetText, query) {
+  const raw = String(snippetText || '');
+  const q = String(query || '').trim();
+  if (!q || !raw) return escapeHtml(raw);
+
+  const tokens = q
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 1)
+    .slice(0, 6);
+  if (!tokens.length) return escapeHtml(raw);
+
+  const escapedRegex = tokens
+    .sort((a, b) => b.length - a.length)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const re = new RegExp(`(${escapedRegex})`, 'gi');
+
+  let out = '';
+  let lastIndex = 0;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    if (match.index > lastIndex) {
+      out += escapeHtml(raw.slice(lastIndex, match.index));
+    }
+    out += `<mark style="background:var(--accent-soft);color:var(--accent);padding:0 2px;border-radius:3px;font-weight:600;">${escapeHtml(match[0])}</mark>`;
+    lastIndex = match.index + match[0].length;
+    if (match[0].length === 0) break;
+  }
+  if (lastIndex < raw.length) {
+    out += escapeHtml(raw.slice(lastIndex));
+  }
+  return out;
+}
+
 function buildQuickCommands() {
   return [
+    {
+      type: 'cmd',
+      id: 'cmd-semantic-search',
+      icon: 'sparkles',
+      label: 'AI 语义描述检索笔记内容',
+      sub: '命令 · 用自然语言找笔记段落与错题位置',
+      keywords: 'ai yuyi semantic search 语义 检索 描述',
+    },
     {
       type: 'cmd',
       id: 'cmd-new-note',
@@ -810,29 +972,32 @@ function buildQuickCommands() {
       id: 'cmd-open-settings',
       icon: 'settings',
       label: '打开系统与局域网设置',
-      sub: '命令 · AI 接口 / 手机端局域网入口',
+      sub: '命令 · AI 预设 / 免费 AI / 手机端入口',
       keywords: 'shezhi settings lan url',
     },
   ];
 }
 
-function buildSpotlightResults(query) {
+function getFileIconByExt(extOrPath) {
+  const s = String(extOrPath || '').toLowerCase();
+  if (s.endsWith('.pdf') || s === 'pdf') return 'file-pdf';
+  if (s.endsWith('.xlsx') || s.endsWith('.xlsm') || s.endsWith('.csv') || s === 'xlsx') {
+    return 'file-spreadsheet';
+  }
+  return 'file-text';
+}
+
+function buildQuickSpotlightResults(query) {
   const q = String(query || '').trim().toLowerCase();
 
-  const fileItems = (store.state.files?.items || []).map((f) => {
-    const ext = String(f.ext || '').toLowerCase();
-    let ic = 'file-text';
-    if (ext === '.pdf' || ext === 'pdf') ic = 'file-pdf';
-    else if (ext === '.xlsx' || ext === 'xlsx') ic = 'file-spreadsheet';
-    return {
-      type: 'file',
-      icon: ic,
-      label: f.name || f.path.split(/[\\/]/).pop() || f.path,
-      sub: f.path,
-      searchText: `${f.name || ''} ${f.path || ''}`.toLowerCase(),
-      payload: f,
-    };
-  });
+  const fileItems = (store.state.files?.items || []).map((f) => ({
+    type: 'file',
+    icon: getFileIconByExt(f.ext || f.path),
+    label: f.name || f.path.split(/[\\/]/).pop() || f.path,
+    sub: f.path,
+    searchText: `${f.name || ''} ${f.path || ''}`.toLowerCase(),
+    payload: f,
+  }));
 
   const appItems = (store.state.apps || []).map((a) => ({
     type: 'app',
@@ -859,37 +1024,198 @@ function buildSpotlightResults(query) {
 
   const all = [...fileItems, ...appItems, ...wsItems, ...cmdItems];
   if (!q) {
-    return [...fileItems.slice(0, 4), ...wsItems.slice(0, 2), ...appItems.slice(0, 2), ...cmdItems].slice(0, 10);
+    return [...fileItems.slice(0, 4), ...wsItems.slice(0, 2), ...appItems.slice(0, 2), ...cmdItems].slice(0, 11);
   }
   return all.filter((item) => item.searchText.includes(q)).slice(0, 12);
 }
 
-function renderSpotlightList() {
+function formatSearchAnchorBadge(r) {
+  if (r.page) return `第 ${r.page} 页`;
+  if (r.sheet && r.cell) return `${r.sheet}!${r.cell}`;
+  if (r.cell) return `${r.cell}`;
+  if (r.anchor) return String(r.anchor);
+  if (r.ext) return String(r.ext).replace(/^\./, '').toUpperCase();
+  return '';
+}
+
+function renderSpotlightSearchResults() {
   const { input, resultsEl } = getSpotlightElements();
   if (!resultsEl) return;
 
-  spotlightItems = buildSpotlightResults(input?.value || '');
-  if (spotlightActiveIndex >= spotlightItems.length) spotlightActiveIndex = 0;
-  if (spotlightActiveIndex < 0) spotlightActiveIndex = 0;
+  const query = String(input?.value || '').trim();
 
-  if (spotlightItems.length === 0) {
-    resultsEl.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-tertiary);font-size:13px;">未找到匹配的文档、应用或命令</div>`;
+  if (spotlightMode === 'quick') {
+    spotlightItems = buildQuickSpotlightResults(query);
+    if (spotlightActiveIndex >= spotlightItems.length) spotlightActiveIndex = 0;
+    if (spotlightActiveIndex < 0) spotlightActiveIndex = 0;
+
+    if (spotlightItems.length === 0) {
+      resultsEl.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-tertiary);font-size:13px;">未找到匹配的文档、应用或命令</div>`;
+      return;
+    }
+
+    resultsEl.innerHTML = spotlightItems
+      .map(
+        (item, idx) => `
+        <button type="button" class="spotlight-item ${idx === spotlightActiveIndex ? 'is-active' : ''}" data-spotlight-idx="${idx}">
+          <span style="display:inline-flex;align-items:center;gap:9px;min-width:0;flex:1;">
+            <span style="color:var(--accent);display:inline-flex;flex-shrink:0;">${icon(item.icon || 'file-text', 15)}</span>
+            <span style="font-size:13.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.label)}</span>
+          </span>
+          <span style="font-size:11.5px;color:var(--text-tertiary);max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.sub || '')}</span>
+        </button>
+      `
+      )
+      .join('');
     return;
   }
 
-  resultsEl.innerHTML = spotlightItems
-    .map(
-      (item, idx) => `
-      <button type="button" class="spotlight-item ${idx === spotlightActiveIndex ? 'is-active' : ''}" data-spotlight-idx="${idx}">
-        <span style="display:inline-flex;align-items:center;gap:9px;min-width:0;flex:1;">
-          <span style="color:var(--accent);display:inline-flex;flex-shrink:0;">${icon(item.icon || 'file-text', 15)}</span>
-          <span style="font-size:13.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.label)}</span>
-        </span>
-        <span style="font-size:11.5px;color:var(--text-tertiary);max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(item.sub || '')}</span>
-      </button>
-    `
-    )
-    .join('');
+  // Keyword or Semantic mode
+  if (spotlightLoading) {
+    resultsEl.innerHTML = `
+      <div style="padding:26px 16px;text-align:center;color:var(--text-secondary);font-size:13px;display:flex;flex-direction:column;align-items:center;gap:8px;">
+        <span style="color:var(--accent);">${icon('sparkles', 20)}</span>
+        <span>${spotlightMode === 'semantic' ? 'AI 语义检索引擎正在分析笔记与文档内容…' : '正在全文检索本地文档…'}</span>
+      </div>
+    `;
+    return;
+  }
+
+  if (!query) {
+    const tip =
+      spotlightMode === 'semantic'
+        ? '输入自然语言问题或描述，点击「开始语义检索」或按 Enter 检索笔记内容（自动跳过隐私锁定文件）。'
+        : '输入关键词实时全文检索所有已导入的 MD / TXT / PDF / Excel 内容。';
+    resultsEl.innerHTML = `<div style="padding:24px 16px;text-align:center;color:var(--text-tertiary);font-size:12.5px;">${escapeHtml(tip)}</div>`;
+    return;
+  }
+
+  if (spotlightItems.length === 0) {
+    const skippedNote =
+      spotlightMeta?.skipped_private > 0
+        ? `（已安全跳过 ${spotlightMeta.skipped_private} 份隐私锁定文件）`
+        : '';
+    resultsEl.innerHTML = `<div style="padding:22px 16px;text-align:center;color:var(--text-tertiary);font-size:13px;">未检索到匹配内容 ${escapeHtml(skippedNote)}</div>`;
+    return;
+  }
+
+  const metaParts = [];
+  if (spotlightMeta?.provider_label) metaParts.push(spotlightMeta.provider_label);
+  else if (spotlightMeta?.engine) metaParts.push(spotlightMeta.engine);
+  if (Number.isFinite(spotlightMeta?.total)) metaParts.push(`共 ${spotlightMeta.total} 条匹配`);
+  if (spotlightMeta?.skipped_private > 0) {
+    metaParts.push(`已跳过 ${spotlightMeta.skipped_private} 份隐私锁文件`);
+  }
+
+  const metaBarHtml = metaParts.length
+    ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 10px 8px;font-size:11px;color:var(--text-tertiary);">${escapeHtml(metaParts.join(' · '))}</div>`
+    : '';
+
+  resultsEl.innerHTML =
+    metaBarHtml +
+    spotlightItems
+      .map((item, idx) => {
+        const r = item.payload || {};
+        const anchorBadge = formatSearchAnchorBadge(r);
+        const snippetHtml =
+          spotlightMode === 'keyword'
+            ? highlightKeywordSnippet(r.snippet || '', query)
+            : escapeHtml(r.snippet || '');
+        const scoreNum = Number(r.score);
+        const scoreText = Number.isFinite(scoreNum) && scoreNum > 0 ? `${Math.round(scoreNum <= 1 ? scoreNum * 100 : scoreNum)}%` : '';
+        const reasonText = r.reason ? String(r.reason) : '';
+
+        return `
+          <button
+            type="button"
+            class="spotlight-item ${idx === spotlightActiveIndex ? 'is-active' : ''}"
+            data-spotlight-idx="${idx}"
+            style="flex-direction:column;align-items:stretch;gap:5px;padding:10px 12px;"
+          >
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;">
+              <span style="display:inline-flex;align-items:center;gap:8px;min-width:0;flex:1;">
+                <span style="color:var(--accent);display:inline-flex;flex-shrink:0;">${icon(item.icon || 'file-text', 15)}</span>
+                <span style="font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name || item.label)}</span>
+              </span>
+              <span style="display:inline-flex;align-items:center;gap:5px;flex-shrink:0;">
+                ${
+                  anchorBadge
+                    ? `<span style="padding:2px 8px;border-radius:9999px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:600;">${escapeHtml(anchorBadge)}</span>`
+                    : ''
+                }
+                ${
+                  spotlightMode === 'semantic' && (reasonText || scoreText)
+                    ? `<span class="search-reason-pill" style="padding:2px 8px;border-radius:9999px;background:var(--success-soft);color:var(--success);font-size:11px;font-weight:500;">${escapeHtml([scoreText, reasonText].filter(Boolean).join(' · '))}</span>`
+                    : ''
+                }
+              </span>
+            </div>
+            ${
+              r.snippet
+                ? `<div class="search-snippet" style="font-size:12px;color:var(--text-secondary);line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${snippetHtml}</div>`
+                : ''
+            }
+          </button>
+        `;
+      })
+      .join('');
+}
+
+async function runBackendSearch(mode, query) {
+  const q = String(query || '').trim();
+  const reqId = ++spotlightSeq;
+
+  if (!q) {
+    spotlightLoading = false;
+    spotlightItems = [];
+    spotlightMeta = null;
+    renderSpotlightSearchResults();
+    return;
+  }
+
+  spotlightLoading = true;
+  spotlightActiveIndex = 0;
+  renderSpotlightSearchResults();
+
+  try {
+    const limit = mode === 'semantic' ? 12 : 15;
+    const data = await api.post('/api/search', { query: q, mode, limit });
+    if (reqId !== spotlightSeq) return;
+    const rawResults = Array.isArray(data?.results) ? data.results : [];
+    spotlightMeta = {
+      mode: data?.mode || mode,
+      engine: data?.engine || '',
+      provider_label: data?.provider_label || '',
+      total: data?.total ?? rawResults.length,
+      skipped_private: data?.skipped_private || 0,
+    };
+    spotlightItems = rawResults.map((r) => ({
+      type: 'search-result',
+      icon: getFileIconByExt(r.ext || r.path || r.name),
+      label: r.name || r.path,
+      sub: r.snippet || '',
+      payload: r,
+    }));
+  } catch (err) {
+    if (reqId !== spotlightSeq) return;
+    spotlightItems = [];
+    spotlightMeta = null;
+    showToast(err?.message || '全文检索失败', 'error');
+  } finally {
+    if (reqId === spotlightSeq) {
+      spotlightLoading = false;
+      spotlightActiveIndex = 0;
+      renderSpotlightSearchResults();
+    }
+  }
+}
+
+function renderSpotlightList() {
+  if (spotlightMode === 'quick') {
+    spotlightLoading = false;
+    spotlightMeta = null;
+    renderSpotlightSearchResults();
+  }
 }
 
 function updateSpotlightActiveClass(resultsEl) {
@@ -904,9 +1230,72 @@ function updateSpotlightActiveClass(resultsEl) {
   });
 }
 
+function switchSpotlightMode(nextMode, { triggerSearch = true } = {}) {
+  const valid = SPOTLIGHT_MODES.some((m) => m.id === nextMode) ? nextMode : 'quick';
+  spotlightMode = valid;
+  spotlightActiveIndex = 0;
+  spotlightSeq += 1;
+  if (spotlightSearchTimer) {
+    window.clearTimeout(spotlightSearchTimer);
+    spotlightSearchTimer = null;
+  }
+  renderSpotlightModeBar();
+
+  const { input } = getSpotlightElements();
+  const q = String(input?.value || '').trim();
+
+  if (valid === 'quick') {
+    spotlightLoading = false;
+    spotlightMeta = null;
+    renderSpotlightSearchResults();
+  } else if (valid === 'keyword') {
+    if (triggerSearch && q) {
+      runBackendSearch('keyword', q);
+    } else {
+      spotlightLoading = false;
+      spotlightItems = [];
+      spotlightMeta = null;
+      renderSpotlightSearchResults();
+    }
+  } else if (valid === 'semantic') {
+    if (triggerSearch && q) {
+      runBackendSearch('semantic', q);
+    } else {
+      spotlightLoading = false;
+      spotlightItems = [];
+      spotlightMeta = null;
+      renderSpotlightSearchResults();
+    }
+  }
+  input?.focus();
+}
+
 async function executeSpotlightItem(item) {
   if (!item) return;
+
+  if (item.type === 'cmd' && item.id === 'cmd-semantic-search') {
+    switchSpotlightMode('semantic', { triggerSearch: false });
+    return;
+  }
+
   closeSpotlight();
+
+  if (item.type === 'search-result') {
+    const r = item.payload || {};
+    if (r.page) {
+      store.emit('anchor:jump', { file: r.name, page: r.page });
+      showToast(`已定位至 ${r.name} 第 ${r.page} 页`, 'success', { duration: 2000 });
+      return;
+    }
+    if (r.sheet || r.cell) {
+      store.emit('anchor:jump', { file: r.name, sheet: r.sheet || '', cell: r.cell || '' });
+      showToast(`已定位至 ${r.name} ${r.sheet ? `${r.sheet}!` : ''}${r.cell || ''}`, 'success', { duration: 2000 });
+      return;
+    }
+    store.emit('file:open', { path: r.path, name: r.name, ext: r.ext });
+    showToast(`已打开：${r.name}`, 'info', { duration: 1800 });
+    return;
+  }
 
   if (item.type === 'file') {
     openFileObject(item.payload);
@@ -992,14 +1381,27 @@ async function executeSpotlightItem(item) {
   }
 }
 
-function openSpotlight() {
+function openSpotlight(opts = {}) {
   const { overlay, input } = getSpotlightElements();
   if (!overlay) return;
+  const requestedMode = typeof opts === 'string' ? opts : opts?.mode;
+  spotlightMode = SPOTLIGHT_MODES.some((m) => m.id === requestedMode) ? requestedMode : 'quick';
   spotlightActiveIndex = 0;
-  if (input) input.value = '';
+  spotlightLoading = false;
+  spotlightMeta = null;
+  if (input) input.value = typeof opts?.query === 'string' ? opts.query : '';
+
   overlay.hidden = false;
   overlay.setAttribute('aria-hidden', 'false');
-  renderSpotlightList();
+  renderSpotlightModeBar();
+  if (spotlightMode === 'quick') {
+    renderSpotlightList();
+  } else if (input?.value?.trim()) {
+    runBackendSearch(spotlightMode, input.value.trim());
+  } else {
+    spotlightItems = [];
+    renderSpotlightSearchResults();
+  }
   window.requestAnimationFrame(() => {
     input?.focus();
   });
@@ -1008,18 +1410,66 @@ function openSpotlight() {
 function closeSpotlight() {
   const overlay = document.getElementById('spotlight-overlay');
   if (!overlay) return;
+  if (spotlightSearchTimer) {
+    window.clearTimeout(spotlightSearchTimer);
+    spotlightSearchTimer = null;
+  }
+  spotlightSeq += 1;
   overlay.hidden = true;
   overlay.setAttribute('aria-hidden', 'true');
 }
 
 function bindSpotlightEvents() {
-  const { overlay, input, resultsEl } = getSpotlightElements();
+  const { overlay, card, input, resultsEl } = getSpotlightElements();
   if (!overlay || overlay.dataset.bound === '1') return;
   overlay.dataset.bound = '1';
 
+  card?.addEventListener('click', (e) => {
+    const modeBtn = e.target.closest('[data-spotlight-mode]');
+    if (modeBtn) {
+      switchSpotlightMode(modeBtn.dataset.spotlightMode, { triggerSearch: true });
+      return;
+    }
+    if (e.target.closest('#spotlight-semantic-go')) {
+      const q = input?.value?.trim() || '';
+      if (!q) {
+        showToast('请输入自然语言描述后再检索', 'warning');
+        input?.focus();
+        return;
+      }
+      runBackendSearch('semantic', q);
+    }
+  });
+
   input?.addEventListener('input', () => {
     spotlightActiveIndex = 0;
-    renderSpotlightList();
+    const q = String(input.value || '');
+    if (spotlightMode === 'quick') {
+      renderSpotlightList();
+      return;
+    }
+    if (spotlightMode === 'keyword') {
+      if (spotlightSearchTimer) window.clearTimeout(spotlightSearchTimer);
+      if (!q.trim()) {
+        spotlightSeq += 1;
+        spotlightLoading = false;
+        spotlightItems = [];
+        spotlightMeta = null;
+        renderSpotlightSearchResults();
+        return;
+      }
+      spotlightSearchTimer = window.setTimeout(() => {
+        runBackendSearch('keyword', q.trim());
+      }, 260);
+      return;
+    }
+    if (spotlightMode === 'semantic' && !q.trim()) {
+      spotlightSeq += 1;
+      spotlightLoading = false;
+      spotlightItems = [];
+      spotlightMeta = null;
+      renderSpotlightSearchResults();
+    }
   });
 
   input?.addEventListener('keydown', (e) => {
@@ -1040,6 +1490,20 @@ function bindSpotlightEvents() {
       }
     } else if (e.key === 'Enter') {
       e.preventDefault();
+      const q = input.value?.trim() || '';
+      if (spotlightMode === 'keyword' && q && (spotlightLoading || spotlightItems.length === 0)) {
+        if (spotlightSearchTimer) window.clearTimeout(spotlightSearchTimer);
+        runBackendSearch('keyword', q);
+        return;
+      }
+      if (spotlightMode === 'semantic') {
+        if (!spotlightLoading && spotlightItems.length > 0 && spotlightItems[spotlightActiveIndex]) {
+          executeSpotlightItem(spotlightItems[spotlightActiveIndex]);
+        } else if (q) {
+          runBackendSearch('semantic', q);
+        }
+        return;
+      }
       executeSpotlightItem(spotlightItems[spotlightActiveIndex]);
     }
   });
@@ -1223,7 +1687,7 @@ function openVoiceSheet() {
 }
 
 /* --------------------------------------------------------------------------
- * 7. Settings & LAN Access Sheet
+ * 7. Settings & LAN Access Sheet (V2: Free Basic AI Presets + Zero-Key Toggle + Font Size)
  * -------------------------------------------------------------------------- */
 
 async function openSettingsSheet() {
@@ -1240,7 +1704,11 @@ async function openSettingsSheet() {
 
   const lanUrl = info?.ip && info?.port ? `http://${info.ip}:${info.port}` : window.location.origin;
   const aiCfg = cfg.ai || {};
+  const aiPresets = Array.isArray(info?.ai_presets) && info.ai_presets.length > 0 ? info.ai_presets : DEFAULT_AI_PRESETS;
+  const freeAiEnabled =
+    aiCfg.enable_free_ai !== undefined ? Boolean(aiCfg.enable_free_ai) : info?.free_ai_enabled !== false;
   const currentTheme = store.state.theme || cfg.theme || 'light';
+  const initialFontSize = Math.min(24, Math.max(12, Number(cfg.doc_font_size || store.state.docFontSize || 15)));
   const xlsxFiles = getXlsxFiles();
   const currentDefaultExcel = cfg.default_progress_excel || '';
   const hasCurrentInList = xlsxFiles.some((f) => f.path === currentDefaultExcel);
@@ -1263,6 +1731,35 @@ async function openSettingsSheet() {
     title: '系统与 AI 设置',
     bodyHtml: `
       <div style="display:flex;flex-direction:column;gap:12px;">
+        <div class="glass-card" style="display:flex;flex-direction:column;gap:8px;border-color:var(--accent);background:var(--accent-soft);">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:12.5px;font-weight:600;color:var(--accent);">${icon('sparkles', 14)} 一键切换免费 / 常用 AI 预设</span>
+            <span style="font-size:11px;color:var(--text-secondary);">点击即自动填充接入参数</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;" id="cfg-preset-grid">
+            ${aiPresets
+              .map(
+                (p) => `
+                <button
+                  type="button"
+                  class="pill-btn pill-btn-sm"
+                  data-preset-id="${escapeHtml(p.id)}"
+                  style="height:28px;font-size:12px;background:var(--bg-island);"
+                >${escapeHtml(p.name || p.label || p.id)}</button>
+              `
+              )
+              .join('')}
+          </div>
+          <div id="cfg-preset-hint" style="display:none;font-size:11.5px;color:var(--text-primary);padding:7px 9px;border-radius:10px;background:var(--bg-island);border:1px solid var(--border-hairline);"></div>
+        </div>
+
+        <label class="glass-card" style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;cursor:pointer;">
+          <input type="checkbox" id="cfg-enable-free-ai" class="file-check" style="margin-top:2px;" ${freeAiEnabled ? 'checked' : ''} />
+          <span style="font-size:12.5px;line-height:1.45;color:var(--text-primary);">
+            <strong>开启免 Key 免费基础 AI</strong>（未填 API Key 时自动提供基础 AI 总结、问答与语义检索）
+          </span>
+        </label>
+
         <div class="glass-card" style="display:flex;flex-direction:column;gap:8px;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
             <span style="font-size:12.5px;font-weight:600;color:var(--text-primary);">${icon('globe', 14)} 手机端局域网直连</span>
@@ -1272,21 +1769,35 @@ async function openSettingsSheet() {
             <code style="padding:5px 10px;border-radius:9999px;background:var(--accent-soft);color:var(--accent);font-family:var(--font-mono);font-size:12.5px;font-weight:600;">${escapeHtml(lanUrl)}</code>
             <button type="button" class="pill-btn pill-btn-sm" id="cfg-copy-lan">${icon('copy', 13)} 复制局域网地址</button>
           </div>
-          <div style="display:flex;gap:12px;font-size:11.5px;color:var(--text-tertiary);">
+          <div style="display:flex;gap:12px;font-size:11.5px;color:var(--text-tertiary);flex-wrap:wrap;">
             <span>平台：${escapeHtml(info.platform || navigator.platform || 'Local')}</span>
-            <span>AI 状态：${info.ai_configured ? '已配置 API Key' : '离线规则降级可用'}</span>
+            <span>AI 状态：${info.ai_configured ? '已配置 API Key' : freeAiEnabled ? '免 Key 免费基础 AI 已就绪' : '本地规则引擎'}</span>
           </div>
         </div>
 
-        <div>
-          <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">外观主题</label>
-          <div style="display:flex;gap:8px;">
-            <button type="button" class="pill-btn pill-btn-sm ${currentTheme === 'light' ? 'pill-btn-primary' : ''}" data-set-theme="light">
-              ${icon('sun', 13)} 浅色 Sonoma
-            </button>
-            <button type="button" class="pill-btn pill-btn-sm ${currentTheme === 'dark' ? 'pill-btn-primary' : ''}" data-set-theme="dark">
-              ${icon('moon', 13)} 深色 Sequoia
-            </button>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div>
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">外观主题</label>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="pill-btn pill-btn-sm ${currentTheme === 'light' ? 'pill-btn-primary' : ''}" data-set-theme="light">
+                ${icon('sun', 13)} 浅色
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm ${currentTheme === 'dark' ? 'pill-btn-primary' : ''}" data-set-theme="dark">
+                ${icon('moon', 13)} 深色
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label for="cfg-doc-font-size" style="display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">
+              <span>默认文档字号</span>
+              <span id="cfg-doc-font-val" style="color:var(--accent);font-family:var(--font-mono);">${initialFontSize}px</span>
+            </label>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <button type="button" class="icon-pill" id="cfg-font-dec" style="width:28px;height:28px;font-size:13px;" title="减小字号">A-</button>
+              <input id="cfg-doc-font-size" type="range" min="12" max="24" step="1" value="${initialFontSize}" style="flex:1;min-width:60px;" />
+              <button type="button" class="icon-pill" id="cfg-font-inc" style="width:28px;height:28px;font-size:13px;" title="增大字号">A+</button>
+            </div>
           </div>
         </div>
 
@@ -1297,7 +1808,7 @@ async function openSettingsSheet() {
 
         <div>
           <label for="cfg-api-key" style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">AI API Key</label>
-          <input id="cfg-api-key" class="apple-input" type="password" placeholder="留空则启用离线规则提取降级" value="${escapeHtml(aiCfg.api_key || '')}" />
+          <input id="cfg-api-key" class="apple-input" type="password" placeholder="留空则使用免 Key 免费基础 AI 或本地规则提取" value="${escapeHtml(aiCfg.api_key || '')}" />
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
@@ -1332,6 +1843,63 @@ async function openSettingsSheet() {
       <button type="button" class="pill-btn pill-btn-primary" id="cfg-save">保存配置</button>
     `,
     onMount(card) {
+      const baseUrlInput = card.querySelector('#cfg-base-url');
+      const apiKeyInput = card.querySelector('#cfg-api-key');
+      const modelInput = card.querySelector('#cfg-model');
+      const searchParamInput = card.querySelector('#cfg-web-search-param');
+      const freeAiChk = card.querySelector('#cfg-enable-free-ai');
+      const presetHintEl = card.querySelector('#cfg-preset-hint');
+      const fontSlider = card.querySelector('#cfg-doc-font-size');
+      const fontValLabel = card.querySelector('#cfg-doc-font-val');
+
+      const updateFontPreview = (val) => {
+        const clamped = applyDocTypographySafe(val);
+        if (fontSlider) fontSlider.value = String(clamped);
+        if (fontValLabel) fontValLabel.textContent = `${clamped}px`;
+      };
+
+      fontSlider?.addEventListener('input', () => updateFontPreview(fontSlider.value));
+      card.querySelector('#cfg-font-dec')?.addEventListener('click', () => {
+        updateFontPreview((Number(fontSlider?.value) || 15) - 1);
+      });
+      card.querySelector('#cfg-font-inc')?.addEventListener('click', () => {
+        updateFontPreview((Number(fontSlider?.value) || 15) + 1);
+      });
+
+      card.querySelector('#cfg-preset-grid')?.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-preset-id]');
+        if (!btn) return;
+        const preset = aiPresets.find((p) => p.id === btn.dataset.presetId);
+        if (!preset) return;
+
+        card.querySelectorAll('[data-preset-id]').forEach((b) => {
+          b.classList.toggle('pill-btn-primary', b === btn);
+          b.style.background = b === btn ? '' : 'var(--bg-island)';
+        });
+
+        if (baseUrlInput && preset.base_url !== undefined) baseUrlInput.value = preset.base_url;
+        if (modelInput && preset.model !== undefined) modelInput.value = preset.model;
+        if (searchParamInput && preset.web_search_param !== undefined) {
+          searchParamInput.value = preset.web_search_param;
+        }
+        if (freeAiChk) {
+          if (preset.needs_key === false) {
+            freeAiChk.checked = true;
+            if (apiKeyInput) apiKeyInput.value = '';
+          } else if (!apiKeyInput?.value?.trim()) {
+            apiKeyInput?.focus();
+          }
+        }
+
+        if (presetHintEl) {
+          const docLinkHtml = preset.doc_url
+            ? ` <a href="${escapeHtml(preset.doc_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600;text-decoration:underline;margin-left:4px;">获取免费 Key ↗</a>`
+            : '';
+          presetHintEl.innerHTML = `${escapeHtml(preset.hint || `已填入 ${preset.name} 参数`)}${docLinkHtml}`;
+          presetHintEl.style.display = 'block';
+        }
+      });
+
       card.querySelector('#cfg-copy-lan')?.addEventListener('click', () => {
         copyInternal(lanUrl, `已复制局域网地址：${lanUrl}`);
       });
@@ -1357,13 +1925,17 @@ async function openSettingsSheet() {
           .map((s) => s.trim())
           .filter(Boolean);
 
+        const docFontSize = Math.min(24, Math.max(12, Number(fontSlider?.value) || 15));
+        const rawBaseUrl = baseUrlInput?.value?.trim() ?? '';
         const payload = {
           theme: store.state.theme,
+          doc_font_size: docFontSize,
           ai: {
-            base_url: card.querySelector('#cfg-base-url')?.value?.trim() || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-            api_key: card.querySelector('#cfg-api-key')?.value?.trim() || '',
-            model: card.querySelector('#cfg-model')?.value?.trim() || 'qwen-plus',
-            web_search_param: card.querySelector('#cfg-web-search-param')?.value?.trim() || 'enable_search',
+            base_url: rawBaseUrl,
+            api_key: apiKeyInput?.value?.trim() || '',
+            model: modelInput?.value?.trim() || 'qwen-plus',
+            web_search_param: searchParamInput?.value?.trim() || '',
+            enable_free_ai: Boolean(freeAiChk?.checked),
           },
           default_notes_dir: card.querySelector('#cfg-notes-dir')?.value?.trim() || './data/notes',
           default_progress_excel: card.querySelector('#cfg-default-excel')?.value?.trim() || '',
@@ -1372,7 +1944,9 @@ async function openSettingsSheet() {
 
         try {
           const updated = await api.put('/api/system/config', payload);
+          applyDocTypographySafe(updated?.doc_font_size ?? docFontSize);
           store.setState({ config: updated }, 'config:changed');
+          store.emit('config:changed', updated);
           store.emit('files:updated');
           closeSheet();
           showToast('系统与 AI 配置已保存', 'success');
@@ -1464,7 +2038,7 @@ export function initSpotlight() {
     }
   });
 
-  document.getElementById('btn-spotlight')?.addEventListener('click', openSpotlight);
+  document.getElementById('btn-spotlight')?.addEventListener('click', () => openSpotlight());
   document.getElementById('btn-voice-quick')?.addEventListener('click', openVoiceSheet);
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsSheet);
 

@@ -27,6 +27,7 @@ hiddenimports = [
     "api.excel_api",
     "api.tools_api",
     "api.ai_api",
+    "api.search_api",
     "core",
     "core.safe_io",
     "core.doc_engine",
@@ -34,6 +35,7 @@ hiddenimports = [
     "core.app_launcher",
     "core.tree_store",
     "core.ai_service",
+    "core.search_engine",
     "core.scheduler",
     # Uvicorn / FastAPI / Starlette dynamic imports
     "uvicorn.logging",

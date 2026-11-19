@@ -4,7 +4,18 @@
  * binds top bar & responsive mobile/tablet controls, and sets initial Dynamic Island state.
  */
 
-import { store, applyTheme, setIsland, showToast, openSheet, closeSheet } from './store.js';
+import {
+  store,
+  applyTheme,
+  applyDocTypography,
+  applyPaneWidths,
+  recordRecentFile,
+  clearDragPayload,
+  setIsland,
+  showToast,
+  openSheet,
+  closeSheet,
+} from './store.js';
 import { api, connectEventStream } from './api_client.js';
 import { icon } from './icons.js';
 import { initLeftTree } from './left_tree.js';
@@ -75,7 +86,10 @@ function bindTopBarControls() {
 
   store.on('theme:changed', updateThemeButtonIcon);
   store.on('layout:changed', syncLayoutClasses);
-  store.on('file:open', () => {
+  store.on('file:open', (fileInfo) => {
+    if (fileInfo) {
+      recordRecentFile(fileInfo);
+    }
     if (window.innerWidth <= 767) {
       store.setState({ mobileTab: 'doc' });
       syncLayoutClasses();
@@ -84,6 +98,71 @@ function bindTopBarControls() {
       syncLayoutClasses();
     }
   });
+}
+
+function bindPaneResizers() {
+  const attachResizer = (el, side) => {
+    if (!el) return;
+    let dragging = false;
+    let startX = 0;
+    let startW = 0;
+
+    const endDrag = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      el.classList.remove('is-dragging');
+      document.body.classList.toggle('is-resizing', false);
+      if (e?.pointerId != null) {
+        try {
+          el.releasePointerCapture?.(e.pointerId);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      dragging = true;
+      startX = e.clientX;
+      const cur = store.state.paneWidths || { left: 260, right: 360 };
+      startW = side === 'left' ? cur.left : cur.right;
+      el.classList.add('is-dragging');
+      document.body.classList.toggle('is-resizing', true);
+      try {
+        el.setPointerCapture?.(e.pointerId);
+      } catch {
+        // ignore
+      }
+    });
+
+    el.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const cur = store.state.paneWidths || { left: 260, right: 360 };
+      if (side === 'left') {
+        applyPaneWidths(startW + dx, cur.right);
+      } else {
+        applyPaneWidths(cur.left, startW - dx);
+      }
+    });
+
+    el.addEventListener('pointerup', endDrag);
+    el.addEventListener('pointercancel', endDrag);
+
+    el.addEventListener('dblclick', () => {
+      const cur = store.state.paneWidths || { left: 260, right: 360 };
+      if (side === 'left') {
+        applyPaneWidths(260, cur.right);
+      } else {
+        applyPaneWidths(cur.left, 360);
+      }
+    });
+  };
+
+  attachResizer(document.getElementById('resizer-left'), 'left');
+  attachResizer(document.getElementById('resizer-right'), 'right');
 }
 
 function bindMobileControls() {
@@ -186,6 +265,23 @@ async function loadSystemInfo() {
     }
     if (cfg && typeof cfg === 'object') {
       store.setState({ config: cfg }, 'system:config');
+      let hasLocalSize = false;
+      let hasLocalFamily = false;
+      try {
+        hasLocalSize = localStorage.getItem('sln_doc_font_size') !== null;
+        hasLocalFamily = localStorage.getItem('sln_doc_font_family') !== null;
+      } catch {
+        // ignore storage errors
+      }
+      const nextSize = !hasLocalSize && cfg.doc_font_size != null
+        ? cfg.doc_font_size
+        : store.state.docFontSize;
+      const nextFamily = !hasLocalFamily && cfg.doc_font_family != null
+        ? cfg.doc_font_family
+        : store.state.docFontFamily;
+      if ((!hasLocalSize && cfg.doc_font_size != null) || (!hasLocalFamily && cfg.doc_font_family != null)) {
+        applyDocTypography(nextSize, nextFamily);
+      }
     }
   } catch {
     // Graceful fallback if server unavailable
@@ -194,8 +290,10 @@ async function loadSystemInfo() {
 
 async function bootstrap() {
   window.__SLN_BOOTED__ = true;
-  // 1. Apply saved theme immediately
+  // 1. Apply saved theme, typography & pane widths immediately
   applyTheme(store.state.theme);
+  applyDocTypography(store.state.docFontSize, store.state.docFontFamily);
+  applyPaneWidths(store.state.paneWidths?.left ?? 260, store.state.paneWidths?.right ?? 360);
   updateThemeButtonIcon();
 
   // 2. Mount panels cleanly with error isolation
@@ -217,9 +315,11 @@ async function bootstrap() {
   safeMount('right_panel', () => initRightPanel(rightEl));
   safeMount('spotlight', () => initSpotlight());
 
-  // 3. Bind shell controls & responsive state
+  // 3. Bind shell controls, pane resizers, drag cleanup & responsive state
   bindTopBarControls();
+  bindPaneResizers();
   bindMobileControls();
+  window.addEventListener('dragend', () => clearDragPayload());
   syncLayoutClasses();
 
   // 4. Initialize Dynamic Island to idle

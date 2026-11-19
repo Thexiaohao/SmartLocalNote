@@ -1,14 +1,21 @@
 /**
- * SmartLocalNote - Right Copilot Panel (Production)
- * Stages 3 & 4:
- *  - Mode 1 (`summary`, default): AI Summarize + Structured Todos + 10s Test & Scheduled Reminders + Focus (15s/15m/25m/45m) + Local App Launchers
+ * SmartLocalNote - Right Copilot Panel (V2)
+ * Features:
+ *  - Mode 1 (`summary`, default): AI Summarize + Structured Todos + Reminders + Focus (15s/15m/25m/45m) + Local App Launchers
  *  - Mode 2 (`chat`): Innovation 4 Zero-Vector Cross-Format Multi-File RAG Streaming Chat + Privacy Lock Guard + 1-Click Note/Doc/Excel Actions
  *  - Mode 3 (`tools`): Local Tools Workbench (Quick Excel Form & Structure, Virtual Knowledge Tree & Table Overview + AI Classify, Apps & Workspaces)
+ *  - V2 Pain Point #4: Modular Right Panel Customization (reorder tabs, toggle/reorder summary & tool modules, drag-reorder tool cards, AI Prompt Templates)
+ *  - V2 Pain Point #6B: Live Free Basic AI / Custom Model / Local Engine clickable status pill
+ *  - V2 Pain Point #7: Draggable AI Summary cards, Todo items, and Chat replies -> drop straight into Center Note
  *
  * Strictly decoupled via `store` EventBus — never touches left/center DOM.
  */
 
-import {
+import * as storeMod from './store.js';
+import { api, streamPostSSE } from './api_client.js';
+import { icon } from './icons.js';
+
+const {
   store,
   escapeHtml,
   toggleContextPath,
@@ -16,17 +23,190 @@ import {
   openSheet,
   closeSheet,
   renderMarkdownSafe,
-} from './store.js';
-import { api, streamPostSSE } from './api_client.js';
-import { icon } from './icons.js';
+} = storeMod;
 
-const MODES = [
-  { id: 'summary', label: 'AI总结', index: 0 },
-  { id: 'chat', label: '联网问答', index: 1 },
-  { id: 'tools', label: '工具台', index: 2 },
+const UI_LAYOUT_STORAGE_KEY = 'sln_ui_layout';
+
+const TAB_META = {
+  summary: { id: 'summary', label: 'AI总结' },
+  chat: { id: 'chat', label: '联网问答' },
+  tools: { id: 'tools', label: '工具台' },
+};
+
+const SUMMARY_MODULE_META = {
+  input: { id: 'input', label: '随手速记区' },
+  summary_card: { id: 'summary_card', label: 'AI 摘要与待办' },
+  reminders: { id: 'reminders', label: '定时提醒' },
+  ai_templates: { id: 'ai_templates', label: 'AI 常用指令模板' },
+};
+
+const TOOL_MODULE_META = {
+  quick_excel: { id: 'quick_excel', label: '快捷表单填表与表格操作' },
+  knowledge_tree: { id: 'knowledge_tree', label: '虚拟知识树分类与总览' },
+  apps_workspaces: { id: 'apps_workspaces', label: '本地软件库与工作区联启' },
+  ai_templates: { id: 'ai_templates', label: 'AI 常用指令模板' },
+};
+
+const DEFAULT_TABS_ORDER = ['summary', 'chat', 'tools'];
+const DEFAULT_SUMMARY_MODULES = [
+  { id: 'input', visible: true },
+  { id: 'summary_card', visible: true },
+  { id: 'reminders', visible: true },
+  { id: 'ai_templates', visible: true },
+];
+const DEFAULT_TOOL_MODULES = [
+  { id: 'quick_excel', visible: true },
+  { id: 'knowledge_tree', visible: true },
+  { id: 'apps_workspaces', visible: true },
+  { id: 'ai_templates', visible: true },
+];
+
+const AI_PROMPT_TEMPLATES = [
+  {
+    id: 'tpl-distill',
+    label: '✨ 精简提炼要点',
+    prompt: '请精简提炼当前文档或参考资料的核心要点、关键结论与对应页码/单元格位置（分条输出）。',
+  },
+  {
+    id: 'tpl-polish',
+    label: '📝 润色改写当前笔记',
+    prompt: '请帮我润色并改写当前笔记内容，保留原意的同时让结构更清晰、表达更精炼，直接输出 Markdown。',
+  },
+  {
+    id: 'tpl-quiz',
+    label: '❓ 出 5 道巩固测验题',
+    prompt: '请基于当前文档内容出 5 道由浅入深的巩固测验题，并在末尾附带简要答案与解析。',
+  },
+  {
+    id: 'tpl-translate',
+    label: '🌐 中英互译',
+    prompt: '请将当前文档的核心内容进行高质量中英互译（中文译为地道英文，英文译为流畅中文）。',
+  },
 ];
 
 const TREE_STATUS_OPTIONS = ['待开始', '复习中', '已完成'];
+
+function setDragPayload(e, payload) {
+  if (typeof storeMod.setDragPayload === 'function') {
+    return storeMod.setDragPayload(e, payload);
+  }
+  store.state.activeDragPayload = payload || null;
+  if (e?.dataTransfer && payload) {
+    try {
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData('application/x-sln-block', JSON.stringify(payload));
+      e.dataTransfer.setData('text/plain', String(payload.markdown || payload.label || ''));
+    } catch {
+      // ignore dataTransfer errors
+    }
+  }
+}
+
+function clearDragPayload() {
+  if (typeof storeMod.clearDragPayload === 'function') {
+    return storeMod.clearDragPayload();
+  }
+  store.state.activeDragPayload = null;
+}
+
+function normalizeTabsOrder(rawOrder) {
+  const valid = ['summary', 'chat', 'tools'];
+  const result = [];
+  if (Array.isArray(rawOrder)) {
+    for (const id of rawOrder) {
+      if (valid.includes(id) && !result.includes(id)) {
+        result.push(id);
+      }
+    }
+  }
+  for (const id of valid) {
+    if (!result.includes(id)) result.push(id);
+  }
+  return result;
+}
+
+function normalizeModuleList(rawList, defaults) {
+  const allowed = defaults.map((d) => d.id);
+  const seen = new Set();
+  const result = [];
+
+  if (Array.isArray(rawList)) {
+    for (const entry of rawList) {
+      const id = typeof entry === 'string' ? entry : entry?.id;
+      if (!id || !allowed.includes(id) || seen.has(id)) continue;
+      seen.add(id);
+      const visible = typeof entry === 'object' && entry !== null ? entry.visible !== false : true;
+      result.push({ id, visible });
+    }
+  } else if (rawList && typeof rawList === 'object' && Array.isArray(rawList.order)) {
+    const hiddenSet = new Set(Array.isArray(rawList.hidden) ? rawList.hidden : []);
+    for (const id of rawList.order) {
+      if (!allowed.includes(id) || seen.has(id)) continue;
+      seen.add(id);
+      result.push({ id, visible: !hiddenSet.has(id) });
+    }
+  }
+
+  for (const def of defaults) {
+    if (!seen.has(def.id)) {
+      seen.add(def.id);
+      result.push({ id: def.id, visible: def.visible !== false });
+    }
+  }
+  return result;
+}
+
+function getUiLayout() {
+  const raw = store.state.uiLayout || {};
+  return {
+    rightTabsOrder: normalizeTabsOrder(raw.rightTabsOrder || DEFAULT_TABS_ORDER),
+    rightSummaryModules: normalizeModuleList(raw.rightSummaryModules, DEFAULT_SUMMARY_MODULES),
+    rightToolModules: normalizeModuleList(raw.rightToolModules, DEFAULT_TOOL_MODULES),
+  };
+}
+
+function commitUiLayout(patch) {
+  if (typeof storeMod.updateUiLayout === 'function') {
+    return storeMod.updateUiLayout(patch);
+  }
+  const current = getUiLayout();
+  const next = {
+    rightTabsOrder: patch.rightTabsOrder ? normalizeTabsOrder(patch.rightTabsOrder) : current.rightTabsOrder,
+    rightSummaryModules: patch.rightSummaryModules
+      ? normalizeModuleList(patch.rightSummaryModules, DEFAULT_SUMMARY_MODULES)
+      : current.rightSummaryModules,
+    rightToolModules: patch.rightToolModules
+      ? normalizeModuleList(patch.rightToolModules, DEFAULT_TOOL_MODULES)
+      : current.rightToolModules,
+  };
+  store.state.uiLayout = next;
+  try {
+    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('ui:layout-changed', next);
+  return next;
+}
+
+function resetUiLayoutState() {
+  if (typeof storeMod.resetUiLayout === 'function') {
+    return storeMod.resetUiLayout();
+  }
+  const next = {
+    rightTabsOrder: [...DEFAULT_TABS_ORDER],
+    rightSummaryModules: DEFAULT_SUMMARY_MODULES.map((m) => ({ ...m })),
+    rightToolModules: DEFAULT_TOOL_MODULES.map((m) => ({ ...m })),
+  };
+  store.state.uiLayout = next;
+  try {
+    localStorage.removeItem(UI_LAYOUT_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  store.emit('ui:layout-changed', next);
+  return next;
+}
 
 function getBaseName(pathStr) {
   const s = String(pathStr || '');
@@ -46,11 +226,6 @@ function getFormatEmoji(pathStr) {
   if (ext === '.xlsx' || ext === '.xlsm' || ext === '.csv') return '📊';
   if (ext === '.md' || ext === '.txt') return '📝';
   return '📄';
-}
-
-function getModeIndex(mode) {
-  const found = MODES.find((m) => m.id === mode);
-  return found ? found.index : 0;
 }
 
 function getExcelFiles() {
@@ -124,8 +299,19 @@ function buildTreeRenderList(nodes) {
   return ordered;
 }
 
+function moveArrayItem(arr, index, delta) {
+  const next = [...arr];
+  const target = index + delta;
+  if (index < 0 || index >= next.length || target < 0 || target >= next.length) {
+    return next;
+  }
+  const [item] = next.splice(index, 1);
+  next.splice(target, 0, item);
+  return next;
+}
+
 /**
- * Initialize Right Copilot Panel (Stages 3 & 4).
+ * Initialize Right Copilot Panel (V2).
  * @param {HTMLElement} containerEl
  */
 export function initRightPanel(containerEl) {
@@ -137,6 +323,7 @@ export function initRightPanel(containerEl) {
     summaryLoading: false,
     summaryError: '',
     summaryResult: null,
+    liveProviderLabel: '',
 
     reminders: Array.isArray(store.state.reminders) ? store.state.reminders : [],
 
@@ -163,24 +350,164 @@ export function initRightPanel(containerEl) {
   };
 
   let msgSeq = 1;
+  let draggedToolModuleId = null;
+  const toolOpenStateById = new Map([
+    ['quick_excel', true],
+    ['knowledge_tree', true],
+    ['apps_workspaces', true],
+    ['ai_templates', true],
+  ]);
 
-  // Build persistent shell so .right-mode-header & .segmented-thumb animate smoothly without DOM destruction
-  containerEl.innerHTML = `
-    <div class="right-mode-header">
-      <div class="segmented-pill" data-seg="right-mode" role="tablist" aria-label="AI 副驾驶模式" style="width: 100%;">
-        <div class="segmented-thumb" style="width: calc((100% - 6px) / 3); transform: translateX(${getModeIndex(state.mode) * 100}%);"></div>
-        ${MODES.map(
-          (m) => `
+  function getTabsOrder() {
+    return getUiLayout().rightTabsOrder;
+  }
+
+  function getModeIndex(mode) {
+    const order = getTabsOrder();
+    const idx = order.indexOf(mode);
+    return idx >= 0 ? idx : 0;
+  }
+
+  function getAiStatusInfo() {
+    const aiCfg = store.state.config?.ai || {};
+    const sysInfo = store.state.systemInfo || {};
+    const hasKey = Boolean(String(aiCfg.api_key || '').trim() || sysInfo.ai_configured);
+    const freeAiEnabled =
+      aiCfg.enable_free_ai !== undefined
+        ? Boolean(aiCfg.enable_free_ai)
+        : sysInfo.free_ai_enabled !== false;
+    const model = String(aiCfg.model || 'qwen-plus').trim() || 'qwen-plus';
+    const live = String(state.liveProviderLabel || '').trim();
+
+    if (live) {
+      if (live.includes('本地规则') || live.includes('离线')) {
+        return {
+          dot: '⚪',
+          tone: 'neutral',
+          label: live,
+          title: '当前使用本地规则引擎 · 点击配置模型或开启免费基础 AI',
+        };
+      }
+      if (live.includes('免费')) {
+        return {
+          dot: '🟢',
+          tone: 'success',
+          label: live,
+          title: '免费基础 AI 运行中（免 Key） · 点击切换自定义模型或预设',
+        };
+      }
+      return {
+        dot: '🔵',
+        tone: 'accent',
+        label: live,
+        title: '自定义大模型已激活 · 点击调整 AI 设置',
+      };
+    }
+
+    if (hasKey) {
+      return {
+        dot: '🔵',
+        tone: 'accent',
+        label: `自定义模型 (${model})`,
+        title: `已配置 API Key · 当前模型 ${model}（点击修改）`,
+      };
+    }
+    if (freeAiEnabled) {
+      return {
+        dot: '🟢',
+        tone: 'success',
+        label: '免费基础 AI',
+        title: '免 Key 免费基础 AI 已开启 · 点击配置自定义模型',
+      };
+    }
+    return {
+      dot: '⚪',
+      tone: 'neutral',
+      label: '本地规则引擎',
+      title: '当前为本地规则引擎 · 点击开启免费基础 AI 或填写 API Key',
+    };
+  }
+
+  function renderAiStatusPillHtml() {
+    const info = getAiStatusInfo();
+    const toneStyle =
+      info.tone === 'success'
+        ? 'background:var(--success-soft);color:var(--success);border-color:transparent;'
+        : info.tone === 'accent'
+        ? 'background:var(--accent-soft);color:var(--accent);border-color:transparent;'
+        : 'background:var(--bg-subtle);color:var(--text-secondary);border-color:var(--border-hairline);';
+
+    return `
+      <button
+        type="button"
+        class="pill-btn pill-btn-sm ai-status-pill"
+        data-action="open-ai-settings"
+        title="${escapeHtml(info.title)}"
+        style="height:24px;padding:0 10px;font-size:11.5px;max-width:100%;overflow:hidden;${toneStyle}"
+      >
+        <span aria-hidden="true">${info.dot}</span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(info.label)}</span>
+      </button>
+    `;
+  }
+
+  function renderAiStatusBannerHtml(extraRightHtml = '') {
+    return `
+      <div class="ai-status-header-bar" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        ${renderAiStatusPillHtml()}
+        ${extraRightHtml}
+      </div>
+    `;
+  }
+
+  function renderAiTemplatesCardContentHtml() {
+    const activeName = store.state.activeFile?.name || '';
+    const ctxCount = (store.state.selectedContextPaths || []).length;
+    const hintText = activeName
+      ? `将结合「${activeName}」切换至问答发送`
+      : ctxCount > 0
+      ? `将结合已勾选的 ${ctxCount} 份文档发送`
+      : '点击即自动切换问答并发送指令';
+
+    return `
+      <div style="font-size:11.5px;color:var(--text-tertiary);margin-bottom:8px;">
+        ${escapeHtml(hintText)}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${AI_PROMPT_TEMPLATES.map(
+          (tpl) => `
           <button
             type="button"
-            class="segmented-btn ${state.mode === m.id ? 'is-active' : ''}"
-            data-mode="${m.id}"
-            role="tab"
-            aria-selected="${state.mode === m.id ? 'true' : 'false'}"
-          >${m.label}</button>
+            class="pill-btn pill-btn-sm"
+            data-action="use-ai-template"
+            data-template-id="${escapeHtml(tpl.id)}"
+            title="${escapeHtml(tpl.prompt)}"
+            style="height:28px;font-size:12px;"
+          >
+            ${escapeHtml(tpl.label)}
+          </button>
         `
         ).join('')}
       </div>
+    `;
+  }
+
+  // Build persistent shell so .right-mode-header & .segmented-thumb animate smoothly without DOM destruction
+  containerEl.innerHTML = `
+    <div class="right-mode-header" style="gap:8px;">
+      <div class="segmented-pill" data-seg="right-mode" role="tablist" aria-label="AI 副驾驶模式" style="flex:1 1 auto;min-width:0;">
+        <div class="segmented-thumb" style="width: calc((100% - 6px) / 3); transform: translateX(${getModeIndex(state.mode) * 100}%);"></div>
+      </div>
+      <button
+        type="button"
+        class="icon-pill right-customize-btn"
+        data-action="open-right-customize"
+        title="自定义右侧模块"
+        aria-label="自定义右侧模块"
+        style="width:32px;height:32px;flex-shrink:0;"
+      >
+        ${icon('settings', 15)}
+      </button>
     </div>
     <div class="right-panels-stage" style="flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden;">
       <div class="panel-body" data-mode-panel="summary"></div>
@@ -190,12 +517,36 @@ export function initRightPanel(containerEl) {
   `;
 
   const segPill = containerEl.querySelector('.segmented-pill[data-seg="right-mode"]');
-  const segThumb = segPill?.querySelector('.segmented-thumb');
   const summaryEl = containerEl.querySelector('[data-mode-panel="summary"]');
   const chatEl = containerEl.querySelector('[data-mode-panel="chat"]');
   const toolsEl = containerEl.querySelector('[data-mode-panel="tools"]');
 
+  function renderTabsHeader() {
+    if (!segPill) return;
+    const order = getTabsOrder();
+    const activeIdx = getModeIndex(state.mode);
+    segPill.innerHTML = `
+      <div class="segmented-thumb" style="width: calc((100% - 6px) / ${order.length}); transform: translateX(${activeIdx * 100}%);"></div>
+      ${order
+        .map((tabId) => {
+          const meta = TAB_META[tabId] || { id: tabId, label: tabId };
+          const isActive = state.mode === meta.id;
+          return `
+            <button
+              type="button"
+              class="segmented-btn ${isActive ? 'is-active' : ''}"
+              data-mode="${escapeHtml(meta.id)}"
+              role="tab"
+              aria-selected="${isActive ? 'true' : 'false'}"
+            >${escapeHtml(meta.label)}</button>
+          `;
+        })
+        .join('')}
+    `;
+  }
+
   function syncModeHeader() {
+    const segThumb = segPill?.querySelector('.segmented-thumb');
     const idx = getModeIndex(state.mode);
     if (segThumb) {
       segThumb.style.transform = `translateX(${idx * 100}%)`;
@@ -227,7 +578,7 @@ export function initRightPanel(containerEl) {
   }
 
   function switchMode(nextMode, { emitEvent = true } = {}) {
-    const valid = MODES.some((m) => m.id === nextMode) ? nextMode : 'summary';
+    const valid = Boolean(TAB_META[nextMode]) ? nextMode : 'summary';
     const changed = valid !== state.mode;
     state.mode = valid;
     store.state.rightMode = valid;
@@ -240,6 +591,131 @@ export function initRightPanel(containerEl) {
     if (changed && emitEvent) {
       store.emit('right:mode', valid);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pain Point #4: Right Panel Modular Customization Sheet
+  // ---------------------------------------------------------------------------
+
+  function openRightCustomizeSheet() {
+    openSheet({
+      title: '自定义右侧模块',
+      bodyHtml: `<div id="right-customize-root" style="display:flex;flex-direction:column;gap:14px;"></div>`,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="customize-reset-btn">
+          ${icon('rotate-ccw', 13)} 恢复默认
+        </button>
+        <button type="button" class="pill-btn pill-btn-primary" id="customize-done-btn">完成</button>
+      `,
+      onMount(card) {
+        const root = card.querySelector('#right-customize-root');
+
+        const renderCustomizeBody = () => {
+          if (!root) return;
+          const layout = getUiLayout();
+
+          const tabsHtml = layout.rightTabsOrder
+            .map((tabId, idx) => {
+              const meta = TAB_META[tabId] || { label: tabId };
+              return `
+                <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 11px;">
+                  <span style="font-size:13px;font-weight:500;">${escapeHtml(meta.label)}</span>
+                  <div style="display:inline-flex;gap:4px;">
+                    <button type="button" class="icon-pill" data-cust-tab-move="${idx}" data-delta="-1" ${idx === 0 ? 'disabled' : ''} title="上移" style="width:26px;height:26px;font-size:12px;">↑</button>
+                    <button type="button" class="icon-pill" data-cust-tab-move="${idx}" data-delta="1" ${idx === layout.rightTabsOrder.length - 1 ? 'disabled' : ''} title="下移" style="width:26px;height:26px;font-size:12px;">↓</button>
+                  </div>
+                </div>
+              `;
+            })
+            .join('');
+
+          const renderModuleSection = (list, metaMap, groupKey) =>
+            list
+              .map((mod, idx) => {
+                const label = metaMap[mod.id]?.label || mod.id;
+                return `
+                  <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 11px;">
+                    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;min-width:0;flex:1;">
+                      <input type="checkbox" class="file-check" data-cust-toggle="${groupKey}" data-idx="${idx}" ${mod.visible ? 'checked' : ''} />
+                      <span style="font-size:13px;font-weight:500;${mod.visible ? '' : 'color:var(--text-tertiary);text-decoration:line-through;'}">${escapeHtml(label)}</span>
+                    </label>
+                    <div style="display:inline-flex;gap:4px;flex-shrink:0;">
+                      <button type="button" class="icon-pill" data-cust-mod-move="${groupKey}" data-idx="${idx}" data-delta="-1" ${idx === 0 ? 'disabled' : ''} title="上移" style="width:26px;height:26px;font-size:12px;">↑</button>
+                      <button type="button" class="icon-pill" data-cust-mod-move="${groupKey}" data-idx="${idx}" data-delta="1" ${idx === list.length - 1 ? 'disabled' : ''} title="下移" style="width:26px;height:26px;font-size:12px;">↓</button>
+                    </div>
+                  </div>
+                `;
+              })
+              .join('');
+
+          root.innerHTML = `
+            <div>
+              <div class="section-heading" style="margin-top:0;">顶部 3 个标签页顺序</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">${tabsHtml}</div>
+            </div>
+            <div>
+              <div class="section-heading">AI 总结页子模块（显隐与顺序）</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                ${renderModuleSection(layout.rightSummaryModules, SUMMARY_MODULE_META, 'rightSummaryModules')}
+              </div>
+            </div>
+            <div>
+              <div class="section-heading">工具台模块卡片（显隐与顺序）</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                ${renderModuleSection(layout.rightToolModules, TOOL_MODULE_META, 'rightToolModules')}
+              </div>
+            </div>
+          `;
+        };
+
+        renderCustomizeBody();
+
+        root?.addEventListener('change', (e) => {
+          const chk = e.target.closest('[data-cust-toggle]');
+          if (!chk) return;
+          const groupKey = chk.dataset.custToggle;
+          const idx = Number(chk.dataset.idx);
+          const layout = getUiLayout();
+          const list = [...(layout[groupKey] || [])];
+          if (!list[idx]) return;
+          list[idx] = { ...list[idx], visible: chk.checked };
+          commitUiLayout({ [groupKey]: list });
+          renderCustomizeBody();
+        });
+
+        root?.addEventListener('click', (e) => {
+          const tabBtn = e.target.closest('[data-cust-tab-move]');
+          if (tabBtn) {
+            const idx = Number(tabBtn.dataset.custTabMove);
+            const delta = Number(tabBtn.dataset.delta);
+            const layout = getUiLayout();
+            const nextTabs = moveArrayItem(layout.rightTabsOrder, idx, delta);
+            commitUiLayout({ rightTabsOrder: nextTabs });
+            renderCustomizeBody();
+            return;
+          }
+
+          const modBtn = e.target.closest('[data-cust-mod-move]');
+          if (modBtn) {
+            const groupKey = modBtn.dataset.custModMove;
+            const idx = Number(modBtn.dataset.idx);
+            const delta = Number(modBtn.dataset.delta);
+            const layout = getUiLayout();
+            const nextList = moveArrayItem(layout[groupKey] || [], idx, delta);
+            commitUiLayout({ [groupKey]: nextList });
+            renderCustomizeBody();
+          }
+        });
+
+        card.querySelector('#customize-reset-btn')?.addEventListener('click', () => {
+          resetUiLayoutState();
+          renderCustomizeBody();
+          showToast('已恢复右侧默认模块布局', 'success');
+        });
+
+        card.querySelector('#customize-done-btn')?.addEventListener('click', closeSheet);
+      },
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -372,6 +848,30 @@ export function initRightPanel(containerEl) {
     const matchedFiles = Array.isArray(res?.matched_files) ? res.matched_files : [];
     const pendingAndFired = [...(state.reminders || [])].reverse();
 
+    const inputHtml = `
+      <div class="glass-card module-block" data-summary-module-id="input" style="margin-bottom:10px;padding:10px 12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
+          <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">速记与智能提炼</span>
+          <span style="font-size:11px;color:var(--text-tertiary);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(activeLabel)}">${escapeHtml(activeLabel)}</span>
+        </div>
+        <textarea
+          id="right-summary-input"
+          class="apple-textarea"
+          rows="3"
+          style="min-height:74px;font-size:13px;"
+          placeholder="随时记下一段想法、会议记录或复习安排，点击 AI 自动提炼待办与软件直达..."
+        >${escapeHtml(state.summaryInputText)}</textarea>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+          <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="summarize-doc" ${state.summaryLoading ? 'disabled' : ''}>
+            ${icon('sparkles', 13)} ${state.summaryLoading ? '提炼中...' : '总结当前文档'}
+          </button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" ${state.summaryLoading ? 'disabled' : ''}>
+            ${icon('sparkles', 13)} 总结上方文本
+          </button>
+        </div>
+      </div>
+    `;
+
     let resultHtml = '';
     if (state.summaryError) {
       resultHtml = `
@@ -385,18 +885,27 @@ export function initRightPanel(containerEl) {
     } else if (res) {
       const todos = Array.isArray(res.todos) ? res.todos : [];
       const tags = Array.isArray(res.tags) ? res.tags : [];
+      const providerBadgeText = res.provider_label
+        ? res.provider_label
+        : res.offline_mode
+        ? '离线规则提取'
+        : '大模型增强';
+      const isOfflineBadge = res.offline_mode && !String(res.provider_label || '').includes('免费');
 
       resultHtml = `
-        <div class="summary-card">
+        <div class="summary-card draggable-card" draggable="true" data-drag-type="ai-summary">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
             <span style="display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:var(--accent);">
               ${icon('sparkles', 14)} AI 结构化摘要
             </span>
             <div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span class="drag-pill-hint" title="按住直接拖进中间笔记栏" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:11px;color:var(--text-secondary);background:var(--bg-island);border:1px dashed var(--border-hairline);cursor:grab;">
+                ${icon('layers', 11)} 拖入笔记
+              </span>
               ${
-                res.offline_mode
-                  ? `<span class="pill-btn pill-btn-sm" title="离线规则提取模式 · 配置 API Key 后升级大模型" style="height:22px;padding:0 8px;font-size:11px;background:var(--warning-soft);color:var(--warning);border-color:transparent;cursor:help;">离线规则提取</span>`
-                  : `<span class="pill-btn pill-btn-sm" style="height:22px;padding:0 8px;font-size:11px;background:var(--success-soft);color:var(--success);border-color:transparent;">大模型增强</span>`
+                isOfflineBadge
+                  ? `<span class="pill-btn pill-btn-sm" title="离线规则提取模式 · 配置 API Key 或开启免费基础 AI 升级" style="height:22px;padding:0 8px;font-size:11px;background:var(--warning-soft);color:var(--warning);border-color:transparent;cursor:help;">${escapeHtml(providerBadgeText)}</span>`
+                  : `<span class="pill-btn pill-btn-sm" style="height:22px;padding:0 8px;font-size:11px;background:var(--success-soft);color:var(--success);border-color:transparent;">${escapeHtml(providerBadgeText)}</span>`
               }
               <button type="button" class="pill-btn pill-btn-sm" data-action="insert-summary-doc">
                 ${icon('plus', 12)} 插入当前文档
@@ -431,6 +940,7 @@ export function initRightPanel(containerEl) {
 
         <div class="section-heading">
           <span>需要做什么 (${todos.length})</span>
+          <span style="font-size:10.5px;font-weight:400;text-transform:none;letter-spacing:0;">可拖拽单条待办至中间笔记</span>
         </div>
 
         ${
@@ -442,7 +952,7 @@ export function initRightPanel(containerEl) {
                       ? `<span style="padding:1px 6px;border-radius:9999px;background:var(--danger-soft);color:var(--danger);font-size:10.5px;font-weight:600;flex-shrink:0;">优先</span>`
                       : '';
                   return `
-                    <div class="todo-item" data-todo-idx="${idx}">
+                    <div class="todo-item draggable-card" draggable="true" data-drag-type="ai-todo" data-todo-idx="${idx}">
                       <div class="todo-item-row">
                         <div style="min-width:0;flex:1 1 auto;">
                           <div class="todo-title">${escapeHtml(td.title)}</div>
@@ -452,7 +962,10 @@ export function initRightPanel(containerEl) {
                               : ''
                           }
                         </div>
-                        ${prioBadge}
+                        <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+                          ${prioBadge}
+                          <span class="drag-pill-hint" title="按住直接拖进中间笔记栏" style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10.5px;color:var(--text-tertiary);background:var(--bg-island);border:1px dashed var(--border-hairline);cursor:grab;">⠿ 拖入</span>
+                        </div>
                       </div>
                       <div class="todo-actions">
                         <button type="button" class="pill-btn pill-btn-sm" data-action="open-reminder-sheet" data-todo-idx="${idx}">
@@ -528,64 +1041,78 @@ export function initRightPanel(containerEl) {
       `;
     }
 
+    const summaryCardModuleHtml = `<div class="module-block" data-summary-module-id="summary_card">${resultHtml}</div>`;
+
     const remindersHtml = `
-      <div class="section-heading" style="margin-top:14px;">
-        <span>定时提醒 (${pendingAndFired.length})</span>
-        <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
-          ${icon('rotate-ccw', 11)} 刷新
-        </button>
-      </div>
-      ${
-        pendingAndFired.length
-          ? pendingAndFired
-              .map((rem) => {
-                const isFired = rem.status === 'fired';
-                return `
-                  <div class="glass-card" style="padding:9px 11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                    <div style="min-width:0;flex:1 1 auto;">
-                      <div style="display:flex;align-items:center;gap:6px;">
-                        <span style="width:7px;height:7px;border-radius:9999px;flex-shrink:0;background:${isFired ? 'var(--warning)' : 'var(--success)'};"></span>
-                        <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(rem.title)}</span>
+      <div class="module-block" data-summary-module-id="reminders">
+        <div class="section-heading" style="margin-top:14px;">
+          <span>定时提醒 (${pendingAndFired.length})</span>
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
+            ${icon('rotate-ccw', 11)} 刷新
+          </button>
+        </div>
+        ${
+          pendingAndFired.length
+            ? pendingAndFired
+                .map((rem) => {
+                  const isFired = rem.status === 'fired';
+                  return `
+                    <div class="glass-card" style="padding:9px 11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <div style="min-width:0;flex:1 1 auto;">
+                        <div style="display:flex;align-items:center;gap:6px;">
+                          <span style="width:7px;height:7px;border-radius:9999px;flex-shrink:0;background:${isFired ? 'var(--warning)' : 'var(--success)'};"></span>
+                          <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(rem.title)}</span>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;padding-left:13px;">
+                          ${isFired ? '已触发' : '待触发'} · ${escapeHtml(formatTriggerTime(rem.trigger_at))}
+                        </div>
                       </div>
-                      <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;padding-left:13px;">
-                        ${isFired ? '已触发' : '待触发'} · ${escapeHtml(formatTriggerTime(rem.trigger_at))}
-                      </div>
+                      <button type="button" class="icon-pill" data-action="delete-reminder" data-reminder-id="${escapeHtml(rem.id)}" title="取消/删除提醒" aria-label="删除提醒" style="width:26px;height:26px;">
+                        ${icon('x', 12)}
+                      </button>
                     </div>
-                    <button type="button" class="icon-pill" data-action="delete-reminder" data-reminder-id="${escapeHtml(rem.id)}" title="取消/删除提醒" aria-label="删除提醒" style="width:26px;height:26px;">
-                      ${icon('x', 12)}
-                    </button>
-                  </div>
-                `;
-              })
-              .join('')
-          : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
-      }
+                  `;
+                })
+                .join('')
+            : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
+        }
+      </div>
     `;
 
-    summaryEl.innerHTML = `
-      <div class="glass-card" style="margin-bottom:10px;padding:10px 12px;">
+    const aiTemplatesSummaryHtml = `
+      <div class="glass-card module-block" data-summary-module-id="ai_templates" style="margin-top:10px;padding:10px 12px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
-          <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">速记与智能提炼</span>
-          <span style="font-size:11px;color:var(--text-tertiary);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(activeLabel)}">${escapeHtml(activeLabel)}</span>
+          <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-primary);">
+            ${icon('zap', 13)} AI 常用指令模板
+          </span>
         </div>
-        <textarea
-          id="right-summary-input"
-          class="apple-textarea"
-          rows="3"
-          style="min-height:74px;font-size:13px;"
-          placeholder="随时记下一段想法、会议记录或复习安排，点击 AI 自动提炼待办与软件直达..."
-        >${escapeHtml(state.summaryInputText)}</textarea>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
-          <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="summarize-doc" ${state.summaryLoading ? 'disabled' : ''}>
-            ${icon('sparkles', 13)} ${state.summaryLoading ? '提炼中...' : '总结当前文档'}
-          </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" ${state.summaryLoading ? 'disabled' : ''}>
-            ${icon('sparkles', 13)} 总结上方文本
-          </button>
-        </div>
+        ${renderAiTemplatesCardContentHtml()}
       </div>
-      ${resultHtml}
-      ${remindersHtml}
+    `;
+
+    const moduleHtmlById = {
+      input: inputHtml,
+      summary_card: summaryCardModuleHtml,
+      reminders: remindersHtml,
+      ai_templates: aiTemplatesSummaryHtml,
+    };
+
+    const visibleModules = getUiLayout().rightSummaryModules.filter((m) => m.visible);
+    const bodyContent = visibleModules.length
+      ? visibleModules.map((m) => moduleHtmlById[m.id] || '').join('')
+      : `
+        <div class="empty-state" style="padding:28px 12px;">
+          <p class="empty-title">所有 AI 总结模块已隐藏</p>
+          <p class="empty-desc">点击右上角 ⚙ 自定义右侧模块重新开启需要的功能卡片。</p>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="open-right-customize">
+            ${icon('settings', 13)} 自定义模块
+          </button>
+        </div>
+      `;
+
+    summaryEl.innerHTML = `
+      ${renderAiStatusBannerHtml()}
+      ${bodyContent}
     `;
   }
 
@@ -603,13 +1130,22 @@ export function initRightPanel(containerEl) {
       const data = await api.post('/api/ai/summarize', payload);
       state.summaryResult = data;
       state.summaryError = '';
-      showToast(data?.offline_mode ? '已完成离线规则提炼（可配 API Key 升级大模型）' : 'AI 智能提炼完成', 'success');
+      if (data?.provider_label) {
+        state.liveProviderLabel = String(data.provider_label);
+      }
+      const toastMsg = data?.provider_label
+        ? `已完成提炼（${data.provider_label}）`
+        : data?.offline_mode
+        ? '已完成离线规则提炼（可配 API Key 升级大模型）'
+        : 'AI 智能提炼完成';
+      showToast(toastMsg, 'success');
     } catch (err) {
       state.summaryError = err?.message || 'AI 总结失败';
       showToast(state.summaryError, 'error');
     } finally {
       state.summaryLoading = false;
       renderSummaryMode();
+      renderChatHeaderStatus();
     }
   }
 
@@ -800,14 +1336,17 @@ export function initRightPanel(containerEl) {
       `;
     }
 
+    const isCompleted = !msg.streaming && Boolean(msg.content.trim());
     const bodyHtml = msg.content
       ? renderMarkdownSafe(msg.content)
       : `<span style="color:var(--text-tertiary);">正在抽取跨格式上下文并思考...</span>`;
 
-    const actionsHtml =
-      !msg.streaming && msg.content.trim()
-        ? `
+    const actionsHtml = isCompleted
+      ? `
           <div class="chat-quick-actions">
+            <span class="drag-pill-hint" title="按住直接拖进中间笔记栏" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:11px;color:var(--text-secondary);background:var(--bg-island);border:1px dashed var(--border-hairline);cursor:grab;">
+              ⠿ 拖入笔记
+            </span>
             <button type="button" class="pill-btn pill-btn-sm" data-action="chat-save-note" data-msg-id="${escapeHtml(msg.id)}">
               ${icon('file-text', 12)} 存入笔记
             </button>
@@ -819,10 +1358,14 @@ export function initRightPanel(containerEl) {
             </button>
           </div>
         `
-        : '';
+      : '';
 
     return `
-      <div class="chat-bubble is-assistant" data-msg-id="${escapeHtml(msg.id)}">
+      <div
+        class="chat-bubble is-assistant ${isCompleted ? 'draggable-card' : ''}"
+        ${isCompleted ? 'draggable="true" data-drag-type="ai-chat"' : ''}
+        data-msg-id="${escapeHtml(msg.id)}"
+      >
         <div class="chat-bubble-body md-preview" style="padding:0;font-size:13.5px;line-height:1.6;">
           ${bodyHtml}
         </div>
@@ -882,9 +1425,19 @@ export function initRightPanel(containerEl) {
     }
   }
 
+  function renderChatHeaderStatus() {
+    const slot = chatEl?.querySelector('[data-role="chat-ai-status-bar"]');
+    if (slot) {
+      slot.innerHTML = renderAiStatusPillHtml();
+    }
+  }
+
   function renderChatMode() {
     if (!chatEl) return;
     chatEl.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 14px 4px;flex-shrink:0;" data-role="chat-ai-status-bar">
+        ${renderAiStatusPillHtml()}
+      </div>
       <div class="chat-messages"></div>
       <div class="chat-composer">
         <div class="context-pills-bar">${renderContextPillsHtml()}</div>
@@ -920,7 +1473,7 @@ export function initRightPanel(containerEl) {
               ${icon('trash', 12)} 清空
             </button>
           </div>
-          <span style="font-size:11px;color:var(--text-tertiary);">
+          <span data-role="chat-ctx-count" style="font-size:11px;color:var(--text-tertiary);">
             ${(store.state.selectedContextPaths || []).length}/5 文件
           </span>
         </div>
@@ -981,6 +1534,9 @@ export function initRightPanel(containerEl) {
               updateStreamingBubbleDom(assistantMsg);
             } else if (chunk.type === 'done' && chunk.meta) {
               assistantMsg.offlineMode = Boolean(chunk.meta.offline_mode);
+              if (chunk.meta.provider_label) {
+                state.liveProviderLabel = String(chunk.meta.provider_label);
+              }
             }
           } else if (typeof chunk === 'string') {
             assistantMsg.content += chunk;
@@ -995,6 +1551,7 @@ export function initRightPanel(containerEl) {
           state.chatStreaming = false;
           state.chatAbort = null;
           renderChatMode();
+          renderSummaryMode();
         },
         onError(err) {
           const errMsg = err?.message || '流式问答请求失败';
@@ -1008,6 +1565,34 @@ export function initRightPanel(containerEl) {
         },
       }
     );
+  }
+
+  async function triggerTemplatePrompt(tpl) {
+    if (!tpl) return;
+    if (state.chatStreaming) {
+      showToast('当前问答正在生成中，请稍候或停止后再试', 'warning');
+      return;
+    }
+
+    const activeFile = store.state.activeFile;
+    if (activeFile?.path) {
+      const selected = store.state.selectedContextPaths || [];
+      if (!selected.includes(activeFile.path) && selected.length < 5) {
+        toggleContextPath(activeFile.path);
+      }
+    }
+
+    ensureVisibleOnMobileOrCollapsed();
+    switchMode('chat', { emitEvent: true });
+
+    let finalPrompt = tpl.prompt;
+    const selectedNow = store.state.selectedContextPaths || [];
+    const activeText = String(store.state.activeDocumentText || state.summaryInputText || '').trim();
+    if (!activeFile?.path && selectedNow.length === 0 && activeText) {
+      finalPrompt = `${tpl.prompt}\n\n【当前笔记内容参考】\n${activeText.slice(0, 3000)}`;
+    }
+
+    await sendChatMessage(finalPrompt);
   }
 
   async function openSaveNoteSheet(msg) {
@@ -1296,6 +1881,13 @@ export function initRightPanel(containerEl) {
 
   function renderToolsMode() {
     if (!toolsEl) return;
+
+    // Preserve open/closed state of existing <details> by module id
+    toolsEl.querySelectorAll('details.tool-card[data-module-id]').forEach((det) => {
+      const id = det.dataset.moduleId;
+      if (id) toolOpenStateById.set(id, det.open);
+    });
+
     const excelFiles = getExcelFiles();
     const activeSheetInfo =
       state.excelSheets.find((s) => s.name === state.selectedSheet) || state.excelSheets[0] || null;
@@ -1310,16 +1902,13 @@ export function initRightPanel(containerEl) {
     const workspaces = store.state.workspaces || [];
     const appsById = new Map(apps.map((a) => [String(a.id), a]));
 
-    // Preserve open/closed state of existing <details>
-    const openStates = [true, true, true];
-    toolsEl.querySelectorAll('details.tool-card').forEach((det, idx) => {
-      if (idx < 3) openStates[idx] = det.open;
-    });
-
     const card1Html = `
-      <details class="tool-card" ${openStates[0] ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="quick_excel" draggable="true" ${toolOpenStateById.get('quick_excel') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">${icon('table', 14)} 快捷表单填表与表格操作</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('table', 14)} 快捷表单填表与表格操作
+          </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${excelFiles.length} 份表格</span>
         </summary>
         <div class="tool-card-body">
@@ -1400,9 +1989,12 @@ export function initRightPanel(containerEl) {
 
     const treeIsTable = state.treeViewMode === 'table';
     const card2Html = `
-      <details class="tool-card" ${openStates[1] ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="knowledge_tree" draggable="true" ${toolOpenStateById.get('knowledge_tree') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">${icon('git-branch', 14)} 虚拟知识树分类与总览</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('git-branch', 14)} 虚拟知识树分类与总览
+          </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${nodes.length} 节点</span>
         </summary>
         <div class="tool-card-body">
@@ -1543,9 +2135,12 @@ export function initRightPanel(containerEl) {
     `;
 
     const card3Html = `
-      <details class="tool-card" ${openStates[2] ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="apps_workspaces" draggable="true" ${toolOpenStateById.get('apps_workspaces') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">${icon('rocket', 14)} 本地软件库与工作区联启</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('rocket', 14)} 本地软件库与工作区联启
+          </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${apps.length} 应用 · ${workspaces.length} 现场</span>
         </summary>
         <div class="tool-card-body">
@@ -1617,7 +2212,40 @@ export function initRightPanel(containerEl) {
       </details>
     `;
 
-    toolsEl.innerHTML = `${card1Html}${card2Html}${card3Html}`;
+    const card4Html = `
+      <details class="tool-card module-block" data-module-id="ai_templates" draggable="true" ${toolOpenStateById.get('ai_templates') !== false ? 'open' : ''}>
+        <summary class="tool-card-summary">
+          <span style="display:inline-flex;align-items:center;gap:6px;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('zap', 14)} AI 常用指令模板
+          </span>
+          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${AI_PROMPT_TEMPLATES.length} 模板</span>
+        </summary>
+        <div class="tool-card-body">
+          ${renderAiTemplatesCardContentHtml()}
+        </div>
+      </details>
+    `;
+
+    const cardMap = {
+      quick_excel: card1Html,
+      knowledge_tree: card2Html,
+      apps_workspaces: card3Html,
+      ai_templates: card4Html,
+    };
+
+    const visibleToolModules = getUiLayout().rightToolModules.filter((m) => m.visible);
+    toolsEl.innerHTML = visibleToolModules.length
+      ? visibleToolModules.map((m) => cardMap[m.id] || '').join('')
+      : `
+        <div class="empty-state" style="padding:28px 12px;">
+          <p class="empty-title">所有工具台卡片已隐藏</p>
+          <p class="empty-desc">点击右上角 ⚙ 自定义右侧模块重新开启需要的工具卡片。</p>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="open-right-customize">
+            ${icon('settings', 13)} 自定义模块
+          </button>
+        </div>
+      `;
   }
 
   function openAddColSheet() {
@@ -1849,6 +2477,139 @@ export function initRightPanel(containerEl) {
   }
 
   // ---------------------------------------------------------------------------
+  // Pain Point #7 & #4: Drag-and-Drop Handlers (AI Cards -> Center Note, Tool Cards Reorder)
+  // ---------------------------------------------------------------------------
+
+  containerEl.addEventListener('dragstart', (e) => {
+    // 1. Todo item drag (must check before summary card)
+    const todoItem = e.target.closest('.todo-item.draggable-card');
+    if (todoItem) {
+      if (e.target.closest('button, input, select, textarea, a') && !e.target.closest('.drag-pill-hint')) {
+        e.preventDefault();
+        return;
+      }
+      e.stopPropagation();
+      const idx = Number(todoItem.dataset.todoIdx);
+      const todo = state.summaryResult?.todos?.[idx];
+      if (!todo) {
+        e.preventDefault();
+        return;
+      }
+      const markdown =
+        '- [ ] ' + todo.title + (todo.suggested_time ? '（' + todo.suggested_time + '）' : '');
+      setDragPayload(e, { type: 'ai-todo', label: todo.title, markdown });
+      todoItem.classList.add('is-dragging');
+      return;
+    }
+
+    // 2. AI Summary card drag
+    const summaryCard = e.target.closest('.summary-card.draggable-card');
+    if (summaryCard) {
+      if (e.target.closest('button, input, select, textarea, a') && !e.target.closest('.drag-pill-hint')) {
+        e.preventDefault();
+        return;
+      }
+      e.stopPropagation();
+      const md = formatSummaryAsMarkdown(state.summaryResult);
+      if (!md) {
+        e.preventDefault();
+        return;
+      }
+      setDragPayload(e, { type: 'ai-summary', label: 'AI 总结卡片', markdown: md });
+      summaryCard.classList.add('is-dragging');
+      return;
+    }
+
+    // 3. Completed Assistant Chat Bubble drag
+    const chatBubble = e.target.closest('.chat-bubble.is-assistant.draggable-card');
+    if (chatBubble) {
+      if (e.target.closest('button, input, select, textarea, a') && !e.target.closest('.drag-pill-hint')) {
+        e.preventDefault();
+        return;
+      }
+      e.stopPropagation();
+      const msgId = chatBubble.dataset.msgId;
+      const msg = state.chatMessages.find((m) => m.id === msgId);
+      if (!msg || msg.streaming || msg.isError || !msg.content.trim()) {
+        e.preventDefault();
+        return;
+      }
+      setDragPayload(e, { type: 'ai-chat', label: 'AI 问答回复', markdown: msg.content });
+      chatBubble.classList.add('is-dragging');
+      return;
+    }
+
+    // 4. Tool Card drag-and-drop reordering
+    const toolCard = e.target.closest('.tool-card.module-block[data-module-id]');
+    if (toolCard && toolsEl?.contains(toolCard)) {
+      if (e.target.closest('input, textarea, select, button') && !e.target.closest('.tool-card-summary')) {
+        e.preventDefault();
+        return;
+      }
+      const modId = toolCard.dataset.moduleId;
+      if (!modId) {
+        e.preventDefault();
+        return;
+      }
+      draggedToolModuleId = modId;
+      toolCard.classList.add('is-dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try {
+          e.dataTransfer.setData('application/x-sln-tool-module', modId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  });
+
+  toolsEl?.addEventListener('dragover', (e) => {
+    if (!draggedToolModuleId) return;
+    const targetCard = e.target.closest('.tool-card.module-block[data-module-id]');
+    if (!targetCard || targetCard.dataset.moduleId === draggedToolModuleId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    toolsEl.querySelectorAll('.tool-card.is-drag-over').forEach((el) => {
+      if (el !== targetCard) el.classList.remove('is-drag-over');
+    });
+    targetCard.classList.add('is-drag-over');
+  });
+
+  toolsEl?.addEventListener('dragleave', (e) => {
+    const targetCard = e.target.closest('.tool-card.module-block[data-module-id]');
+    if (targetCard && !targetCard.contains(e.relatedTarget)) {
+      targetCard.classList.remove('is-drag-over');
+    }
+  });
+
+  toolsEl?.addEventListener('drop', (e) => {
+    if (!draggedToolModuleId) return;
+    const targetCard = e.target.closest('.tool-card.module-block[data-module-id]');
+    const targetId = targetCard?.dataset.moduleId;
+    if (!targetId || targetId === draggedToolModuleId) return;
+    e.preventDefault();
+
+    const list = [...getUiLayout().rightToolModules];
+    const fromIdx = list.findIndex((m) => m.id === draggedToolModuleId);
+    const toIdx = list.findIndex((m) => m.id === targetId);
+    if (fromIdx >= 0 && toIdx >= 0) {
+      const [moved] = list.splice(fromIdx, 1);
+      list.splice(toIdx, 0, moved);
+      commitUiLayout({ rightToolModules: list });
+    }
+    draggedToolModuleId = null;
+  });
+
+  containerEl.addEventListener('dragend', () => {
+    draggedToolModuleId = null;
+    containerEl.querySelectorAll('.is-dragging, .is-drag-over').forEach((el) => {
+      el.classList.remove('is-dragging', 'is-drag-over');
+    });
+    clearDragPayload();
+  });
+
+  // ---------------------------------------------------------------------------
   // Event Delegation & Store EventBus Wiring
   // ---------------------------------------------------------------------------
 
@@ -1929,6 +2690,23 @@ export function initRightPanel(containerEl) {
     const actionEl = e.target.closest('[data-action]');
     if (!actionEl) return;
     const action = actionEl.dataset.action;
+
+    // --- V2 Global Right Panel Actions ---
+    if (action === 'open-right-customize') {
+      openRightCustomizeSheet();
+      return;
+    }
+
+    if (action === 'open-ai-settings') {
+      store.emit('settings:open');
+      return;
+    }
+
+    if (action === 'use-ai-template') {
+      const tpl = AI_PROMPT_TEMPLATES.find((t) => t.id === actionEl.dataset.templateId);
+      await triggerTemplatePrompt(tpl);
+      return;
+    }
 
     // --- Mode 1 Actions ---
     if (action === 'summarize-doc') {
@@ -2326,6 +3104,29 @@ export function initRightPanel(containerEl) {
     }
   });
 
+  store.on('ui:layout-changed', () => {
+    renderTabsHeader();
+    syncModeHeader();
+    renderSummaryMode();
+    renderToolsMode();
+  });
+
+  store.on('config:changed', () => {
+    state.liveProviderLabel = '';
+    renderSummaryMode();
+    renderChatHeaderStatus();
+  });
+
+  store.on('system:info', () => {
+    renderSummaryMode();
+    renderChatHeaderStatus();
+  });
+
+  store.on('system:config', () => {
+    renderSummaryMode();
+    renderChatHeaderStatus();
+  });
+
   store.on('ai:summarize-request', async (payload = {}) => {
     const { text = '', file_path = null, autoRun = true } = payload;
     ensureVisibleOnMobileOrCollapsed();
@@ -2341,10 +3142,12 @@ export function initRightPanel(containerEl) {
 
   store.on('context:changed', () => {
     renderContextBarOnly();
-    const countSpan = chatEl?.querySelector('.chat-composer span:last-child');
+    const countSpan = chatEl?.querySelector('[data-role="chat-ctx-count"]');
     if (countSpan) {
       countSpan.textContent = `${(store.state.selectedContextPaths || []).length}/5 文件`;
     }
+    renderSummaryMode();
+    renderToolsMode();
   });
 
   store.on('files:updated', () => {
@@ -2362,6 +3165,10 @@ export function initRightPanel(containerEl) {
       renderSummaryMode();
       syncExcelSelection();
     }
+    if (keys?.includes('config') || keys?.includes('systemInfo')) {
+      renderSummaryMode();
+      renderChatHeaderStatus();
+    }
   });
 
   store.on('apps:updated', fetchAppsAndWorkspaces);
@@ -2371,6 +3178,7 @@ export function initRightPanel(containerEl) {
   store.on('sse:reminder:fired', fetchReminders);
 
   // Initial Render + Lazy Initial Loads
+  renderTabsHeader();
   syncModeHeader();
   renderSummaryMode();
   renderChatMode();

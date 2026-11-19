@@ -10,10 +10,10 @@
   <title>SmartLocalNote</title>
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23007AFF'/%3E%3Crect x='15' y='13' width='34' height='38' rx='6' fill='%23FFFFFF'/%3E%3Cpath d='M22 24h20M22 32h20M22 40h12' stroke='%23007AFF' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/css/tokens.css?v=2">
-  <link rel="stylesheet" href="/static/css/app.css?v=2">
-  <script src="/static/vendor/marked.min.js?v=2" defer></script>
-  <script type="module" src="/static/js/app.js?v=2"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css?v=3">
+  <link rel="stylesheet" href="/static/css/app.css?v=3">
+  <script src="/static/vendor/marked.min.js?v=3" defer></script>
+  <script type="module" src="/static/js/app.js?v=3"></script>
   <script>
     window.addEventListener('DOMContentLoaded', function () {
       setTimeout(function () {
@@ -117,6 +117,8 @@
         </div>
       </aside>
 
+      <div id="resizer-left" class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整左侧栏宽度" title="拖动调整宽度，双击恢复默认"></div>
+
       <!-- 中间栏：MD/TXT 编辑预览、Excel 分页表、PDF + 伴生笔记 -->
       <main id="center-panel" class="island-panel center-panel" aria-label="文档预览与原位编辑">
         <div class="panel-header">
@@ -129,6 +131,8 @@
           </div>
         </div>
       </main>
+
+      <div id="resizer-right" class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整右侧栏宽度" title="拖动调整宽度，双击恢复默认"></div>
 
       <!-- 右侧栏：AI 总结 / 跨格式联网问答 / 工具台 -->
       <aside id="right-panel" class="island-panel right-panel" aria-label="AI 副驾驶与本地工具台">

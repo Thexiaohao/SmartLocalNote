@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api import ok
-from config import get_local_ip, load_config, update_config
+from config import FREE_AI_PRESETS, get_local_ip, load_config, update_config
 from core import app_launcher, scheduler
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -23,6 +23,9 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 class ConfigPatch(BaseModel):
     port: int | None = None
     theme: str | None = None
+    doc_font_size: int | None = None
+    doc_font_family: str | None = None
+    ui_layout: dict[str, Any] | None = None
     ai: dict[str, Any] | None = None
     whitelist_dirs: list[str] | None = None
     private_files: list[str] | None = None
@@ -43,6 +46,8 @@ def get_system_info() -> dict:
         "port": active_port,
         "platform": sys.platform,
         "ai_configured": bool(str(cfg["ai"].get("api_key", "")).strip()),
+        "free_ai_enabled": bool(cfg["ai"].get("enable_free_ai", True)),
+        "ai_presets": FREE_AI_PRESETS,
         "default_progress_excel": cfg.get("default_progress_excel", ""),
     })
 

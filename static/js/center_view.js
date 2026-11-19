@@ -19,9 +19,15 @@ import {
   setIsland,
   openSheet,
   closeSheet,
+  applyDocTypography,
+  readDragPayload,
+  clearDragPayload,
+  DRAG_MIME,
 } from './store.js';
 import { api } from './api_client.js';
 import { icon } from './icons.js';
+
+const PDF_ZOOM_STEPS = [0.8, 1.0, 1.25, 1.5, 1.6, 1.75, 2.0, 2.4];
 
 /**
  * Convert 1-based column index to Excel column letter (1 -> A, 2 -> B, 27 -> AA).
@@ -130,13 +136,87 @@ export function initCenterView(containerEl) {
       editingKey: null,
     },
     pdf: {
+      viewMode: 'hd', // 'hd' | 'iframe'
+      zoom: 1.6,
       currentPage: 1,
       totalPages: 1,
       companionMode: 'edit', // 'edit' | 'preview'
       companionDirty: false,
       cacheBust: Date.now(),
+      imgLoading: false,
+      imgError: false,
     },
   };
+
+  let typographySaveTimer = null;
+  let dragDepth = 0;
+
+  function ensureDropOverlay() {
+    if (typeof window !== 'undefined' && window.getComputedStyle(containerEl).position === 'static') {
+      containerEl.style.position = 'relative';
+    }
+    let overlay = containerEl.querySelector('#center-drop-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'center-drop-overlay';
+      overlay.className = 'center-drop-overlay';
+      overlay.innerHTML = `
+        <div style="font-size:22px;line-height:1;">✨</div>
+        <div>松开即可插入到当前笔记</div>
+      `;
+      containerEl.appendChild(overlay);
+    }
+    return overlay;
+  }
+
+  function showDropOverlay(visible) {
+    const overlay = ensureDropOverlay();
+    overlay.classList.toggle('is-visible', Boolean(visible));
+  }
+
+  function renderTypographyControlsHtml(compact = false) {
+    const size = store.state.docFontSize || 15;
+    const family = store.state.docFontFamily || 'sans';
+    const btnPad = compact ? 'height:24px;padding:0 7px;font-size:11px;' : 'height:26px;padding:0 8px;font-size:11.5px;';
+    const selectStyle = compact
+      ? 'width:auto;height:24px;padding:2px 6px;font-size:11px;border-radius:var(--radius-pill);'
+      : 'width:auto;height:26px;padding:2px 8px;font-size:11.5px;border-radius:var(--radius-pill);';
+    return `
+      <div class="doc-typography-controls" style="display:inline-flex;align-items:center;gap:4px;padding:2px 4px;border-radius:var(--radius-pill);background:var(--bg-subtle);border:1px solid var(--border-hairline);">
+        <button type="button" class="pill-btn pill-btn-ghost" data-action="font-dec" title="减小字号" style="${btnPad}">A-</button>
+        <span class="font-size-label" data-role="font-size-label" style="font-size:11.5px;font-weight:600;color:var(--text-secondary);min-width:34px;text-align:center;">${size}px</span>
+        <button type="button" class="pill-btn pill-btn-ghost" data-action="font-inc" title="增大字号" style="${btnPad}">A+</button>
+        <select class="apple-select" data-action="font-family" aria-label="文档字体" style="${selectStyle}">
+          <option value="sans" ${family === 'sans' ? 'selected' : ''}>无衬线</option>
+          <option value="serif" ${family === 'serif' ? 'selected' : ''}>衬线</option>
+          <option value="mono" ${family === 'mono' ? 'selected' : ''}>等宽</option>
+        </select>
+      </div>
+    `;
+  }
+
+  function syncTypographyUi() {
+    const size = store.state.docFontSize || 15;
+    const family = store.state.docFontFamily || 'sans';
+    containerEl.querySelectorAll('[data-role="font-size-label"]').forEach((el) => {
+      el.textContent = `${size}px`;
+    });
+    containerEl.querySelectorAll('select[data-action="font-family"]').forEach((sel) => {
+      if (sel.value !== family) sel.value = family;
+    });
+  }
+
+  function updateTypographyAndPersist(nextSize, nextFamily) {
+    const detail = applyDocTypography(nextSize, nextFamily);
+    syncTypographyUi();
+    if (typographySaveTimer) window.clearTimeout(typographySaveTimer);
+    typographySaveTimer = window.setTimeout(() => {
+      api.put('/api/system/config', {
+        doc_font_size: detail.docFontSize,
+        doc_font_family: detail.docFontFamily,
+      }).catch(() => {});
+    }, 350);
+  }
 
   function getErrorMsg(err, fallback = '操作失败') {
     return err?.message || fallback;
@@ -257,6 +337,7 @@ export function initCenterView(containerEl) {
         </div>
       </div>
     `;
+    ensureDropOverlay();
   }
 
   function renderLoading(label = '正在加载本地文档…') {
@@ -310,6 +391,8 @@ export function initCenterView(containerEl) {
             </button>
           </div>
 
+          ${renderTypographyControlsHtml(false)}
+
           <button type="button" class="pill-btn pill-btn-sm ${state.dirty ? 'pill-btn-primary' : ''}" data-action="md-save" title="保存 (Ctrl+S / Cmd+S)">
             ${icon('save', 13)} 保存
           </button>
@@ -322,14 +405,13 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:column; overflow:${isPreview ? 'auto' : 'hidden'};">
-        ${
-          isPreview
-            ? `<div class="md-preview">${renderMarkdownSafe(doc.content || '')}</div>`
-            : `<textarea class="md-editor" spellcheck="false" placeholder="随时记录想法、笔记或输入 [[文件名.pdf#page=1]] / [[表格.xlsx#Sheet1!C4]]...">${escapeHtml(doc.content || '')}</textarea>`
-        }
-      </div>
+      ${
+        isPreview
+          ? `<div class="md-scroll-area"><div class="md-preview">${renderMarkdownSafe(doc.content || '')}</div></div>`
+          : `<div style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:column; overflow:hidden;"><textarea class="md-editor" spellcheck="false" placeholder="随时记录想法、笔记或输入 [[文件名.pdf#page=1]] / [[表格.xlsx#Sheet1!C4]]...">${escapeHtml(doc.content || '')}</textarea></div>`
+      }
     `;
+    ensureDropOverlay();
   }
 
   function updateMdDirtyIndicators() {
@@ -842,20 +924,92 @@ export function initCenterView(containerEl) {
   }
 
   // =========================================================================
-  // Rendering: PDF Native Preview + Companion Markdown Note Mode
+  // Rendering: PDF HD PyMuPDF Viewer (Default) + Iframe Toggle + Companion Note
   // =========================================================================
   function buildPdfStreamSrc() {
     const p = encodeURIComponent(state.activeDoc.path);
     return `/api/files/pdf-stream?path=${p}&_t=${state.pdf.cacheBust}#page=${state.pdf.currentPage}`;
   }
 
-  function updatePdfFrameAndControls() {
+  function buildPdfPageImgSrc() {
+    const p = encodeURIComponent(state.activeDoc.path);
+    const page = state.pdf.currentPage || 1;
+    const zoom = Number(state.pdf.zoom || 1.6).toFixed(2);
+    return `/api/files/pdf-page?path=${p}&page=${page}&zoom=${zoom}&_t=${state.pdf.cacheBust}`;
+  }
+
+  function renderPdfViewerStage() {
+    const doc = state.activeDoc;
+    const pdf = state.pdf;
+    const wrap = containerEl.querySelector('[data-role="pdf-frame-wrap"]');
+    if (!wrap || !doc) return;
+
+    if (pdf.viewMode === 'iframe') {
+      wrap.innerHTML = `<iframe class="pdf-frame" src="${buildPdfStreamSrc()}" title="${escapeHtml(doc.name)}"></iframe>`;
+      return;
+    }
+
+    const zoomPct = Math.round((pdf.zoom || 1.6) * 100);
+    wrap.innerHTML = `
+      <div style="display:flex;flex-direction:column;height:100%;min-height:0;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;padding:7px 12px;border-bottom:1px solid var(--border-hairline);background:var(--bg-glass);flex-shrink:0;">
+          <div style="display:inline-flex;align-items:center;gap:6px;">
+            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-prev-page" ${pdf.currentPage <= 1 ? 'disabled' : ''} title="上一页 (←)">上一页</button>
+            <span data-role="pdf-stage-page-label" style="font-size:12px;font-weight:600;color:var(--text-secondary);">第 ${pdf.currentPage} / ${pdf.totalPages} 页</span>
+            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-next-page" ${pdf.currentPage >= pdf.totalPages ? 'disabled' : ''} title="下一页 (→)">下一页</button>
+          </div>
+          <div style="display:inline-flex;align-items:center;gap:4px;">
+            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-zoom-out" ${pdf.zoom <= PDF_ZOOM_STEPS[0] ? 'disabled' : ''} title="缩小" style="width:28px;padding:0;">－</button>
+            <span data-role="pdf-zoom-label" style="font-size:11.5px;font-weight:600;min-width:44px;text-align:center;color:var(--text-secondary);">${zoomPct}%</span>
+            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-zoom-in" ${pdf.zoom >= PDF_ZOOM_STEPS[PDF_ZOOM_STEPS.length - 1] ? 'disabled' : ''} title="放大" style="width:28px;padding:0;">＋</button>
+          </div>
+        </div>
+        <div class="pdf-hd-viewer" data-role="pdf-hd-viewer">
+          <div data-role="pdf-hd-loading" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);padding:6px 12px;border-radius:var(--radius-pill);background:var(--bg-island);border:1px solid var(--border-hairline);">
+            正在高清渲染第 ${pdf.currentPage} 页…
+          </div>
+          <div data-role="pdf-hd-error" class="glass-card" style="display:none;text-align:center;max-width:300px;padding:16px;">
+            <p class="empty-title" style="font-size:13px;">页面渲染失败</p>
+            <p class="empty-desc" style="margin:6px 0 10px;">请检查本地 PDF 是否存在或切换原生预览</p>
+            <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="pdf-hd-retry">重试渲染</button>
+          </div>
+          <div class="pdf-page-card" data-role="pdf-page-card" style="display:none;">
+            <img class="pdf-page-img" data-role="pdf-page-img" src="${buildPdfPageImgSrc()}" alt="${escapeHtml(doc.name)} 第 ${pdf.currentPage} 页" />
+          </div>
+        </div>
+      </div>
+    `;
+
+    const img = wrap.querySelector('[data-role="pdf-page-img"]');
+    const loadingEl = wrap.querySelector('[data-role="pdf-hd-loading"]');
+    const errorEl = wrap.querySelector('[data-role="pdf-hd-error"]');
+    const cardEl = wrap.querySelector('[data-role="pdf-page-card"]');
+
+    if (img) {
+      state.pdf.imgLoading = true;
+      state.pdf.imgError = false;
+      img.addEventListener('load', () => {
+        state.pdf.imgLoading = false;
+        state.pdf.imgError = false;
+        if (loadingEl) loadingEl.style.display = 'none';
+        if (errorEl) errorEl.style.display = 'none';
+        if (cardEl) cardEl.style.display = 'block';
+      });
+      img.addEventListener('error', () => {
+        state.pdf.imgLoading = false;
+        state.pdf.imgError = true;
+        if (loadingEl) loadingEl.style.display = 'none';
+        if (cardEl) cardEl.style.display = 'none';
+        if (errorEl) errorEl.style.display = 'block';
+      });
+    }
+  }
+
+  function updatePdfFrameAndControls({ forceReload = false } = {}) {
     const doc = state.activeDoc;
     if (!doc || doc.type !== 'pdf') return;
-    const iframe = containerEl.querySelector('.pdf-frame');
-    if (iframe) {
+    if (forceReload) {
       state.pdf.cacheBust = Date.now();
-      iframe.src = buildPdfStreamSrc();
     }
     const pagePill = containerEl.querySelector('[data-role="pdf-page-label"]');
     if (pagePill) {
@@ -865,6 +1019,24 @@ export function initCenterView(containerEl) {
     if (pageInput) {
       pageInput.value = String(state.pdf.currentPage);
     }
+    if (state.pdf.viewMode === 'iframe') {
+      const iframe = containerEl.querySelector('.pdf-frame');
+      if (iframe) {
+        state.pdf.cacheBust = Date.now();
+        iframe.src = buildPdfStreamSrc();
+      } else {
+        renderPdfViewerStage();
+      }
+    } else {
+      renderPdfViewerStage();
+    }
+  }
+
+  function setPdfPage(targetPage) {
+    if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+    const clamped = Math.min(Math.max(1, Number(targetPage) || 1), state.pdf.totalPages || 1);
+    state.pdf.currentPage = clamped;
+    updatePdfFrameAndControls();
   }
 
   function updatePdfCompanionDirtyIndicators() {
@@ -882,6 +1054,7 @@ export function initCenterView(containerEl) {
     const doc = state.activeDoc;
     const pdf = state.pdf;
     const isCompPreview = pdf.companionMode === 'preview';
+    const isHd = pdf.viewMode !== 'iframe';
 
     containerEl.innerHTML = `
       <div class="center-toolbar">
@@ -910,6 +1083,15 @@ export function initCenterView(containerEl) {
             />
             <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-jump-page">跳转</button>
           </div>
+          <div class="segmented-pill" data-seg="pdf-view-mode" role="tablist" aria-label="PDF 渲染模式切换">
+            <div class="segmented-thumb" style="width:calc(50% - 3px); transform:translateX(${isHd ? '0%' : '100%'});"></div>
+            <button type="button" class="segmented-btn ${isHd ? 'is-active' : ''}" data-pdf-view="hd" role="tab" aria-selected="${isHd}" style="height:24px;padding:0 9px;font-size:11.5px;">
+              高清渲染
+            </button>
+            <button type="button" class="segmented-btn ${!isHd ? 'is-active' : ''}" data-pdf-view="iframe" role="tab" aria-selected="${!isHd}" style="height:24px;padding:0 9px;font-size:11.5px;">
+              原生预览
+            </button>
+          </div>
         </div>
 
         <div class="center-toolbar-group">
@@ -930,9 +1112,7 @@ export function initCenterView(containerEl) {
 
       <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden;">
         <div class="pdf-workspace">
-          <div class="pdf-frame-wrap">
-            <iframe class="pdf-frame" src="${buildPdfStreamSrc()}" title="${escapeHtml(doc.name)}"></iframe>
-          </div>
+          <div class="pdf-frame-wrap" data-role="pdf-frame-wrap"></div>
 
           <div class="pdf-side-notes">
             <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; flex-shrink:0;">
@@ -957,6 +1137,10 @@ export function initCenterView(containerEl) {
             </div>
 
             <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; flex-shrink:0;">
+              ${renderTypographyControlsHtml(true)}
+            </div>
+
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; flex-shrink:0;">
               <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-insert-anchor">
                 ${icon('pin', 12)} 插入当前页锚点
               </button>
@@ -968,7 +1152,7 @@ export function initCenterView(containerEl) {
             <div style="flex:1 1 auto; min-height:0; display:flex; flex-direction:column;">
               ${
                 isCompPreview
-                  ? `<div class="md-preview" style="padding:8px 4px; flex:1 1 auto; overflow-y:auto;">${renderMarkdownSafe(doc.companionContent || '')}</div>`
+                  ? `<div class="md-scroll-area"><div class="md-preview" style="padding:8px 6px 40px;">${renderMarkdownSafe(doc.companionContent || '')}</div></div>`
                   : `<textarea class="md-editor" data-role="pdf-companion-editor" spellcheck="false" style="min-height:160px; flex:1 1 auto; padding:12px; border:1px solid var(--border-hairline); border-radius:var(--radius-control); background:var(--bg-subtle);" placeholder="边看 PDF 边记笔记，支持 [[${escapeHtml(doc.name)}#page=${pdf.currentPage}]] 锚点...">${escapeHtml(doc.companionContent || '')}</textarea>`
               }
             </div>
@@ -976,6 +1160,8 @@ export function initCenterView(containerEl) {
         </div>
       </div>
     `;
+    renderPdfViewerStage();
+    ensureDropOverlay();
   }
 
   function openPdfAnnotateSheet() {
@@ -1018,7 +1204,7 @@ export function initCenterView(containerEl) {
             });
             state.pdf.currentPage = Number(res?.page || pageVal);
             closeSheet();
-            updatePdfFrameAndControls();
+            updatePdfFrameAndControls({ forceReload: true });
             store.emit('file:saved', { path: doc.path, page: state.pdf.currentPage, snapshot_id: res?.snapshot_id || null });
             showToast(`已写入第 ${state.pdf.currentPage} 页批注并创建安全快照`, 'success');
           } catch (err) {
@@ -1096,12 +1282,18 @@ export function initCenterView(containerEl) {
       if (type === 'pdf') {
         const total = Math.max(1, Number(data.page_count || 1));
         const initPage = opts.initialPage ? Math.min(Math.max(1, Number(opts.initialPage)), total) : 1;
+        const prevViewMode = state.pdf?.viewMode === 'iframe' ? 'iframe' : 'hd';
+        const prevZoom = Number(state.pdf?.zoom) || 1.6;
         state.pdf = {
+          viewMode: prevViewMode,
+          zoom: prevZoom,
           currentPage: initPage,
           totalPages: total,
           companionMode: 'edit',
           companionDirty: false,
           cacheBust: Date.now(),
+          imgLoading: false,
+          imgError: false,
         };
         syncActiveFileStore();
         renderPdfMode();
@@ -1536,6 +1728,124 @@ export function initCenterView(containerEl) {
     await openFile(targetItem.path);
   });
 
+  store.on('typography:changed', () => {
+    syncTypographyUi();
+  });
+
+  // =========================================================================
+  // Pain Point #7: Cross-Panel Drag-and-Drop Overlay on #center-panel
+  // =========================================================================
+  function isAcceptableBlockDrag(e) {
+    const activePayload = store.state.activeDragPayload;
+    if (activePayload) {
+      if (activePayload.type === 'module-reorder') return false;
+      return true;
+    }
+    const types = Array.from(e.dataTransfer?.types || []);
+    return types.includes(DRAG_MIME);
+  }
+
+  function insertDroppedMarkdown(payload) {
+    const markdown = String(payload?.markdown ?? payload?.text ?? payload?.content ?? '').trim();
+    if (!markdown) return;
+    const label = payload?.label || payload?.title || '内容块';
+    const doc = state.activeDoc;
+
+    if (!doc || doc.type === 'excel') {
+      showToast('请先打开一份 Markdown / TXT / PDF 文档以拖入笔记', 'warning');
+      return;
+    }
+
+    if (doc.type === 'markdown' || doc.type === 'text') {
+      if (state.mdMode === 'edit') {
+        const ta = containerEl.querySelector('.md-editor:not([data-role])');
+        if (ta) {
+          const val = ta.value;
+          const start = ta.selectionStart ?? val.length;
+          const end = ta.selectionEnd ?? val.length;
+          const before = val.slice(0, start);
+          const after = val.slice(end);
+          const leadingSep = before && !before.endsWith('\n') ? '\n' : '';
+          const trailingSep = after && !after.startsWith('\n') ? '\n' : '';
+          const inserted = `${leadingSep}${markdown}${trailingSep}`;
+          const nextVal = `${before}${inserted}${after}`;
+          ta.value = nextVal;
+          const cursor = before.length + inserted.length;
+          ta.focus();
+          ta.setSelectionRange(cursor, cursor);
+          doc.content = nextVal;
+          state.dirty = true;
+          store.state.activeDocumentText = nextVal;
+          updateMdDirtyIndicators();
+          showToast(`已拖入「${label}」到当前笔记（Ctrl+S 保存）`, 'success');
+          return;
+        }
+      }
+
+      const prev = doc.content || '';
+      const sep = !prev.trim() ? '' : prev.endsWith('\n\n') ? '' : prev.endsWith('\n') ? '\n' : '\n\n';
+      doc.content = `${prev}${sep}${markdown}\n`;
+      state.dirty = true;
+      store.state.activeDocumentText = doc.content;
+      renderMarkdownMode();
+      window.requestAnimationFrame(() => {
+        const scrollArea = containerEl.querySelector('.md-scroll-area');
+        if (scrollArea) {
+          scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
+        }
+      });
+      showToast(`已拖入「${label}」到当前笔记（Ctrl+S 保存）`, 'success');
+      return;
+    }
+
+    if (doc.type === 'pdf') {
+      const prev = doc.companionContent || '';
+      const sep = !prev.trim() ? '' : prev.endsWith('\n\n') ? '' : prev.endsWith('\n') ? '\n' : '\n\n';
+      doc.companionContent = `${prev}${sep}${markdown}\n`;
+      state.pdf.companionDirty = true;
+      store.state.activeDocumentText = doc.companionContent;
+      renderPdfMode();
+      showToast('已拖入到 PDF 伴生笔记', 'success');
+    }
+  }
+
+  containerEl.addEventListener('dragenter', (e) => {
+    if (!isAcceptableBlockDrag(e)) return;
+    e.preventDefault();
+    dragDepth += 1;
+    showDropOverlay(true);
+  });
+
+  containerEl.addEventListener('dragover', (e) => {
+    if (!isAcceptableBlockDrag(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+    showDropOverlay(true);
+  });
+
+  containerEl.addEventListener('dragleave', (e) => {
+    if (!isAcceptableBlockDrag(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0 || !containerEl.contains(e.relatedTarget)) {
+      dragDepth = 0;
+      showDropOverlay(false);
+    }
+  });
+
+  containerEl.addEventListener('drop', (e) => {
+    const acceptable = isAcceptableBlockDrag(e);
+    dragDepth = 0;
+    showDropOverlay(false);
+    if (!acceptable) return;
+    e.preventDefault();
+    const payload = readDragPayload(e);
+    clearDragPayload();
+    if (!payload || payload.type === 'module-reorder') return;
+    insertDroppedMarkdown(payload);
+  });
+
   // =========================================================================
   // DOM Event Delegation on containerEl & Ctrl+S / Cmd+S Shortcut
   // =========================================================================
@@ -1576,6 +1886,13 @@ export function initCenterView(containerEl) {
     }
   });
 
+  containerEl.addEventListener('change', (e) => {
+    const fontFamilySelect = e.target.closest('select[data-action="font-family"]');
+    if (fontFamilySelect) {
+      updateTypographyAndPersist(store.state.docFontSize, fontFamilySelect.value);
+    }
+  });
+
   containerEl.addEventListener('click', (e) => {
     // 1. Anchor pill click in MD preview or PDF companion preview
     const anchorPill = e.target.closest('.anchor-pill');
@@ -1599,6 +1916,17 @@ export function initCenterView(containerEl) {
         if (nextMode === 'edit') {
           containerEl.querySelector('.md-editor')?.focus();
         }
+      }
+      return;
+    }
+
+    // 2b. PDF HD / Native Iframe segmented pill
+    const pdfViewBtn = e.target.closest('[data-pdf-view]');
+    if (pdfViewBtn && state.activeDoc?.type === 'pdf') {
+      const nextView = pdfViewBtn.dataset.pdfView === 'iframe' ? 'iframe' : 'hd';
+      if (nextView !== state.pdf.viewMode) {
+        state.pdf.viewMode = nextView;
+        renderPdfMode();
       }
       return;
     }
@@ -1658,7 +1986,11 @@ export function initCenterView(containerEl) {
     if (!actionBtn) return;
     const action = actionBtn.dataset.action;
 
-    if (action === 'welcome-new-note') {
+    if (action === 'font-dec') {
+      updateTypographyAndPersist((store.state.docFontSize || 15) - 1, store.state.docFontFamily);
+    } else if (action === 'font-inc') {
+      updateTypographyAndPersist((store.state.docFontSize || 15) + 1, store.state.docFontFamily);
+    } else if (action === 'welcome-new-note') {
       openNewNoteSheet();
     } else if (action === 'welcome-ai-summary') {
       store.emit('ai:summarize-request', {
@@ -1722,9 +2054,32 @@ export function initCenterView(containerEl) {
       if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
       const inp = containerEl.querySelector('[data-role="pdf-page-input"]');
       const raw = Number.parseInt(inp?.value, 10) || 1;
-      const clamped = Math.min(Math.max(1, raw), state.pdf.totalPages);
-      state.pdf.currentPage = clamped;
-      updatePdfFrameAndControls();
+      setPdfPage(raw);
+    } else if (action === 'pdf-prev-page') {
+      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+      setPdfPage(state.pdf.currentPage - 1);
+    } else if (action === 'pdf-next-page') {
+      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+      setPdfPage(state.pdf.currentPage + 1);
+    } else if (action === 'pdf-zoom-out') {
+      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+      const cur = Number(state.pdf.zoom || 1.6);
+      const prevStep = [...PDF_ZOOM_STEPS].reverse().find((z) => z < cur - 0.01);
+      if (prevStep) {
+        state.pdf.zoom = prevStep;
+        renderPdfViewerStage();
+      }
+    } else if (action === 'pdf-zoom-in') {
+      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+      const cur = Number(state.pdf.zoom || 1.6);
+      const nextStep = PDF_ZOOM_STEPS.find((z) => z > cur + 0.01);
+      if (nextStep) {
+        state.pdf.zoom = nextStep;
+        renderPdfViewerStage();
+      }
+    } else if (action === 'pdf-hd-retry') {
+      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+      updatePdfFrameAndControls({ forceReload: true });
     } else if (action === 'pdf-copy-anchor') {
       if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
       const anchor = `[[${state.activeDoc.name}#page=${state.pdf.currentPage}]]`;
@@ -1787,8 +2142,7 @@ export function initCenterView(containerEl) {
     if (e.target.matches('[data-role="pdf-page-input"]') && e.key === 'Enter') {
       e.preventDefault();
       const raw = Number.parseInt(e.target.value, 10) || 1;
-      state.pdf.currentPage = Math.min(Math.max(1, raw), state.pdf.totalPages);
-      updatePdfFrameAndControls();
+      setPdfPage(raw);
     }
   });
 
@@ -1802,7 +2156,7 @@ export function initCenterView(containerEl) {
     true
   );
 
-  // Global Ctrl+S / Cmd+S handler for center workspace
+  // Global Ctrl+S / Cmd+S + PDF Left/Right page navigation shortcuts
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
       if (!state.activeDoc) return;
@@ -1822,6 +2176,22 @@ export function initCenterView(containerEl) {
         savePdfCompanionNote();
       } else {
         saveMarkdownDoc();
+      }
+      return;
+    }
+
+    if (state.activeDoc?.type === 'pdf' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      const activeEl = document.activeElement;
+      if (activeEl && activeEl.matches('input, textarea, select, [contenteditable="true"]')) return;
+      const sheetOpen = document.getElementById('sheet-overlay')?.classList.contains('is-open');
+      const spotlightOpen = document.getElementById('spotlight-overlay')?.classList.contains('is-open');
+      if (sheetOpen || spotlightOpen) return;
+      if (e.key === 'ArrowLeft' && state.pdf.currentPage > 1) {
+        e.preventDefault();
+        setPdfPage(state.pdf.currentPage - 1);
+      } else if (e.key === 'ArrowRight' && state.pdf.currentPage < state.pdf.totalPages) {
+        e.preventDefault();
+        setPdfPage(state.pdf.currentPage + 1);
       }
     }
   });

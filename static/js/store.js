@@ -6,10 +6,106 @@
 import { icon } from './icons.js';
 
 const THEME_STORAGE_KEY = 'sln_theme';
+const DOC_FONT_SIZE_KEY = 'sln_doc_font_size';
+const DOC_FONT_FAMILY_KEY = 'sln_doc_font_family';
+const PANE_WIDTHS_KEY = 'sln_pane_widths';
+const UI_LAYOUT_KEY = 'sln_ui_layout';
+const RECENT_FILES_KEY = 'sln_recent_files';
 const MAX_CONTEXT_FILES = 5;
 const MAX_TOASTS = 3;
+const MAX_RECENT_FILES = 8;
+
+export const DRAG_MIME = 'application/x-smartlocalnote-block';
+
+const DEFAULT_UI_LAYOUT = {
+  leftModules: [
+    { id: 'files', title: '本地文件', visible: true, collapsed: false },
+    { id: 'workspaces', title: '场景工作区', visible: true, collapsed: false },
+    { id: 'apps', title: '办公软件直达', visible: true, collapsed: false },
+    { id: 'tree', title: '虚拟知识树', visible: true, collapsed: false },
+    { id: 'quick_scratch', title: '灵感便签（可拖入笔记）', visible: false, collapsed: false },
+    { id: 'recent_files', title: '最近打开', visible: false, collapsed: false },
+    { id: 'pomodoro_mini', title: '快捷专注', visible: false, collapsed: false },
+  ],
+  rightTabsOrder: ['summary', 'chat', 'tools'],
+  rightSummaryModules: [
+    { id: 'input', title: '随手速记区', visible: true },
+    { id: 'summary_card', title: 'AI 摘要与待办', visible: true },
+    { id: 'reminders', title: '定时提醒', visible: true },
+    { id: 'ai_templates', title: 'AI 常用指令模板', visible: false },
+  ],
+  rightToolModules: [
+    { id: 'quick_excel', title: '快捷表单填表与表格操作', visible: true },
+    { id: 'knowledge_tree', title: '虚拟知识树分类管理', visible: true },
+    { id: 'apps_workspaces', title: '本地软件库与工作区联启', visible: true },
+    { id: 'ai_templates', title: 'AI 常用指令模板', visible: false },
+  ],
+  scratchpadText: '',
+};
 
 const listeners = new Map();
+
+function cloneDefaultUiLayout() {
+  return {
+    leftModules: DEFAULT_UI_LAYOUT.leftModules.map((m) => ({ ...m })),
+    rightTabsOrder: [...DEFAULT_UI_LAYOUT.rightTabsOrder],
+    rightSummaryModules: DEFAULT_UI_LAYOUT.rightSummaryModules.map((m) => ({ ...m })),
+    rightToolModules: DEFAULT_UI_LAYOUT.rightToolModules.map((m) => ({ ...m })),
+    scratchpadText: DEFAULT_UI_LAYOUT.scratchpadText,
+  };
+}
+
+function mergeModuleList(savedList, defaultList) {
+  const defaultMap = new Map(defaultList.map((m) => [m.id, m]));
+  const result = [];
+  const seen = new Set();
+
+  if (Array.isArray(savedList)) {
+    for (const item of savedList) {
+      if (!item || typeof item !== 'object' || !defaultMap.has(item.id) || seen.has(item.id)) continue;
+      const base = defaultMap.get(item.id);
+      result.push({
+        ...base,
+        ...item,
+        id: base.id,
+        title: typeof item.title === 'string' && item.title ? item.title : base.title,
+        visible: typeof item.visible === 'boolean' ? item.visible : base.visible,
+        ...(typeof base.collapsed === 'boolean'
+          ? { collapsed: typeof item.collapsed === 'boolean' ? item.collapsed : base.collapsed }
+          : {}),
+      });
+      seen.add(base.id);
+    }
+  }
+
+  for (const def of defaultList) {
+    if (!seen.has(def.id)) {
+      result.push({ ...def });
+    }
+  }
+  return result;
+}
+
+function normalizeUiLayout(raw) {
+  const def = cloneDefaultUiLayout();
+  if (!raw || typeof raw !== 'object') return def;
+
+  const validTabs = new Set(def.rightTabsOrder);
+  const savedOrder = Array.isArray(raw.rightTabsOrder)
+    ? raw.rightTabsOrder.filter((t, i, arr) => validTabs.has(t) && arr.indexOf(t) === i)
+    : [];
+  for (const t of def.rightTabsOrder) {
+    if (!savedOrder.includes(t)) savedOrder.push(t);
+  }
+
+  return {
+    leftModules: mergeModuleList(raw.leftModules, def.leftModules),
+    rightTabsOrder: savedOrder,
+    rightSummaryModules: mergeModuleList(raw.rightSummaryModules, def.rightSummaryModules),
+    rightToolModules: mergeModuleList(raw.rightToolModules, def.rightToolModules),
+    scratchpadText: typeof raw.scratchpadText === 'string' ? raw.scratchpadText : def.scratchpadText,
+  };
+}
 
 function loadInitialTheme() {
   try {
@@ -24,9 +120,80 @@ function loadInitialTheme() {
   return 'light';
 }
 
+function clampNumber(val, min, max, fallback) {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(num)));
+}
+
+function loadInitialDocFontSize() {
+  try {
+    const saved = localStorage.getItem(DOC_FONT_SIZE_KEY);
+    if (saved !== null) return clampNumber(saved, 12, 24, 15);
+  } catch {
+    // ignore storage errors
+  }
+  return 15;
+}
+
+function loadInitialDocFontFamily() {
+  try {
+    const saved = localStorage.getItem(DOC_FONT_FAMILY_KEY);
+    if (saved === 'sans' || saved === 'serif' || saved === 'mono') return saved;
+  } catch {
+    // ignore storage errors
+  }
+  return 'sans';
+}
+
+function loadInitialPaneWidths() {
+  try {
+    const raw = localStorage.getItem(PANE_WIDTHS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        left: clampNumber(parsed?.left, 200, 480, 260),
+        right: clampNumber(parsed?.right, 280, 560, 360),
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { left: 260, right: 360 };
+}
+
+function loadInitialUiLayout() {
+  try {
+    const raw = localStorage.getItem(UI_LAYOUT_KEY);
+    if (raw) return normalizeUiLayout(JSON.parse(raw));
+  } catch {
+    // ignore storage errors
+  }
+  return cloneDefaultUiLayout();
+}
+
+function loadInitialRecentFiles() {
+  try {
+    const raw = localStorage.getItem(RECENT_FILES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.slice(0, MAX_RECENT_FILES);
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return [];
+}
+
 export const store = {
   state: {
     theme: loadInitialTheme(),
+    docFontSize: loadInitialDocFontSize(),
+    docFontFamily: loadInitialDocFontFamily(),
+    paneWidths: loadInitialPaneWidths(),
+    recentFiles: loadInitialRecentFiles(),
+    uiLayout: loadInitialUiLayout(),
+    activeDragPayload: null,
     systemInfo: null,
     config: {},
     files: { items: [], dirs: [], private_files: [] },
@@ -422,6 +589,213 @@ export function applyTheme(theme) {
   }
   store.emit('theme:changed', next);
   return next;
+}
+
+const DOC_FONT_FAMILY_VAR = {
+  sans: 'var(--font-sans)',
+  serif: 'var(--font-serif)',
+  mono: 'var(--font-mono)',
+};
+
+/**
+ * Apply document font size (12..24) and family ('sans'|'serif'|'mono'), persist to localStorage,
+ * and emit 'typography:changed'.
+ * @param {number} size
+ * @param {'sans'|'serif'|'mono'} family
+ */
+export function applyDocTypography(size, family) {
+  const nextSize = clampNumber(size, 12, 24, store.state.docFontSize || 15);
+  const nextFamily = ['sans', 'serif', 'mono'].includes(family)
+    ? family
+    : (['sans', 'serif', 'mono'].includes(store.state.docFontFamily) ? store.state.docFontFamily : 'sans');
+
+  store.state.docFontSize = nextSize;
+  store.state.docFontFamily = nextFamily;
+
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.setProperty('--doc-font-size', `${nextSize}px`);
+    document.documentElement.style.setProperty('--doc-font-family', DOC_FONT_FAMILY_VAR[nextFamily]);
+  }
+
+  try {
+    localStorage.setItem(DOC_FONT_SIZE_KEY, String(nextSize));
+    localStorage.setItem(DOC_FONT_FAMILY_KEY, nextFamily);
+  } catch {
+    // ignore storage errors
+  }
+
+  const detail = { docFontSize: nextSize, docFontFamily: nextFamily };
+  store.emit('typography:changed', detail);
+  return detail;
+}
+
+/**
+ * Clamp and apply left/right desktop pane widths, set CSS vars, and persist to localStorage.
+ * @param {number} leftW
+ * @param {number} rightW
+ */
+export function applyPaneWidths(leftW, rightW) {
+  const cur = store.state.paneWidths || { left: 260, right: 360 };
+  const nextLeft = clampNumber(leftW, 200, 480, cur.left ?? 260);
+  const nextRight = clampNumber(rightW, 280, 560, cur.right ?? 360);
+  const nextWidths = { left: nextLeft, right: nextRight };
+
+  store.state.paneWidths = nextWidths;
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.setProperty('--left-w', `${nextLeft}px`);
+    document.documentElement.style.setProperty('--right-w', `${nextRight}px`);
+  }
+
+  try {
+    localStorage.setItem(PANE_WIDTHS_KEY, JSON.stringify(nextWidths));
+  } catch {
+    // ignore storage errors
+  }
+
+  return nextWidths;
+}
+
+/**
+ * Merge partial UI layout changes, persist to localStorage, and emit 'ui:layout-changed'.
+ * @param {object} partial
+ */
+export function updateUiLayout(partial) {
+  const current = store.state.uiLayout || cloneDefaultUiLayout();
+  const merged = normalizeUiLayout({ ...current, ...(partial || {}) });
+  store.state.uiLayout = merged;
+  try {
+    localStorage.setItem(UI_LAYOUT_KEY, JSON.stringify(merged));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('ui:layout-changed', merged);
+  return merged;
+}
+
+/**
+ * Reset UI layout to defaults, persist to localStorage, and emit 'ui:layout-changed'.
+ */
+export function resetUiLayout() {
+  const next = cloneDefaultUiLayout();
+  store.state.uiLayout = next;
+  try {
+    localStorage.setItem(UI_LAYOUT_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('ui:layout-changed', next);
+  return next;
+}
+
+/**
+ * Record an opened file in store.state.recentFiles (max 8) and persist to localStorage.
+ * @param {{ path?: string, name?: string, ext?: string } | string} fileInfo
+ */
+export function recordRecentFile(fileInfo) {
+  const path = typeof fileInfo === 'string' ? fileInfo : fileInfo?.path;
+  if (!path) return store.state.recentFiles;
+  const normalizedPath = String(path).trim();
+  if (!normalizedPath) return store.state.recentFiles;
+
+  const baseName = normalizedPath.split(/[\\/]/).pop() || normalizedPath;
+  const entry = {
+    path: normalizedPath,
+    name: (typeof fileInfo === 'object' && fileInfo?.name) ? fileInfo.name : baseName,
+    ext: (typeof fileInfo === 'object' && fileInfo?.ext) ? fileInfo.ext : (baseName.includes('.') ? baseName.split('.').pop().toLowerCase() : ''),
+    openedAt: Date.now(),
+  };
+
+  const prev = Array.isArray(store.state.recentFiles) ? store.state.recentFiles : [];
+  const next = [entry, ...prev.filter((item) => item?.path !== normalizedPath)].slice(0, MAX_RECENT_FILES);
+  store.state.recentFiles = next;
+  try {
+    localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('recent:changed', next);
+  return next;
+}
+
+/**
+ * Set drag payload in DataTransfer (DRAG_MIME + text/plain) and fallback state
+ * so WebView2 never loses cross-panel drag data.
+ * @param {DragEvent} event
+ * @param {object | string} payload
+ */
+export function setDragPayload(event, payload) {
+  const normalized = typeof payload === 'string'
+    ? { type: 'text', markdown: payload, text: payload }
+    : { ...(payload || {}) };
+  store.state.activeDragPayload = normalized;
+
+  const plainText = String(
+    normalized.markdown ?? normalized.text ?? normalized.content ?? normalized.title ?? ''
+  );
+
+  const dt = event?.dataTransfer;
+  if (dt) {
+    try {
+      dt.setData(DRAG_MIME, JSON.stringify(normalized));
+    } catch {
+      // ignore DataTransfer restrictions
+    }
+    try {
+      dt.setData('text/plain', plainText);
+    } catch {
+      // ignore DataTransfer restrictions
+    }
+    try {
+      if (!dt.effectAllowed || dt.effectAllowed === 'uninitialized') {
+        dt.effectAllowed = 'copyMove';
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return normalized;
+}
+
+/**
+ * Read drag payload from DataTransfer DRAG_MIME, falling back to activeDragPayload, then text/plain.
+ * @param {DragEvent} event
+ */
+export function readDragPayload(event) {
+  const dt = event?.dataTransfer;
+  if (dt) {
+    try {
+      const raw = dt.getData(DRAG_MIME);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch {
+      // ignore parse/access error
+    }
+  }
+
+  if (store.state.activeDragPayload) {
+    return store.state.activeDragPayload;
+  }
+
+  if (dt) {
+    try {
+      const text = dt.getData('text/plain');
+      if (text) {
+        return { type: 'text', markdown: text, text };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Clear active drag payload fallback.
+ */
+export function clearDragPayload() {
+  store.state.activeDragPayload = null;
 }
 
 function simpleMarkdownFallback(mdText) {

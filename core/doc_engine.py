@@ -7,15 +7,20 @@ All local file access and writes pass through `core.safe_io`.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any
 
 from config import get_default_notes_dir, load_config
 from core import safe_io
 
 _INVALID_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_PDF_PAGE_CACHE_MAX = 32
+_PDF_PAGE_CACHE: OrderedDict[tuple[str, int, int, float], bytes] = OrderedDict()
+_PDF_PAGE_CACHE_LOCK = threading.Lock()
 
 
 def _truncate_head_tail(text: str, max_chars: int) -> str:
@@ -362,3 +367,38 @@ def extract_text_for_ai(path_str: str, max_chars: int = 4000) -> str:
         return _truncate_head_tail(summary, max_chars)
 
     raise ValueError(f"暂不支持为该格式抽取 AI 文本：{ext or target.name}")
+
+
+def render_pdf_page_png(path_str: str, page: int = 1, zoom: float = 1.6) -> bytes:
+    """Render a PDF page as crisp PNG bytes using lazy PyMuPDF with a 32-entry LRU cache."""
+    target = safe_io.resolve_safe_path(path_str, must_exist=True)
+    if target.suffix.lower() != ".pdf":
+        raise ValueError(f"仅支持 .pdf 文件：{target.name}")
+
+    zoom_clamped = round(max(0.5, min(3.0, float(zoom))), 2)
+    req_page = max(1, int(page))
+    mtime_ns = target.stat().st_mtime_ns
+    cache_key = (str(target), mtime_ns, req_page, zoom_clamped)
+
+    with _PDF_PAGE_CACHE_LOCK:
+        cached = _PDF_PAGE_CACHE.get(cache_key)
+        if cached is not None:
+            _PDF_PAGE_CACHE.move_to_end(cache_key)
+            return cached
+
+    import pymupdf
+
+    with pymupdf.open(target) as doc:
+        if len(doc) == 0:
+            raise ValueError(f"PDF 文件为空：{target.name}")
+        page_idx = max(0, min(len(doc) - 1, req_page - 1))
+        pix = doc[page_idx].get_pixmap(matrix=pymupdf.Matrix(zoom_clamped, zoom_clamped), alpha=False)
+        png_bytes = pix.tobytes("png")
+
+    with _PDF_PAGE_CACHE_LOCK:
+        _PDF_PAGE_CACHE[cache_key] = png_bytes
+        _PDF_PAGE_CACHE.move_to_end(cache_key)
+        while len(_PDF_PAGE_CACHE) > _PDF_PAGE_CACHE_MAX:
+            _PDF_PAGE_CACHE.popitem(last=False)
+
+    return png_bytes

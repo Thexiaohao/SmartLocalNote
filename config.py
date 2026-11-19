@@ -29,17 +29,101 @@ TASKS_FILE: Path = DATA_DIR / "tasks.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "port": 8765,
     "theme": "light",
+    "doc_font_size": 15,
+    "doc_font_family": "sans",
+    "ui_layout": {},
     "ai": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "api_key": "",
         "model": "qwen-plus",
         "web_search_param": "enable_search",
+        "enable_free_ai": True,
     },
     "whitelist_dirs": [],
     "private_files": [],
     "default_notes_dir": "./data/notes",
     "default_progress_excel": "",
 }
+
+FREE_AI_PRESETS: list[dict[str, Any]] = [
+    {
+        "id": "free_auto",
+        "label": "免 Key 免费基础 AI（自动探测本机 Ollama / 免费公共通道 / 本地引擎）",
+        "name": "免 Key 免费基础 AI（自动探测本机 Ollama / 免费公共通道 / 本地引擎）",
+        "base_url": "",
+        "model": "openai",
+        "web_search_param": "",
+        "needs_key": False,
+        "doc_url": "",
+        "hint": "无需注册开箱即用；自动尝试免费基础通道，断网自动回退本地规则引擎",
+    },
+    {
+        "id": "zhipu_free",
+        "label": "智谱 GLM-4-Flash（永久免费 · 国内直连）",
+        "name": "智谱 GLM-4-Flash（永久免费 · 国内直连）",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+        "web_search_param": "",
+        "needs_key": True,
+        "doc_url": "https://open.bigmodel.cn/usercenter/apikeys",
+        "hint": "国内直连速度快，glm-4-flash 免费开放",
+    },
+    {
+        "id": "siliconflow_free",
+        "label": "硅基流动 Qwen2.5-7B（免费额度 · 国内直连）",
+        "name": "硅基流动 Qwen2.5-7B（免费额度 · 国内直连）",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "web_search_param": "",
+        "needs_key": True,
+        "doc_url": "https://cloud.siliconflow.cn/account/ak",
+        "hint": "国内直连，多款 7B/9B 开源模型免费",
+    },
+    {
+        "id": "gemini_free",
+        "label": "Google Gemini 2.5 Flash（免卡每日免费）",
+        "name": "Google Gemini 2.5 Flash（免卡每日免费）",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-2.5-flash",
+        "web_search_param": "",
+        "needs_key": True,
+        "doc_url": "https://aistudio.google.com/apikey",
+        "hint": "免信用卡，官方每日免费 500 次",
+    },
+    {
+        "id": "groq_free",
+        "label": "Groq Llama-3.3-70B（极速免费层）",
+        "name": "Groq Llama-3.3-70B（极速免费层）",
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+        "web_search_param": "",
+        "needs_key": True,
+        "doc_url": "https://console.groq.com/keys",
+        "hint": "免信用卡，极速吐字",
+    },
+    {
+        "id": "ollama_local",
+        "label": "本机 Ollama 离线模型（0费用纯本地）",
+        "name": "本机 Ollama 离线模型（0费用纯本地）",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "qwen2.5:7b",
+        "web_search_param": "",
+        "needs_key": False,
+        "doc_url": "https://ollama.com",
+        "hint": "本机运行，隐私数据 100% 不出电脑",
+    },
+    {
+        "id": "dashscope",
+        "label": "通义千问 DashScope（支持联网开关）",
+        "name": "通义千问 DashScope（支持联网开关）",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "web_search_param": "enable_search",
+        "needs_key": True,
+        "doc_url": "https://bailian.console.aliyun.com/",
+        "hint": "支持原生 enable_search 联网搜索",
+    },
+]
 
 _DEFAULT_DATA_FILES: dict[Path, Any] = {
     CONFIG_FILE: DEFAULT_CONFIG,
@@ -159,6 +243,20 @@ def ensure_data_dirs() -> None:
     _seed_demo_workspace_if_empty()
 
 
+def _normalize_bool(value: Any, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("0", "false", "no", "off", ""):
+            return False
+        if low in ("1", "true", "yes", "on"):
+            return True
+    if value is None:
+        return default
+    return bool(value)
+
+
 def _merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     """Merge user config dict over DEFAULT_CONFIG so missing keys never break callers."""
     merged = deepcopy(DEFAULT_CONFIG)
@@ -175,8 +273,22 @@ def _merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
                 merged["port"] = int(value)
             except (TypeError, ValueError):
                 pass
+        elif key == "doc_font_size":
+            if not isinstance(value, bool):
+                try:
+                    merged["doc_font_size"] = max(12, min(24, int(value)))
+                except (TypeError, ValueError):
+                    pass
+        elif key == "doc_font_family":
+            fam = str(value or "").strip().lower()
+            if fam in ("sans", "serif", "mono"):
+                merged["doc_font_family"] = fam
+        elif key == "ui_layout":
+            merged["ui_layout"] = deepcopy(value) if isinstance(value, dict) else {}
         else:
             merged[key] = value
+
+    merged["ai"]["enable_free_ai"] = _normalize_bool(merged["ai"].get("enable_free_ai"), True)
     return merged
 
 

@@ -10,7 +10,18 @@
  * Strictly decoupled via store EventBus. Zero direct DOM access to Center/Right panels.
  */
 
-import { store, escapeHtml, toggleContextPath, showToast, openSheet, closeSheet } from './store.js';
+import {
+  store,
+  escapeHtml,
+  toggleContextPath,
+  showToast,
+  openSheet,
+  closeSheet,
+  updateUiLayout,
+  resetUiLayout,
+  setDragPayload,
+  clearDragPayload,
+} from './store.js';
 import { api } from './api_client.js';
 import { icon } from './icons.js';
 
@@ -22,6 +33,23 @@ const FOCUS_DURATION_OPTIONS = [
   { label: '45分', seconds: 2700 },
 ];
 
+const QUICK_POMODORO_PRESETS = [
+  { label: '15s演示', seconds: 15 },
+  { label: '15分', seconds: 900 },
+  { label: '25分', seconds: 1500 },
+  { label: '45分', seconds: 2700 },
+];
+
+const MODULE_DESCRIPTIONS = {
+  files: '本地文件树（支持联合问答勾选、隐私锁与拖拽锚点）',
+  workspaces: '桌面现场捕获与多软件/文档一键联启',
+  apps: '已注册本地软件快捷直达胶囊',
+  tree: '虚拟知识树节点与绑定文件速览',
+  quick_scratch: '随时记录灵感片段，支持拖入当前笔记或 AI 提取待办',
+  recent_files: '最近打开文档快捷回跳列表',
+  pomodoro_mini: '自定义任务名与专注时长，一键开启灵动岛倒计时',
+};
+
 const collapsedGroups = new Set();
 const mutating = {
   files: false,
@@ -32,6 +60,8 @@ const mutating = {
 
 let containerRef = null;
 let isLoadingInitial = true;
+let dragModuleId = null;
+let quickPomodoroTask = '';
 
 function getBasename(filePath) {
   const parts = String(filePath || '').split(/[\\/]/);
@@ -65,6 +95,36 @@ function getFileIconName(ext) {
 function findFileItemByPath(path) {
   const items = store.state.files?.items || [];
   return items.find((item) => item.path === path) || null;
+}
+
+function buildFileAnchorMarkdown(itemOrPath) {
+  const path = typeof itemOrPath === 'string' ? itemOrPath : itemOrPath?.path || '';
+  const name =
+    (typeof itemOrPath === 'object' && itemOrPath?.name) || getBasename(path);
+  const ext = getFileExt(
+    typeof itemOrPath === 'object' ? itemOrPath : { path, name }
+  );
+  if (ext === 'pdf') {
+    return `[[${name}#page=1]]`;
+  }
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'xlsm') {
+    return `[[${name}#A2]]`;
+  }
+  return `[[${name}]]`;
+}
+
+function getLeftModules() {
+  const mods = store.state.uiLayout?.leftModules;
+  if (Array.isArray(mods) && mods.length > 0) return mods;
+  return [
+    { id: 'files', title: '本地文件', visible: true, collapsed: false },
+    { id: 'workspaces', title: '场景工作区', visible: true, collapsed: false },
+    { id: 'apps', title: '办公软件直达', visible: true, collapsed: false },
+    { id: 'tree', title: '虚拟知识树', visible: true, collapsed: false },
+    { id: 'quick_scratch', title: '灵感便签（可拖入笔记）', visible: false, collapsed: false },
+    { id: 'recent_files', title: '最近打开', visible: false, collapsed: false },
+    { id: 'pomodoro_mini', title: '快捷专注', visible: false, collapsed: false },
+  ];
 }
 
 function groupFiles(items) {
@@ -181,12 +241,12 @@ function syncActiveFileHighlight(containerEl, explicitPath) {
 
 function renderFilesSection(items, selectedSet, activePath) {
   if (isLoadingInitial && items.length === 0) {
-    return `<div class="empty-state" style="padding: 18px 8px;"><p class="empty-desc">正在扫描本地工作区…</p></div>`;
+    return `<div class="empty-state" style="padding: 14px 8px;"><p class="empty-desc">正在扫描本地工作区…</p></div>`;
   }
 
   if (items.length === 0) {
     return `
-      <div class="empty-state" style="padding: 18px 8px;">
+      <div class="empty-state" style="padding: 14px 8px;">
         <p class="empty-desc">暂无本地文档，点击上方「新建笔记」或「导入」添加资料</p>
       </div>
     `;
@@ -220,6 +280,9 @@ function renderFilesSection(items, selectedSet, activePath) {
                         class="tree-file-item ${isActive ? 'is-selected' : ''}"
                         data-action="open-file"
                         data-path="${escapeHtml(path)}"
+                        data-name="${escapeHtml(name)}"
+                        data-ext="${escapeHtml(ext)}"
+                        draggable="true"
                         role="button"
                         tabindex="0"
                       >
@@ -234,7 +297,7 @@ function renderFilesSection(items, selectedSet, activePath) {
                         <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
                           ${icon(getFileIconName(ext), 15)}
                         </span>
-                        <span class="file-name" title="${escapeHtml(path)}">${escapeHtml(name)}</span>
+                        <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点）">${escapeHtml(name)}</span>
                         <span class="file-ext-badge">${escapeHtml(ext)}</span>
                         <button
                           type="button"
@@ -258,86 +321,86 @@ function renderFilesSection(items, selectedSet, activePath) {
     .join('');
 }
 
-function renderAppsAndWorkspacesSection(apps, workspaces) {
-  const appsHtml =
-    apps.length === 0
-      ? `<p class="empty-desc" style="margin:4px 0 8px;">暂无已注册软件，可点击「捕获现场」或「+ 软件」快速添加</p>`
-      : `
-        <div class="app-pill-grid" style="margin-bottom:10px;">
-          ${apps
-            .map(
-              (app) => `
-              <button
-                type="button"
-                class="app-launcher-pill"
-                data-action="launch-app"
-                data-app-id="${escapeHtml(app.id)}"
-                title="${escapeHtml(app.path || app.name)}"
-              >
-                ${icon('rocket', 12)}
-                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(app.name)}</span>
-              </button>
-            `
-            )
-            .join('')}
-        </div>
-      `;
-
-  const workspacesHtml =
-    workspaces.length === 0
-      ? `<p class="empty-desc" style="margin:4px 0;">暂无场景工作区，点击「捕获现场」一键固化当前桌面</p>`
-      : workspaces
-          .map((ws) => {
-            const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
-            const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
-            return `
-              <div class="workspace-card" data-workspace-id="${escapeHtml(ws.id)}">
-                <div class="workspace-card-head">
-                  <span class="workspace-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span>
-                  <span class="workspace-meta">${appCount} 软件 · ${fileCount} 文档</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                  <button
-                    type="button"
-                    class="pill-btn pill-btn-sm pill-btn-primary"
-                    data-action="launch-workspace"
-                    data-ws-id="${escapeHtml(ws.id)}"
-                  >
-                    ${icon('rocket', 12)} 联启
-                  </button>
-                  <select
-                    class="apple-select"
-                    data-role="ws-focus-duration"
-                    data-ws-id="${escapeHtml(ws.id)}"
-                    aria-label="选择专注时长"
-                    style="width:auto;padding:4px 8px;height:28px;font-size:11.5px;border-radius:var(--radius-pill);"
-                  >
-                    ${FOCUS_DURATION_OPTIONS.map(
-                      (opt) =>
-                        `<option value="${opt.seconds}" ${opt.seconds === 1500 ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`
-                    ).join('')}
-                  </select>
-                  <button
-                    type="button"
-                    class="pill-btn pill-btn-sm"
-                    data-action="focus-workspace"
-                    data-ws-id="${escapeHtml(ws.id)}"
-                  >
-                    ${icon('play', 12)} 专注
-                  </button>
-                </div>
-              </div>
-            `;
-          })
-          .join('');
-
-  return `${appsHtml}${workspacesHtml}`;
+function renderAppsSection(apps) {
+  if (apps.length === 0) {
+    return `<p class="empty-desc" style="margin:4px 0;">暂无已注册软件，可点击「捕获现场」或「+ 软件」快速添加</p>`;
+  }
+  return `
+    <div class="app-pill-grid">
+      ${apps
+        .map(
+          (app) => `
+          <button
+            type="button"
+            class="app-launcher-pill"
+            data-action="launch-app"
+            data-app-id="${escapeHtml(app.id)}"
+            title="${escapeHtml(app.path || app.name)}"
+          >
+            ${icon('rocket', 12)}
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(app.name)}</span>
+          </button>
+        `
+        )
+        .join('')}
+    </div>
+  `;
 }
 
-function renderKnowledgeTreeSection(treeNodes) {
+function renderWorkspacesSection(workspaces) {
+  if (workspaces.length === 0) {
+    return `<p class="empty-desc" style="margin:4px 0;">暂无场景工作区，点击「捕获现场」一键固化当前桌面</p>`;
+  }
+  return workspaces
+    .map((ws) => {
+      const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
+      const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
+      return `
+        <div class="workspace-card" data-workspace-id="${escapeHtml(ws.id)}">
+          <div class="workspace-card-head">
+            <span class="workspace-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span>
+            <span class="workspace-meta">${appCount} 软件 · ${fileCount} 文档</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <button
+              type="button"
+              class="pill-btn pill-btn-sm pill-btn-primary"
+              data-action="launch-workspace"
+              data-ws-id="${escapeHtml(ws.id)}"
+            >
+              ${icon('rocket', 12)} 联启
+            </button>
+            <select
+              class="apple-select"
+              data-role="ws-focus-duration"
+              data-ws-id="${escapeHtml(ws.id)}"
+              aria-label="选择专注时长"
+              style="width:auto;padding:4px 8px;height:28px;font-size:11.5px;border-radius:var(--radius-pill);"
+            >
+              ${FOCUS_DURATION_OPTIONS.map(
+                (opt) =>
+                  `<option value="${opt.seconds}" ${opt.seconds === 1500 ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`
+              ).join('')}
+            </select>
+            <button
+              type="button"
+              class="pill-btn pill-btn-sm"
+              data-action="focus-workspace"
+              data-ws-id="${escapeHtml(ws.id)}"
+            >
+              ${icon('play', 12)} 专注
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function renderKnowledgeTreeSection(treeNodes, activePath) {
   const topNodes = (treeNodes || []).filter((n) => !n.parent_id);
   if (topNodes.length === 0) {
-    return `<p class="empty-desc" style="margin:4px 0;">暂无知识树节点，点击「管理知识树」创建分类</p>`;
+    return `<p class="empty-desc" style="margin:4px 0;">暂无知识树节点，点击「管理」创建分类</p>`;
   }
 
   return topNodes
@@ -354,18 +417,23 @@ function renderKnowledgeTreeSection(treeNodes) {
             .map((bf) => {
               const path = bf.path || '';
               const name = getBasename(path);
+              const ext = getFileExt({ path, name });
               const status = bf.status || '';
+              const isActive = Boolean(activePath) && activePath === path;
               return `
                 <div
-                  class="tree-file-item"
+                  class="tree-file-item ${isActive ? 'is-selected' : ''}"
                   data-action="open-tree-file"
                   data-path="${escapeHtml(path)}"
+                  data-name="${escapeHtml(name)}"
+                  data-ext="${escapeHtml(ext)}"
+                  draggable="true"
                   role="button"
                   tabindex="0"
                   style="padding-left:20px;"
                 >
                   <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
-                    ${icon(getFileIconName(name.split('.').pop()), 13)}
+                    ${icon(getFileIconName(ext), 13)}
                   </span>
                   <span class="file-name" title="${escapeHtml(path)}">${escapeHtml(name)}</span>
                   ${status ? `<span class="file-ext-badge">${escapeHtml(status)}</span>` : ''}
@@ -379,6 +447,155 @@ function renderKnowledgeTreeSection(treeNodes) {
     .join('');
 }
 
+function renderQuickScratchSection() {
+  const scratchText = store.state.uiLayout?.scratchpadText || '';
+  return `
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <textarea
+        class="apple-textarea"
+        data-role="quick-scratch-input"
+        rows="4"
+        placeholder="随手记下碎片想法，可拖拽下方胶囊直接插入当前笔记…"
+        style="min-height:84px;font-size:12.5px;padding:8px 10px;"
+      >${escapeHtml(scratchText)}</textarea>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+        <span
+          class="drag-pill-hint draggable-card"
+          data-drag-source="quick-scratch"
+          draggable="true"
+          title="按住拖入中间笔记或 PDF 伴生笔记"
+          style="padding:4px 9px;font-size:11.5px;color:var(--accent);background:var(--accent-soft);"
+        >
+          ⠿ 拖入笔记
+        </span>
+        <button
+          type="button"
+          class="pill-btn pill-btn-sm"
+          data-action="scratch-ai-extract"
+          style="height:26px;padding:0 10px;font-size:11.5px;"
+        >
+          ${icon('sparkles', 12)} AI 提取待办
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderRecentFilesSection(recentFiles, activePath) {
+  const list = Array.isArray(recentFiles) ? recentFiles : [];
+  if (list.length === 0) {
+    return `<p class="empty-desc" style="margin:4px 0;">暂无最近打开记录，点击任意文档后将自动收录</p>`;
+  }
+  return list
+    .map((rf) => {
+      const path = rf.path || '';
+      const name = rf.name || getBasename(path);
+      const ext = getFileExt(rf);
+      const isActive = Boolean(activePath) && activePath === path;
+      return `
+        <div
+          class="tree-file-item ${isActive ? 'is-selected' : ''}"
+          data-action="open-file"
+          data-path="${escapeHtml(path)}"
+          data-name="${escapeHtml(name)}"
+          data-ext="${escapeHtml(ext)}"
+          draggable="true"
+          role="button"
+          tabindex="0"
+        >
+          <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
+            ${icon(getFileIconName(ext), 14)}
+          </span>
+          <span class="file-name" title="${escapeHtml(path)}">${escapeHtml(name)}</span>
+          <span class="file-ext-badge">${escapeHtml(ext)}</span>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function renderPomodoroMiniSection() {
+  return `
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <input
+        type="text"
+        class="apple-input"
+        data-role="mini-pomodoro-task"
+        value="${escapeHtml(quickPomodoroTask)}"
+        placeholder="专注任务名（如：高数错题复盘）"
+        style="height:30px;padding:4px 10px;font-size:12px;"
+      />
+      <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+        ${QUICK_POMODORO_PRESETS.map(
+          (preset) => `
+            <button
+              type="button"
+              class="pill-btn pill-btn-sm"
+              data-action="mini-pomodoro-start"
+              data-seconds="${preset.seconds}"
+              style="height:26px;padding:0 9px;font-size:11.5px;"
+            >
+              ${icon('play', 11)} ${escapeHtml(preset.label)}
+            </button>
+          `
+        ).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function getModuleQuickActionsHtml(modId, selectedCount, itemsCount) {
+  if (modId === 'files') {
+    return `
+      <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数">已勾 ${selectedCount}/${MAX_CONTEXT_FILES}</span>
+      <span style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>
+    `;
+  }
+  if (modId === 'workspaces') {
+    return `
+      <button type="button" class="pill-btn pill-btn-sm" data-action="capture-scene" style="height:22px;padding:0 8px;font-size:11px;">
+        ${icon('camera', 11)} 捕获现场
+      </button>
+    `;
+  }
+  if (modId === 'apps') {
+    return `
+      <button type="button" class="pill-btn pill-btn-sm" data-action="add-app" style="height:22px;padding:0 8px;font-size:11px;">
+        ${icon('plus', 11)} 软件
+      </button>
+    `;
+  }
+  if (modId === 'tree') {
+    return `
+      <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="manage-tree" style="height:22px;padding:0 7px;font-size:11px;">
+        ${icon('settings', 11)} 管理
+      </button>
+    `;
+  }
+  return '';
+}
+
+function renderModuleBodyHtml(modId, ctx) {
+  switch (modId) {
+    case 'files':
+      return `<div class="left-files-list">${renderFilesSection(ctx.items, ctx.selectedSet, ctx.activePath)}</div>`;
+    case 'workspaces':
+      return `<div class="left-workspaces-list">${renderWorkspacesSection(ctx.workspaces)}</div>`;
+    case 'apps':
+      return `<div class="left-apps-list">${renderAppsSection(ctx.apps)}</div>`;
+    case 'tree':
+      return `<div class="left-tree-quick">${renderKnowledgeTreeSection(ctx.treeNodes, ctx.activePath)}</div>`;
+    case 'quick_scratch':
+      return renderQuickScratchSection();
+    case 'recent_files':
+      return renderRecentFilesSection(ctx.recentFiles, ctx.activePath);
+    case 'pomodoro_mini':
+      return renderPomodoroMiniSection();
+    default:
+      return '';
+  }
+}
+
 function renderLeftPanel(containerEl) {
   if (!containerEl) return;
   const prevScrollTop = containerEl.querySelector('.panel-body')?.scrollTop || 0;
@@ -389,6 +606,64 @@ function renderLeftPanel(containerEl) {
   const apps = store.state.apps || [];
   const workspaces = store.state.workspaces || [];
   const treeNodes = store.state.tree?.nodes || [];
+  const recentFiles = store.state.recentFiles || [];
+  const leftModules = getLeftModules();
+  const visibleModules = leftModules.filter((m) => m.visible !== false);
+
+  const ctx = { items, selectedSet, activePath, apps, workspaces, treeNodes, recentFiles };
+
+  const modulesHtml =
+    visibleModules.length === 0
+      ? `
+        <div class="empty-state" style="padding:28px 12px;">
+          <p class="empty-title">左侧模块已全部隐藏</p>
+          <p class="empty-desc">点击上方「⚙ 模块」可重新勾选显示或恢复默认布局</p>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="customize-modules">
+            ${icon('settings', 12)} 自定义左侧模块
+          </button>
+        </div>
+      `
+      : visibleModules
+          .map((mod) => {
+            const collapsed = Boolean(mod.collapsed);
+            return `
+              <section
+                class="module-block ${collapsed ? 'is-collapsed' : ''}"
+                data-module-id="${escapeHtml(mod.id)}"
+              >
+                <div class="module-header">
+                  <div style="display:flex;align-items:center;gap:4px;min-width:0;flex:1;">
+                    <span
+                      class="module-drag-handle"
+                      draggable="true"
+                      data-drag-module="${escapeHtml(mod.id)}"
+                      title="拖拽调整模块顺序"
+                      aria-label="拖拽调整 ${escapeHtml(mod.title)} 顺序"
+                    >
+                      ⠿
+                    </span>
+                    <button
+                      type="button"
+                      data-action="toggle-module-collapse"
+                      data-module-id="${escapeHtml(mod.id)}"
+                      aria-expanded="${!collapsed}"
+                      style="display:inline-flex;align-items:center;gap:4px;min-width:0;flex:1;text-align:left;font-size:12px;font-weight:600;color:var(--text-primary);"
+                    >
+                      ${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}
+                      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(mod.title)}</span>
+                    </button>
+                  </div>
+                  <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+                    ${getModuleQuickActionsHtml(mod.id, selectedSet.size, items.length)}
+                  </div>
+                </div>
+                <div class="module-content">
+                  ${renderModuleBodyHtml(mod.id, ctx)}
+                </div>
+              </section>
+            `;
+          })
+          .join('');
 
   containerEl.innerHTML = `
     <div class="panel-header">
@@ -398,46 +673,18 @@ function renderLeftPanel(containerEl) {
 
     <div class="left-toolbar" style="flex-shrink:0;">
       <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="new-note">
-        ${icon('plus', 13)} 新建笔记
+        ${icon('plus', 13)} 笔记
       </button>
       <button type="button" class="pill-btn pill-btn-sm" data-action="import-open">
         ${icon('download', 13)} 导入
       </button>
+      <button type="button" class="pill-btn pill-btn-sm" data-action="customize-modules" title="添加、隐藏或排序左侧工作区模块">
+        ${icon('settings', 13)} 模块
+      </button>
     </div>
 
     <div class="panel-body">
-      <div class="section-heading">
-        <span>本地文件</span>
-        <span style="font-weight:500;text-transform:none;">${items.length} 份</span>
-      </div>
-      <div class="left-files-list">
-        ${renderFilesSection(items, selectedSet, activePath)}
-      </div>
-
-      <div class="section-heading">
-        <span>本地软件与现场</span>
-        <div style="display:inline-flex;align-items:center;gap:4px;">
-          <button type="button" class="pill-btn pill-btn-sm" data-action="capture-scene" style="height:24px;padding:0 9px;font-size:11px;">
-            ${icon('camera', 12)} 捕获现场
-          </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="add-app" style="height:24px;padding:0 9px;font-size:11px;">
-            ${icon('plus', 12)} 软件
-          </button>
-        </div>
-      </div>
-      <div class="left-apps-workspaces">
-        ${renderAppsAndWorkspacesSection(apps, workspaces)}
-      </div>
-
-      <div class="section-heading">
-        <span>虚拟知识树</span>
-        <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="manage-tree" style="height:24px;padding:0 8px;font-size:11px;text-transform:none;">
-          ${icon('settings', 12)} 管理知识树
-        </button>
-      </div>
-      <div class="left-tree-quick">
-        ${renderKnowledgeTreeSection(treeNodes)}
-      </div>
+      ${modulesHtml}
     </div>
   `;
 
@@ -445,6 +692,109 @@ function renderLeftPanel(containerEl) {
   if (bodyEl && prevScrollTop > 0) {
     bodyEl.scrollTop = prevScrollTop;
   }
+}
+
+function openCustomizeModulesSheet() {
+  openSheet({
+    title: '自定义左侧模块',
+    bodyHtml: `<div id="left-modules-manager" style="display:flex;flex-direction:column;gap:8px;"></div>`,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-ghost" id="left-modules-reset">恢复默认布局</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="left-modules-done">完成</button>
+    `,
+    onMount(card) {
+      const listEl = card.querySelector('#left-modules-manager');
+
+      const renderManagerRows = () => {
+        if (!listEl) return;
+        const modules = getLeftModules();
+        listEl.innerHTML = modules
+          .map((mod, idx) => {
+            const desc = MODULE_DESCRIPTIONS[mod.id] || '';
+            const isFirst = idx === 0;
+            const isLast = idx === modules.length - 1;
+            return `
+              <div
+                class="glass-card"
+                data-mod-row="${escapeHtml(mod.id)}"
+                style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;"
+              >
+                <label style="display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0;cursor:pointer;">
+                  <input
+                    type="checkbox"
+                    class="file-check"
+                    data-mod-toggle="${escapeHtml(mod.id)}"
+                    ${mod.visible !== false ? 'checked' : ''}
+                    style="margin-top:2px;"
+                  />
+                  <div style="min-width:0;">
+                    <div style="font-size:13px;font-weight:600;color:var(--text-primary);">${escapeHtml(mod.title)}</div>
+                    ${desc ? `<div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">${escapeHtml(desc)}</div>` : ''}
+                  </div>
+                </label>
+                <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+                  <button
+                    type="button"
+                    class="pill-btn pill-btn-sm"
+                    data-mod-move="up"
+                    data-mod-id="${escapeHtml(mod.id)}"
+                    ${isFirst ? 'disabled' : ''}
+                    title="上移"
+                    style="height:26px;padding:0 8px;font-size:12px;"
+                  >↑</button>
+                  <button
+                    type="button"
+                    class="pill-btn pill-btn-sm"
+                    data-mod-move="down"
+                    data-mod-id="${escapeHtml(mod.id)}"
+                    ${isLast ? 'disabled' : ''}
+                    title="下移"
+                    style="height:26px;padding:0 8px;font-size:12px;"
+                  >↓</button>
+                </div>
+              </div>
+            `;
+          })
+          .join('');
+      };
+
+      renderManagerRows();
+
+      listEl?.addEventListener('change', (e) => {
+        const cb = e.target.closest('[data-mod-toggle]');
+        if (!cb) return;
+        const modId = cb.dataset.modToggle;
+        const nextModules = getLeftModules().map((m) =>
+          m.id === modId ? { ...m, visible: Boolean(cb.checked) } : { ...m }
+        );
+        updateUiLayout({ leftModules: nextModules });
+      });
+
+      listEl?.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-mod-move]');
+        if (!btn) return;
+        const modId = btn.dataset.modId;
+        const dir = btn.dataset.modMove;
+        const nextModules = getLeftModules().map((m) => ({ ...m }));
+        const idx = nextModules.findIndex((m) => m.id === modId);
+        if (idx < 0) return;
+        const targetIdx = dir === 'up' ? idx - 1 : idx + 1;
+        if (targetIdx < 0 || targetIdx >= nextModules.length) return;
+        const [moved] = nextModules.splice(idx, 1);
+        nextModules.splice(targetIdx, 0, moved);
+        updateUiLayout({ leftModules: nextModules });
+        renderManagerRows();
+      });
+
+      card.querySelector('#left-modules-reset')?.addEventListener('click', () => {
+        resetUiLayout();
+        renderManagerRows();
+        showToast('已恢复默认左侧模块布局', 'success');
+      });
+
+      card.querySelector('#left-modules-done')?.addEventListener('click', closeSheet);
+    },
+  });
 }
 
 function openCreateNoteSheet() {
@@ -1086,7 +1436,7 @@ function handleOpenTreeTools() {
 }
 
 /**
- * Initialize Left Panel (Stages 2, 3 & 4 Production).
+ * Initialize Left Panel (Stages 2, 3, 4 & V2 Modular Workspace).
  * @param {HTMLElement} containerEl
  */
 export function initLeftTree(containerEl) {
@@ -1099,6 +1449,19 @@ export function initLeftTree(containerEl) {
   store.on('context:changed', () => syncContextCheckboxes(containerEl));
   store.on('file:open', (file) => syncActiveFileHighlight(containerEl, file?.path));
   store.on('capture:open', () => openCaptureSceneSheet());
+  store.on('ui:layout-changed', () => {
+    const activeEl = document.activeElement;
+    if (activeEl && containerEl.contains(activeEl) && activeEl.matches('[data-role="quick-scratch-input"]')) {
+      return;
+    }
+    renderLeftPanel(containerEl);
+  });
+  store.on('recent:changed', () => {
+    const hasRecentMod = getLeftModules().some((m) => m.id === 'recent_files' && m.visible !== false);
+    if (hasRecentMod) {
+      renderLeftPanel(containerEl);
+    }
+  });
 
   // Refresh data when mutated elsewhere via EventBus
   store.on('files:updated', async () => {
@@ -1122,6 +1485,126 @@ export function initLeftTree(containerEl) {
     renderLeftPanel(containerEl);
   });
 
+  // Live input syncing for quick_scratch and pomodoro_mini
+  containerEl.addEventListener('input', (e) => {
+    const target = e.target;
+    if (target.matches('[data-role="quick-scratch-input"]')) {
+      updateUiLayout({ scratchpadText: target.value });
+      return;
+    }
+    if (target.matches('[data-role="mini-pomodoro-task"]')) {
+      quickPomodoroTask = target.value;
+    }
+  });
+
+  // Cross-panel file/scratchpad drags + left-panel module reordering
+  containerEl.addEventListener('dragstart', (e) => {
+    const handle = e.target.closest('.module-drag-handle[data-drag-module]');
+    if (handle) {
+      const modId = handle.dataset.dragModule;
+      const block = handle.closest('.module-block');
+      dragModuleId = modId;
+      block?.classList.add('is-dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+      }
+      setDragPayload(e, { type: 'module-reorder', moduleId: modId });
+      return;
+    }
+
+    const scratchPill = e.target.closest('[data-drag-source="quick-scratch"]');
+    if (scratchPill) {
+      const ta = containerEl.querySelector('[data-role="quick-scratch-input"]');
+      const text = (ta?.value ?? store.state.uiLayout?.scratchpadText ?? '').trim();
+      if (!text) {
+        e.preventDefault();
+        showToast('灵感便签为空，请先输入内容后再拖入笔记', 'warning');
+        return;
+      }
+      setDragPayload(e, {
+        type: 'scratchpad',
+        label: '灵感便签',
+        markdown: text,
+      });
+      return;
+    }
+
+    const fileRow = e.target.closest('.tree-file-item[data-path]');
+    if (fileRow) {
+      if (e.target.closest('.file-check, .lock-toggle-btn')) {
+        e.preventDefault();
+        return;
+      }
+      const path = fileRow.dataset.path || '';
+      const name = fileRow.dataset.name || getBasename(path);
+      const ext = fileRow.dataset.ext || getFileExt({ path, name });
+      const markdown = buildFileAnchorMarkdown({ path, name, ext });
+      setDragPayload(e, {
+        type: 'file-anchor',
+        label: name,
+        path,
+        markdown,
+      });
+    }
+  });
+
+  containerEl.addEventListener('dragover', (e) => {
+    if (!dragModuleId) return;
+    const targetBlock = e.target.closest('.module-block[data-module-id]');
+    if (!targetBlock) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move';
+    }
+    containerEl.querySelectorAll('.module-block.is-drag-over').forEach((el) => {
+      if (el !== targetBlock) el.classList.remove('is-drag-over');
+    });
+    if (targetBlock.dataset.moduleId !== dragModuleId) {
+      targetBlock.classList.add('is-drag-over');
+    }
+  });
+
+  containerEl.addEventListener('dragleave', (e) => {
+    const targetBlock = e.target.closest('.module-block[data-module-id]');
+    if (!targetBlock) return;
+    if (!targetBlock.contains(e.relatedTarget)) {
+      targetBlock.classList.remove('is-drag-over');
+    }
+  });
+
+  containerEl.addEventListener('drop', (e) => {
+    if (!dragModuleId) return;
+    const targetBlock = e.target.closest('.module-block[data-module-id]');
+    containerEl.querySelectorAll('.module-block.is-drag-over, .module-block.is-dragging').forEach((el) => {
+      el.classList.remove('is-drag-over', 'is-dragging');
+    });
+
+    const sourceId = dragModuleId;
+    dragModuleId = null;
+    clearDragPayload();
+
+    if (!targetBlock) return;
+    e.preventDefault();
+    const targetId = targetBlock.dataset.moduleId;
+    if (!targetId || targetId === sourceId) return;
+
+    const nextModules = getLeftModules().map((m) => ({ ...m }));
+    const fromIdx = nextModules.findIndex((m) => m.id === sourceId);
+    const toIdx = nextModules.findIndex((m) => m.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = nextModules.splice(fromIdx, 1);
+    nextModules.splice(toIdx, 0, moved);
+    updateUiLayout({ leftModules: nextModules });
+  });
+
+  containerEl.addEventListener('dragend', () => {
+    dragModuleId = null;
+    containerEl.querySelectorAll('.module-block.is-drag-over, .module-block.is-dragging').forEach((el) => {
+      el.classList.remove('is-drag-over', 'is-dragging');
+    });
+    clearDragPayload();
+  });
+
   // Prevent checkbox clicks from triggering row file:open
   containerEl.addEventListener('click', (e) => {
     const cb = e.target.closest('.file-check');
@@ -1133,6 +1616,50 @@ export function initLeftTree(containerEl) {
     const actionEl = e.target.closest('[data-action]');
     if (!actionEl) return;
     const action = actionEl.dataset.action;
+
+    if (action === 'customize-modules') {
+      openCustomizeModulesSheet();
+      return;
+    }
+
+    if (action === 'toggle-module-collapse') {
+      const modId = actionEl.dataset.moduleId;
+      if (modId) {
+        const nextModules = getLeftModules().map((m) =>
+          m.id === modId ? { ...m, collapsed: !m.collapsed } : { ...m }
+        );
+        updateUiLayout({ leftModules: nextModules });
+      }
+      return;
+    }
+
+    if (action === 'scratch-ai-extract') {
+      const ta = containerEl.querySelector('[data-role="quick-scratch-input"]');
+      const text = (ta?.value ?? store.state.uiLayout?.scratchpadText ?? '').trim();
+      if (!text) {
+        showToast('请先在灵感便签输入内容', 'warning');
+        ta?.focus();
+        return;
+      }
+      if (typeof window !== 'undefined' && window.innerWidth <= 767) {
+        store.setState({ mobileTab: 'ai' });
+        store.emit('layout:changed');
+      }
+      store.emit('ai:summarize-request', { text, autoRun: true });
+      return;
+    }
+
+    if (action === 'mini-pomodoro-start') {
+      const sec = Number(actionEl.dataset.seconds) || 1500;
+      const taskInput = containerEl.querySelector('[data-role="mini-pomodoro-task"]');
+      const taskTitle = (taskInput?.value || quickPomodoroTask || '').trim() || '快捷专注';
+      quickPomodoroTask = taskTitle;
+      store.emit('focus:start', {
+        title: taskTitle,
+        seconds: sec,
+      });
+      return;
+    }
 
     if (action === 'toggle-privacy') {
       e.stopPropagation();
@@ -1214,7 +1741,7 @@ export function initLeftTree(containerEl) {
   // Keyboard accessibility for row items
   containerEl.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
-    if (e.target.closest('.file-check, button, select, input')) return;
+    if (e.target.closest('.file-check, button, select, input, textarea')) return;
     const actionEl = e.target.closest('[data-action="open-file"], [data-action="open-tree-file"], [data-action="toggle-group"]');
     if (!actionEl) return;
     e.preventDefault();
