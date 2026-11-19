@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from api import ok
-from core import doc_engine, safe_io
+from core import doc_engine, safe_io, search_engine
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -42,6 +42,19 @@ class PrivacyBody(BaseModel):
 class RestoreSnapshotBody(BaseModel):
     path: str
     snapshot_id: str
+
+
+class OpenExternalBody(BaseModel):
+    path: str
+    reveal_folder: bool = False
+
+
+class OpenUrlBody(BaseModel):
+    url: str
+
+
+class RelocateBody(BaseModel):
+    filename: str
 
 
 @router.get("/list")
@@ -99,3 +112,34 @@ def get_snapshots(path: str = Query(...)) -> dict:
 @router.post("/snapshots")
 def restore_snapshot(body: RestoreSnapshotBody) -> dict:
     return ok(safe_io.restore_snapshot(body.path, body.snapshot_id))
+
+
+@router.get("/raw-stream")
+def raw_stream(path: str = Query(...)) -> FileResponse:
+    target = safe_io.resolve_safe_path(path, must_exist=True)
+    return FileResponse(target, media_type=doc_engine.guess_mime_type(target), headers={"Content-Disposition": "inline"})
+
+
+@router.get("/archive-entry")
+def read_archive_entry(path: str = Query(...), member: str = Query(...)) -> dict:
+    return ok(doc_engine.read_archive_entry(path, member))
+
+
+@router.post("/open-external")
+def open_external(body: OpenExternalBody) -> dict:
+    return ok(doc_engine.open_external(body.path, body.reveal_folder))
+
+
+@router.post("/open-url")
+def open_url(body: OpenUrlBody) -> dict:
+    return ok(doc_engine.open_external_url(body.url))
+
+
+@router.post("/relocate")
+def relocate_file(body: RelocateBody) -> dict:
+    return ok(doc_engine.relocate_missing_file(body.filename))
+
+
+@router.get("/backlinks")
+def get_backlinks(path: str = Query(...)) -> dict:
+    return ok(search_engine.find_backlinks(path))

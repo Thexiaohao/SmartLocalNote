@@ -23,6 +23,7 @@ const {
   openSheet,
   closeSheet,
   renderMarkdownSafe,
+  copyInternal,
 } = storeMod;
 
 const UI_LAYOUT_STORAGE_KEY = 'sln_ui_layout';
@@ -43,7 +44,7 @@ const SUMMARY_MODULE_META = {
 const TOOL_MODULE_META = {
   quick_excel: { id: 'quick_excel', label: '快捷表单填表与表格操作' },
   knowledge_tree: { id: 'knowledge_tree', label: '虚拟知识树分类与总览' },
-  apps_workspaces: { id: 'apps_workspaces', label: '本地软件库与工作区联启' },
+  apps_workspaces: { id: 'apps_workspaces', label: '本地软件库与一键场景包' },
   ai_templates: { id: 'ai_templates', label: 'AI 常用指令模板' },
 };
 
@@ -464,7 +465,7 @@ export function initRightPanel(containerEl) {
     const activeName = store.state.activeFile?.name || '';
     const ctxCount = (store.state.selectedContextPaths || []).length;
     const hintText = activeName
-      ? `将结合「${activeName}」切换至问答发送`
+      ? `将结合「${activeName}」切换至问答发送，或直接执行脑图/润色`
       : ctxCount > 0
       ? `将结合已勾选的 ${ctxCount} 份文档发送`
       : '点击即自动切换问答并发送指令';
@@ -474,6 +475,24 @@ export function initRightPanel(containerEl) {
         ${escapeHtml(hintText)}
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        <button
+          type="button"
+          class="pill-btn pill-btn-sm pill-btn-primary"
+          data-action="ai-generate-mindmap"
+          title="基于当前文档生成结构化脑图大纲，并可保存或切换脑图视图"
+          style="height:28px;font-size:12px;"
+        >
+          🧠 AI 生成当前文档脑图
+        </button>
+        <button
+          type="button"
+          class="pill-btn pill-btn-sm"
+          data-action="ai-polish-fragments"
+          title="将当前笔记中的零散碎片智能润色整理为连贯文章（保留 [[...]] 锚点）"
+          style="height:28px;font-size:12px;"
+        >
+          ✨ AI 碎片润色成文
+        </button>
         ${AI_PROMPT_TEMPLATES.map(
           (tpl) => `
           <button
@@ -868,6 +887,12 @@ export function initRightPanel(containerEl) {
           <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" ${state.summaryLoading ? 'disabled' : ''}>
             ${icon('sparkles', 13)} 总结上方文本
           </button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="ai-generate-mindmap" title="生成当前文档脑图或切换脑图视图">
+            🧠 AI 生成当前文档脑图
+          </button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="ai-polish-fragments" title="将碎片内容智能润色成文（保留 [[...]] 锚点）">
+            ✨ AI 碎片润色成文
+          </button>
         </div>
       </div>
     `;
@@ -1005,7 +1030,7 @@ export function initRightPanel(containerEl) {
                 ${matchedApps
                   .map(
                     (app) => `
-                    <button type="button" class="app-launcher-pill" data-action="launch-app" data-app-id="${escapeHtml(app.id)}" data-name="${escapeHtml(app.name)}">
+                    <button type="button" class="app-launcher-pill" draggable="true" data-action="launch-app" data-app-id="${escapeHtml(app.id)}" data-name="${escapeHtml(app.name)}" title="点击启动，或直接拖进中间笔记生成直达胶囊">
                       ${icon('external-link', 12)}
                       <span>${escapeHtml(app.name)}</span>
                     </button>
@@ -1595,6 +1620,280 @@ export function initRightPanel(containerEl) {
     await sendChatMessage(finalPrompt);
   }
 
+  async function handleAiGenerateMindmap() {
+    const activeFile = store.state.activeFile;
+    const activeText = String(store.state.activeDocumentText || state.summaryInputText || '').trim();
+    if (!activeFile?.path && !activeText) {
+      showToast('请先在左侧打开一篇文档或输入内容', 'warning');
+      return;
+    }
+
+    const activeName = activeFile?.name || '当前文档';
+    const isMarkdown =
+      activeFile?.type === 'markdown' || String(activeName).toLowerCase().endsWith('.md');
+
+    openSheet({
+      title: `🧠 AI 生成脑图大纲 · ${activeName}`,
+      bodyHtml: `
+        <div class="empty-state" style="padding:26px 12px;">
+          <p class="empty-title">正在智能梳理文档脉络并生成思维导图大纲…</p>
+          <p class="empty-desc">保留文内所有 [[...]] 传送门锚点，自动提炼 3 级知识分支</p>
+        </div>
+      `,
+      footerHtml: `<button type="button" class="pill-btn" id="rp-mm-cancel">取消</button>`,
+      async onMount(card) {
+        card.querySelector('#rp-mm-cancel')?.addEventListener('click', closeSheet);
+        const bodyEl = card.querySelector('.sheet-body');
+        const footerEl = card.querySelector('.sheet-footer');
+        try {
+          const res = await api.post('/api/ai/mindmap', {
+            text: activeText,
+            file_path: activeFile?.path || null,
+          });
+          if (res?.provider_label) {
+            state.liveProviderLabel = String(res.provider_label);
+            renderSummaryMode();
+            renderChatHeaderStatus();
+          }
+          const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
+          const suggestedTitle = String(res?.title || `${activeName.replace(/\.[^.]+$/, '')} 脑图`).trim();
+          if (!outline) {
+            if (bodyEl) {
+              bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 未返回有效脑图大纲</p></div>`;
+            }
+            return;
+          }
+
+          if (bodyEl) {
+            bodyEl.innerHTML = `
+              <div style="display:flex;flex-direction:column;gap:10px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+                  <span style="font-size:12px;color:var(--text-secondary);">主题：<strong>${escapeHtml(suggestedTitle)}</strong></span>
+                  ${res?.provider_label ? `<span class="file-ext-badge">${escapeHtml(res.provider_label)}</span>` : ''}
+                </div>
+                <div class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
+                  ${renderMarkdownSafe(outline)}
+                </div>
+              </div>
+            `;
+          }
+
+          if (footerEl) {
+            footerEl.innerHTML = `
+              <button type="button" class="pill-btn" id="rp-mm-close">关闭</button>
+              <button type="button" class="pill-btn" id="rp-mm-copy">${icon('copy', 13)} 复制大纲</button>
+              <button type="button" class="pill-btn" id="rp-mm-save-new">${icon('file-text', 13)} 另存为脑图笔记</button>
+              ${
+                isMarkdown
+                  ? `<button type="button" class="pill-btn pill-btn-primary" id="rp-mm-open-view">🧠 保存并切换脑图视图</button>`
+                  : `<button type="button" class="pill-btn pill-btn-primary" id="rp-mm-append">${icon('plus', 13)} 追加到当前笔记</button>`
+              }
+            `;
+
+            footerEl.querySelector('#rp-mm-close')?.addEventListener('click', closeSheet);
+            footerEl.querySelector('#rp-mm-copy')?.addEventListener('click', () => {
+              copyInternal?.(outline, '已复制脑图 Markdown 大纲');
+            });
+
+            footerEl.querySelector('#rp-mm-save-new')?.addEventListener('click', async () => {
+              try {
+                const title = `${suggestedTitle}_脑图`;
+                const created = await api.post('/api/files/create-note', {
+                  title,
+                  content: outline,
+                });
+                closeSheet();
+                store.emit('files:updated', created);
+                if (created?.path) {
+                  store.emit('center:toggle-mindmap', { path: created.path });
+                }
+                showToast(`已保存并打开脑图笔记：${created?.name || title}`, 'success');
+              } catch (err) {
+                showToast(err?.message || '保存脑图笔记失败', 'error');
+              }
+            });
+
+            footerEl.querySelector('#rp-mm-open-view')?.addEventListener('click', async () => {
+              if (!activeFile?.path) return;
+              try {
+                await api.put('/api/files/write', { path: activeFile.path, content: outline });
+                closeSheet();
+                store.state.activeDocumentText = outline;
+                store.emit('center:toggle-mindmap', { path: activeFile.path });
+                store.emit('file:open', { path: activeFile.path, name: activeFile.name, mode: 'mindmap', forceReload: true, skipUnsavedGuard: true });
+                showToast('已更新当前笔记并切换至脑图视图', 'success');
+              } catch (err) {
+                showToast(err?.message || '写入脑图大纲失败', 'error');
+              }
+            });
+
+            footerEl.querySelector('#rp-mm-append')?.addEventListener('click', () => {
+              closeSheet();
+              store.emit('doc:append', { content: outline, path: activeFile?.path });
+            });
+          }
+        } catch (err) {
+          if (bodyEl) {
+            bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">生成脑图失败</p><p class="empty-desc">${escapeHtml(err?.message || '请稍后重试')}</p></div>`;
+          }
+        }
+      },
+    });
+  }
+
+  async function handleAiPolishFragments() {
+    const activeFile = store.state.activeFile;
+    const rawText = String(store.state.activeDocumentText || state.summaryInputText || '').trim();
+    if (!rawText) {
+      showToast('当前没有可润色的笔记内容，请先打开笔记或在速记区输入碎片', 'warning');
+      return;
+    }
+
+    const activeName = activeFile?.name || '随手碎片';
+    const canReplaceDoc = Boolean(
+      activeFile?.path &&
+        (activeFile?.type === 'markdown' ||
+          activeFile?.type === 'text' ||
+          /\.(md|txt)$/i.test(activeName))
+    );
+
+    openSheet({
+      title: `✨ AI 碎片润色成文 · ${activeName}`,
+      bodyHtml: `
+        <div class="empty-state" style="padding:26px 12px;">
+          <p class="empty-title">正在将零散碎片润色整理为结构化文章…</p>
+          <p class="empty-desc">完整保留所有 [[...]] 传送门锚点与待办勾选框</p>
+        </div>
+      `,
+      footerHtml: `<button type="button" class="pill-btn" id="rp-pol-cancel">取消</button>`,
+      async onMount(card) {
+        card.querySelector('#rp-pol-cancel')?.addEventListener('click', closeSheet);
+        const bodyEl = card.querySelector('.sheet-body');
+        const footerEl = card.querySelector('.sheet-footer');
+
+        try {
+          const res = await api.post('/api/ai/polish', {
+            text: rawText,
+            style: 'article',
+          });
+          if (res?.provider_label) {
+            state.liveProviderLabel = String(res.provider_label);
+            renderSummaryMode();
+            renderChatHeaderStatus();
+          }
+          const polished = String(res?.markdown || res?.polished || res?.content || '').trim();
+          if (!polished) {
+            if (bodyEl) {
+              bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 未返回有效润色内容</p></div>`;
+            }
+            return;
+          }
+
+          if (bodyEl) {
+            bodyEl.innerHTML = `
+              <div style="display:flex;flex-direction:column;gap:10px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+                  <span style="font-size:12px;color:var(--text-secondary);">原文 ${rawText.length} 字 → 润色后 ${polished.length} 字</span>
+                  <div class="segmented-pill" role="tablist">
+                    <div class="segmented-thumb" data-role="rp-pol-thumb" style="width:calc(50% - 3px);transform:translateX(0%);"></div>
+                    <button type="button" class="segmented-btn is-active" data-rp-pol-view="preview" style="height:24px;font-size:11.5px;">预览效果</button>
+                    <button type="button" class="segmented-btn" data-rp-pol-view="raw" style="height:24px;font-size:11.5px;">Markdown 源码</button>
+                  </div>
+                </div>
+                <div data-role="rp-pol-preview" class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
+                  ${renderMarkdownSafe(polished)}
+                </div>
+                <textarea data-role="rp-pol-raw" class="apple-textarea" rows="12" style="display:none;font-family:var(--font-mono);font-size:12.5px;">${escapeHtml(polished)}</textarea>
+              </div>
+            `;
+
+            const thumb = bodyEl.querySelector('[data-role="rp-pol-thumb"]');
+            const prevBox = bodyEl.querySelector('[data-role="rp-pol-preview"]');
+            const rawBox = bodyEl.querySelector('[data-role="rp-pol-raw"]');
+            bodyEl.querySelectorAll('[data-rp-pol-view]').forEach((btn) => {
+              btn.addEventListener('click', () => {
+                const isRaw = btn.dataset.rpPolView === 'raw';
+                bodyEl.querySelectorAll('[data-rp-pol-view]').forEach((b) => b.classList.toggle('is-active', b === btn));
+                if (thumb) thumb.style.transform = `translateX(${isRaw ? '100%' : '0%'})`;
+                if (prevBox) prevBox.style.display = isRaw ? 'none' : 'block';
+                if (rawBox) rawBox.style.display = isRaw ? 'block' : 'none';
+              });
+            });
+          }
+
+          if (footerEl) {
+            footerEl.innerHTML = `
+              <button type="button" class="pill-btn" id="rp-pol-close">取消</button>
+              <button type="button" class="pill-btn" id="rp-pol-copy">${icon('copy', 13)} 复制</button>
+              <button type="button" class="pill-btn" id="rp-pol-append">${icon('plus', 13)} 追加到笔记</button>
+              ${
+                canReplaceDoc
+                  ? `<button type="button" class="pill-btn pill-btn-primary" id="rp-pol-replace">${icon('check', 13)} 确认替换当前文档</button>`
+                  : `<button type="button" class="pill-btn pill-btn-primary" id="rp-pol-save-new">${icon('file-text', 13)} 存为新笔记</button>`
+              }
+            `;
+
+            const getLatestPolished = () => bodyEl?.querySelector('[data-role="rp-pol-raw"]')?.value ?? polished;
+
+            footerEl.querySelector('#rp-pol-close')?.addEventListener('click', closeSheet);
+            footerEl.querySelector('#rp-pol-copy')?.addEventListener('click', () => {
+              copyInternal?.(getLatestPolished(), '已复制润色成文结果');
+            });
+
+            footerEl.querySelector('#rp-pol-append')?.addEventListener('click', () => {
+              const latest = getLatestPolished();
+              closeSheet();
+              store.emit('doc:append', { content: latest, path: activeFile?.path });
+            });
+
+            footerEl.querySelector('#rp-pol-replace')?.addEventListener('click', async () => {
+              const latest = getLatestPolished();
+              if (!activeFile?.path) return;
+              try {
+                const writeRes = await api.put('/api/files/write', {
+                  path: activeFile.path,
+                  content: latest,
+                });
+                store.state.activeDocumentText = latest;
+                closeSheet();
+                store.emit('file:saved', { path: activeFile.path, snapshot_id: writeRes?.snapshot_id || null });
+                store.emit('file:open', {
+                  path: activeFile.path,
+                  name: activeFile.name,
+                  forceReload: true,
+                  skipUnsavedGuard: true,
+                });
+                showToast('已润色替换当前文档（已自动生成写前快照）', 'success');
+              } catch (err) {
+                showToast(err?.message || '替换文档失败', 'error');
+              }
+            });
+
+            footerEl.querySelector('#rp-pol-save-new')?.addEventListener('click', async () => {
+              const latest = getLatestPolished();
+              try {
+                const title = `润色成文_${activeName.replace(/\.[^.]+$/, '')}`;
+                const created = await api.post('/api/files/create-note', { title, content: latest });
+                closeSheet();
+                store.emit('files:updated', created);
+                if (created?.path) {
+                  store.emit('file:open', created);
+                }
+                showToast(`已存为新笔记：${created?.name || title}`, 'success');
+              } catch (err) {
+                showToast(err?.message || '保存新笔记失败', 'error');
+              }
+            });
+          }
+        } catch (err) {
+          if (bodyEl) {
+            bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">碎片润色失败</p><p class="empty-desc">${escapeHtml(err?.message || '请稍后重试')}</p></div>`;
+          }
+        }
+      },
+    });
+  }
+
   async function openSaveNoteSheet(msg) {
     if (!state.treeData.nodes.length) {
       await fetchTree();
@@ -2139,9 +2438,9 @@ export function initRightPanel(containerEl) {
         <summary class="tool-card-summary">
           <span style="display:inline-flex;align-items:center;gap:6px;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
-            ${icon('rocket', 14)} 本地软件库与工作区联启
+            ${icon('rocket', 14)} 本地软件库与一键场景包
           </span>
-          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${apps.length} 应用 · ${workspaces.length} 现场</span>
+          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${apps.length} 应用 · ${workspaces.length} 场景包</span>
         </summary>
         <div class="tool-card-body">
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
@@ -2160,7 +2459,7 @@ export function initRightPanel(containerEl) {
                   ${apps
                     .map(
                       (app) => `
-                      <span class="app-launcher-pill" style="padding-right:6px;">
+                      <span class="app-launcher-pill" draggable="true" data-app-id="${escapeHtml(app.id)}" data-name="${escapeHtml(app.name)}" title="点击启动，或直接拖进中间笔记生成直达胶囊" style="padding-right:6px;">
                         <button type="button" data-action="launch-app" data-app-id="${escapeHtml(app.id)}" data-name="${escapeHtml(app.name)}" style="display:inline-flex;align-items:center;gap:5px;">
                           ${icon('external-link', 12)}
                           <span>${escapeHtml(app.name)}</span>
@@ -2176,7 +2475,8 @@ export function initRightPanel(containerEl) {
               : `<div style="font-size:12px;color:var(--text-tertiary);margin-bottom:10px;">暂未登记本地软件</div>`
           }
 
-          <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">场景工作区组合</div>
+          <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:2px;">一键场景包</div>
+          <div style="font-size:11.5px;color:var(--text-tertiary);margin-bottom:8px;">打包常用文件+本地软件，一键联启进入学习/办公模式</div>
           ${
             workspaces.length
               ? workspaces
@@ -2194,7 +2494,7 @@ export function initRightPanel(containerEl) {
                             <button type="button" class="pill-btn pill-btn-sm" data-action="focus-workspace" data-name="${escapeHtml(ws.name)}" style="height:24px;padding:0 9px;font-size:11px;">
                               ▶ 专注
                             </button>
-                            <button type="button" class="icon-pill" data-action="delete-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" title="删除工作区" style="width:24px;height:24px;">
+                            <button type="button" class="icon-pill" data-action="delete-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" title="删除一键场景包" style="width:24px;height:24px;">
                               ${icon('trash', 11)}
                             </button>
                           </div>
@@ -2206,7 +2506,7 @@ export function initRightPanel(containerEl) {
                     `;
                   })
                   .join('')
-              : `<div style="font-size:12px;color:var(--text-tertiary);">暂无场景工作区，可点击上方「捕获当前桌面现场」一键创建。</div>`
+              : `<div style="font-size:12px;color:var(--text-tertiary);">暂无一键场景包，可点击上方「捕获当前桌面现场」一键创建。</div>`
           }
         </div>
       </details>
@@ -2481,6 +2781,23 @@ export function initRightPanel(containerEl) {
   // ---------------------------------------------------------------------------
 
   containerEl.addEventListener('dragstart', (e) => {
+    // 0. Draggable local app capsule -> drop [[app:AppName]] into Center Note
+    const appPill = e.target.closest('.app-launcher-pill[data-app-id]');
+    if (appPill) {
+      e.stopPropagation();
+      const appName = (appPill.dataset.name || appPill.textContent || '').trim();
+      if (!appName) {
+        e.preventDefault();
+        return;
+      }
+      setDragPayload(e, {
+        type: 'app-portal',
+        label: appName,
+        markdown: '[[app:' + appName + ']]',
+      });
+      return;
+    }
+
     // 1. Todo item drag (must check before summary card)
     const todoItem = e.target.closest('.todo-item.draggable-card');
     if (todoItem) {
@@ -2675,14 +2992,20 @@ export function initRightPanel(containerEl) {
       return;
     }
 
-    // 2. Clickable Cross-Format Anchor Pill
+    // 2. Clickable Universal Portal / Cross-Format Anchor Pill
     const anchorPill = e.target.closest('.anchor-pill');
     if (anchorPill) {
       store.emit('anchor:jump', {
+        type: anchorPill.dataset.anchorType || 'file',
         file: anchorPill.dataset.anchorFile || '',
         page: anchorPill.dataset.anchorPage || '',
         sheet: anchorPill.dataset.anchorSheet || '',
         cell: anchorPill.dataset.anchorCell || '',
+        heading: anchorPill.dataset.anchorHeading || '',
+        member: anchorPill.dataset.anchorMember || '',
+        time: anchorPill.dataset.anchorTime || '',
+        app: anchorPill.dataset.anchorApp || '',
+        url: anchorPill.dataset.anchorUrl || '',
       });
       return;
     }
@@ -2691,7 +3014,7 @@ export function initRightPanel(containerEl) {
     if (!actionEl) return;
     const action = actionEl.dataset.action;
 
-    // --- V2 Global Right Panel Actions ---
+    // --- V2/V3 Global Right Panel Actions ---
     if (action === 'open-right-customize') {
       openRightCustomizeSheet();
       return;
@@ -2699,6 +3022,16 @@ export function initRightPanel(containerEl) {
 
     if (action === 'open-ai-settings') {
       store.emit('settings:open');
+      return;
+    }
+
+    if (action === 'ai-generate-mindmap') {
+      await handleAiGenerateMindmap();
+      return;
+    }
+
+    if (action === 'ai-polish-fragments') {
+      await handleAiPolishFragments();
       return;
     }
 

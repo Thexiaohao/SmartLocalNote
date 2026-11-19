@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api import ok
-from config import FREE_AI_PRESETS, get_local_ip, load_config, update_config
+from config import FREE_AI_PRESETS, get_default_notes_dir, get_local_ip, load_config, update_config
 from core import app_launcher, scheduler
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -31,6 +31,7 @@ class ConfigPatch(BaseModel):
     private_files: list[str] | None = None
     default_notes_dir: str | None = None
     default_progress_excel: str | None = None
+    auto_save_on_switch: bool | None = None
 
 
 class PickPathBody(BaseModel):
@@ -49,6 +50,8 @@ def get_system_info() -> dict:
         "free_ai_enabled": bool(cfg["ai"].get("enable_free_ai", True)),
         "ai_presets": FREE_AI_PRESETS,
         "default_progress_excel": cfg.get("default_progress_excel", ""),
+        "default_notes_dir": str(get_default_notes_dir()),
+        "auto_save_on_switch": bool(cfg.get("auto_save_on_switch", False)),
     })
 
 

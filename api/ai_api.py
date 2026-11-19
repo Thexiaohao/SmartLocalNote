@@ -39,6 +39,16 @@ class ClassifyBody(BaseModel):
     summary: str = ""
 
 
+class MindmapBody(BaseModel):
+    text: str = ""
+    file_path: str | None = None
+
+
+class PolishBody(BaseModel):
+    text: str
+    style: str = "article"
+
+
 async def _format_sse(stream: AsyncIterator[Any]) -> AsyncIterator[str]:
     async for chunk in stream:
         payload = chunk if isinstance(chunk, str) else json.dumps(chunk, ensure_ascii=False)
@@ -68,3 +78,13 @@ async def extract_table(body: ExtractTableBody) -> dict:
 @router.post("/classify")
 async def classify(body: ClassifyBody) -> dict:
     return ok(await ai_service.classify_file(body.file_path, body.summary))
+
+
+@router.post("/mindmap")
+async def mindmap(body: MindmapBody) -> dict:
+    return ok(await ai_service.generate_mindmap_outline(body.text, body.file_path))
+
+
+@router.post("/polish")
+async def polish(body: PolishBody) -> dict:
+    return ok(await ai_service.polish_fragments(body.text, body.style))

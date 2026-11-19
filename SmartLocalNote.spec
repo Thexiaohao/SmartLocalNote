@@ -59,6 +59,11 @@ hiddenimports = [
     "apscheduler.triggers.interval",
     "apscheduler.executors.pool",
     "apscheduler.jobstores.memory",
+    # Stdlib modules used dynamically / in frozen bundle
+    "zipfile",
+    "tarfile",
+    "xml.etree.ElementTree",
+    "webbrowser",
     # Document engines
     "openpyxl",
     "openpyxl.cell._writer",

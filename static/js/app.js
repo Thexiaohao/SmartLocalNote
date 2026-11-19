@@ -22,6 +22,7 @@ import { initLeftTree } from './left_tree.js';
 import { initCenterView } from './center_view.js';
 import { initRightPanel } from './right_panel.js';
 import { initSpotlight } from './spotlight.js';
+import { initStickies } from './stickies.js';
 
 function syncLayoutClasses() {
   const shell = document.getElementById('app-shell') || document.body;
@@ -265,6 +266,15 @@ async function loadSystemInfo() {
     }
     if (cfg && typeof cfg === 'object') {
       store.setState({ config: cfg }, 'system:config');
+      let hasLocalAutoSave = false;
+      try {
+        hasLocalAutoSave = localStorage.getItem('sln_auto_save') !== null;
+      } catch {
+        // ignore storage errors
+      }
+      if (!hasLocalAutoSave && cfg.auto_save_on_switch !== undefined) {
+        store.setState({ autoSaveOnSwitch: Boolean(cfg.auto_save_on_switch) }, 'autosave:changed');
+      }
       let hasLocalSize = false;
       let hasLocalFamily = false;
       try {
@@ -314,6 +324,7 @@ async function bootstrap() {
   safeMount('center_view', () => initCenterView(centerEl));
   safeMount('right_panel', () => initRightPanel(rightEl));
   safeMount('spotlight', () => initSpotlight());
+  safeMount('stickies', () => initStickies());
 
   // 3. Bind shell controls, pane resizers, drag cleanup & responsive state
   bindTopBarControls();

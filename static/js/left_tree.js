@@ -42,10 +42,10 @@ const QUICK_POMODORO_PRESETS = [
 
 const MODULE_DESCRIPTIONS = {
   files: '本地文件树（支持联合问答勾选、隐私锁与拖拽锚点）',
-  workspaces: '桌面现场捕获与多软件/文档一键联启',
-  apps: '已注册本地软件快捷直达胶囊',
+  workspaces: '打包常用文件+本地软件，一键联启进入学习/办公模式',
+  apps: '已注册本地软件快捷直达胶囊（支持拖入笔记生成直达胶囊）',
   tree: '虚拟知识树节点与绑定文件速览',
-  quick_scratch: '随时记录灵感片段，支持拖入当前笔记或 AI 提取待办',
+  quick_scratch: '随时记录灵感片段，支持拖入当前笔记、弹出悬浮便签或 AI 提取待办',
   recent_files: '最近打开文档快捷回跳列表',
   pomodoro_mini: '自定义任务名与专注时长，一键开启灵动岛倒计时',
 };
@@ -80,12 +80,51 @@ function getFileIconName(ext) {
   switch (String(ext || '').replace(/^\./, '').toLowerCase()) {
     case 'xlsx':
     case 'xls':
+    case 'xlsm':
     case 'csv':
       return 'file-spreadsheet';
     case 'pdf':
       return 'book-open';
+    case 'zip':
+    case 'tar':
+    case 'tgz':
+    case 'gz':
+      return 'layers';
+    case 'mp4':
+    case 'webm':
+    case 'mov':
+    case 'mkv':
+    case 'avi':
+    case 'mp3':
+    case 'wav':
+    case 'm4a':
+    case 'ogg':
+    case 'flac':
+    case 'aac':
+      return 'play';
     case 'md':
+    case 'py':
+    case 'js':
+    case 'ts':
+    case 'json':
+    case 'html':
+    case 'css':
+    case 'xml':
+    case 'yaml':
+    case 'yml':
+    case 'sql':
+    case 'sh':
+    case 'bat':
       return 'file-code';
+    case 'docx':
+    case 'pptx':
+    case 'png':
+    case 'jpg':
+    case 'jpeg':
+    case 'webp':
+    case 'gif':
+    case 'bmp':
+    case 'svg':
     case 'txt':
     default:
       return 'file-text';
@@ -110,15 +149,27 @@ function buildFileAnchorMarkdown(itemOrPath) {
   if (ext === 'xlsx' || ext === 'xls' || ext === 'xlsm') {
     return `[[${name}#A2]]`;
   }
+  if (['zip', 'tar', 'tgz', 'gz'].includes(ext)) {
+    return `[[${name}]]`;
+  }
+  if (['mp4', 'mp3', 'wav', 'm4a', 'webm', 'mov', 'mkv', 'ogg', 'flac', 'aac'].includes(ext)) {
+    return `[[${name}#t=00:00]]`;
+  }
   return `[[${name}]]`;
 }
 
 function getLeftModules() {
   const mods = store.state.uiLayout?.leftModules;
-  if (Array.isArray(mods) && mods.length > 0) return mods;
+  if (Array.isArray(mods) && mods.length > 0) {
+    return mods.map((m) =>
+      m.id === 'workspaces' && m.title === '场景工作区'
+        ? { ...m, title: '一键场景包' }
+        : m
+    );
+  }
   return [
     { id: 'files', title: '本地文件', visible: true, collapsed: false },
-    { id: 'workspaces', title: '场景工作区', visible: true, collapsed: false },
+    { id: 'workspaces', title: '一键场景包', visible: true, collapsed: false },
     { id: 'apps', title: '办公软件直达', visible: true, collapsed: false },
     { id: 'tree', title: '虚拟知识树', visible: true, collapsed: false },
     { id: 'quick_scratch', title: '灵感便签（可拖入笔记）', visible: false, collapsed: false },
@@ -333,9 +384,11 @@ function renderAppsSection(apps) {
           <button
             type="button"
             class="app-launcher-pill"
+            draggable="true"
             data-action="launch-app"
             data-app-id="${escapeHtml(app.id)}"
-            title="${escapeHtml(app.path || app.name)}"
+            data-app-name="${escapeHtml(app.name)}"
+            title="点击启动，或直接拖进中间笔记生成直达胶囊"
           >
             ${icon('rocket', 12)}
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(app.name)}</span>
@@ -348,10 +401,11 @@ function renderAppsSection(apps) {
 }
 
 function renderWorkspacesSection(workspaces) {
+  const subtitleHtml = `<p style="margin:0 0 8px;font-size:11.5px;color:var(--text-tertiary);line-height:1.4;">打包常用文件+本地软件，一键联启进入学习/办公模式</p>`;
   if (workspaces.length === 0) {
-    return `<p class="empty-desc" style="margin:4px 0;">暂无场景工作区，点击「捕获现场」一键固化当前桌面</p>`;
+    return `${subtitleHtml}<p class="empty-desc" style="margin:4px 0;">暂无一键场景包，点击「捕获现场」一键打包当前桌面</p>`;
   }
-  return workspaces
+  return subtitleHtml + workspaces
     .map((ws) => {
       const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
       const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
@@ -468,6 +522,15 @@ function renderQuickScratchSection() {
         >
           ⠿ 拖入笔记
         </span>
+        <button
+          type="button"
+          class="pill-btn pill-btn-sm"
+          data-action="spawn-sticky-note"
+          title="弹出悬浮便签（快捷键 Alt+N，也可随时在任意位置右键菜单召唤）"
+          style="height:26px;padding:0 10px;font-size:11.5px;"
+        >
+          📌 弹出悬浮便签 (Alt+N)
+        </button>
         <button
           type="button"
           class="pill-btn pill-btn-sm"
@@ -677,6 +740,9 @@ function renderLeftPanel(containerEl) {
       </button>
       <button type="button" class="pill-btn pill-btn-sm" data-action="import-open">
         ${icon('download', 13)} 导入
+      </button>
+      <button type="button" class="pill-btn pill-btn-sm" data-action="spawn-sticky-note" title="在屏幕中央召唤悬浮便签 (Alt+N)，也可随时在任意位置右键唤出">
+        📌 便签
       </button>
       <button type="button" class="pill-btn pill-btn-sm" data-action="customize-modules" title="添加、隐藏或排序左侧工作区模块">
         ${icon('settings', 13)} 模块
@@ -1183,8 +1249,8 @@ function openCaptureSceneSheet() {
     bodyHtml: `
       <div style="display:flex;flex-direction:column;gap:14px;">
         <div>
-          <label for="capture-ws-name" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">工作区名称</label>
-          <input id="capture-ws-name" type="text" class="apple-input" placeholder="如：高数复习现场" />
+          <label for="capture-ws-name" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">一键场景包名称</label>
+          <input id="capture-ws-name" type="text" class="apple-input" placeholder="如：高数复习场景包" />
         </div>
 
         <div class="glass-card">
@@ -1217,7 +1283,7 @@ function openCaptureSceneSheet() {
     `,
     footerHtml: `
       <button type="button" class="pill-btn pill-btn-ghost" id="capture-cancel-btn">取消</button>
-      <button type="button" class="pill-btn pill-btn-primary" id="capture-save-btn">${icon('camera', 14)} 保存为场景工作区</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="capture-save-btn">${icon('camera', 14)} 保存为一键场景包</button>
     `,
     onMount(card) {
       const wsNameInput = card.querySelector('#capture-ws-name');
@@ -1329,9 +1395,9 @@ function openCaptureSceneSheet() {
           emitWithGuard('workspaces', store.state.workspaces);
           renderLeftPanel(containerRef);
           closeSheet();
-          showToast(`已保存场景工作区「${name}」`, 'success');
+          showToast(`已保存一键场景包「${name}」`, 'success');
         } catch (err) {
-          showToast(`保存工作区失败：${err.message}`, 'error');
+          showToast(`保存场景包失败：${err.message}`, 'error');
         } finally {
           saveBtn.disabled = false;
         }
@@ -1529,6 +1595,19 @@ export function initLeftTree(containerEl) {
       return;
     }
 
+    const appPill = e.target.closest('.app-launcher-pill[data-app-id]');
+    if (appPill) {
+      const appName = (appPill.dataset.appName || appPill.textContent || '').trim();
+      if (appName) {
+        setDragPayload(e, {
+          type: 'app-portal',
+          label: appName,
+          markdown: '[[app:' + appName + ']]',
+        });
+      }
+      return;
+    }
+
     const fileRow = e.target.closest('.tree-file-item[data-path]');
     if (fileRow) {
       if (e.target.closest('.file-check, .lock-toggle-btn')) {
@@ -1630,6 +1709,11 @@ export function initLeftTree(containerEl) {
         );
         updateUiLayout({ leftModules: nextModules });
       }
+      return;
+    }
+
+    if (action === 'spawn-sticky-note') {
+      store.emit('sticky:spawn', {});
       return;
     }
 

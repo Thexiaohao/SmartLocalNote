@@ -921,6 +921,22 @@ function buildQuickCommands() {
     },
     {
       type: 'cmd',
+      id: 'cmd-spawn-sticky',
+      icon: 'pin',
+      label: '在屏幕中央召唤灵感便签 (Alt+N)',
+      sub: '命令 · 弹出毛玻璃悬浮便签，支持拖入笔记',
+      keywords: 'sticky bianqian 便签 悬浮 灵感 alt+n',
+    },
+    {
+      type: 'cmd',
+      id: 'cmd-toggle-mindmap',
+      icon: 'git-branch',
+      label: '当前文档切换脑图视图',
+      sub: '命令 · 在交互式思维导图与正文间切换',
+      keywords: 'mindmap naotu 脑图 思维导图 视图',
+    },
+    {
+      type: 'cmd',
       id: 'cmd-new-note',
       icon: 'plus',
       label: '新建空白笔记',
@@ -932,8 +948,8 @@ function buildQuickCommands() {
       id: 'cmd-capture-scene',
       icon: 'camera',
       label: '捕获当前桌面现场',
-      sub: '命令 · 固化桌面窗口与文档',
-      keywords: 'buhuo xianchang scene workspace capture',
+      sub: '命令 · 固化桌面窗口与文档为一键场景包',
+      keywords: 'buhuo xianchang scene workspace capture 场景包',
     },
     {
       type: 'cmd',
@@ -972,8 +988,8 @@ function buildQuickCommands() {
       id: 'cmd-open-settings',
       icon: 'settings',
       label: '打开系统与局域网设置',
-      sub: '命令 · AI 预设 / 免费 AI / 手机端入口',
-      keywords: 'shezhi settings lan url',
+      sub: '命令 · AI 预设 / 自动保存 / 默认笔记目录 / 手机端入口',
+      keywords: 'shezhi settings lan url autosave dir',
     },
   ];
 }
@@ -1329,6 +1345,12 @@ async function executeSpotlightItem(item) {
 
   if (item.type === 'cmd') {
     switch (item.id) {
+      case 'cmd-spawn-sticky':
+        store.emit('sticky:spawn', {});
+        break;
+      case 'cmd-toggle-mindmap':
+        store.emit('center:toggle-mindmap', { toggle: true });
+        break;
       case 'cmd-new-note': {
         try {
           const created = await api.post('/api/files/create-note', {
@@ -1708,6 +1730,10 @@ async function openSettingsSheet() {
   const freeAiEnabled =
     aiCfg.enable_free_ai !== undefined ? Boolean(aiCfg.enable_free_ai) : info?.free_ai_enabled !== false;
   const currentTheme = store.state.theme || cfg.theme || 'light';
+  const autoSaveOnSwitch =
+    cfg.auto_save_on_switch !== undefined
+      ? Boolean(cfg.auto_save_on_switch)
+      : Boolean(store.state.autoSaveOnSwitch);
   const initialFontSize = Math.min(24, Math.max(12, Number(cfg.doc_font_size || store.state.docFontSize || 15)));
   const xlsxFiles = getXlsxFiles();
   const currentDefaultExcel = cfg.default_progress_excel || '';
@@ -1822,9 +1848,25 @@ async function openSettingsSheet() {
           </div>
         </div>
 
+        <label class="glass-card" style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;cursor:pointer;">
+          <input type="checkbox" id="cfg-auto-save" class="file-check" style="margin-top:2px;" ${autoSaveOnSwitch ? 'checked' : ''} />
+          <span style="font-size:12.5px;line-height:1.45;color:var(--text-primary);">
+            <strong>切换文件 / 窗口失焦时自动保存修改（无需每次弹窗提醒）</strong>
+          </span>
+        </label>
+
         <div>
-          <label for="cfg-notes-dir" style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">Default Notes Dir</label>
-          <input id="cfg-notes-dir" class="apple-input" type="text" value="${escapeHtml(cfg.default_notes_dir || './data/notes')}" />
+          <label for="cfg-notes-dir" style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">默认笔记目录</label>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <input id="cfg-notes-dir" class="apple-input" type="text" value="${escapeHtml(cfg.default_notes_dir || './data/notes')}" style="flex:1;min-width:180px;" />
+            <button type="button" class="pill-btn pill-btn-sm" id="cfg-pick-notes-dir" title="调起系统文件夹选择对话框">
+              📂 选择文件夹
+            </button>
+            <button type="button" class="pill-btn pill-btn-sm" id="cfg-open-notes-dir" title="在系统文件管理器中打开该目录">
+              打开目录
+            </button>
+          </div>
+          <div id="cfg-notes-dir-hint" style="display:none;font-size:11.5px;color:var(--warning);margin-top:4px;"></div>
         </div>
 
         <div>
@@ -1913,6 +1955,56 @@ async function openSettingsSheet() {
         });
       });
 
+      const notesDirInput = card.querySelector('#cfg-notes-dir');
+      const notesDirHint = card.querySelector('#cfg-notes-dir-hint');
+      const pickNotesDirBtn = card.querySelector('#cfg-pick-notes-dir');
+      const openNotesDirBtn = card.querySelector('#cfg-open-notes-dir');
+      const autoSaveChk = card.querySelector('#cfg-auto-save');
+
+      pickNotesDirBtn?.addEventListener('click', async () => {
+        pickNotesDirBtn.disabled = true;
+        if (notesDirHint) notesDirHint.style.display = 'none';
+        try {
+          const picked = await api.post('/api/system/pick-path', { mode: 'folder' });
+          const chosen = picked?.path || (Array.isArray(picked?.paths) ? picked.paths[0] : '');
+          if (!picked?.cancelled && chosen) {
+            if (notesDirInput) notesDirInput.value = chosen;
+            showToast(`已选择笔记目录：${chosen}`, 'success');
+          } else {
+            const msg =
+              picked?.message ||
+              (picked?.headless
+                ? '当前为无桌面环境，请直接在左侧输入框填写绝对路径'
+                : '已取消文件夹选择');
+            if (notesDirHint) {
+              notesDirHint.textContent = msg;
+              notesDirHint.style.display = 'block';
+            }
+            showToast(msg, 'info');
+          }
+        } catch (err) {
+          showToast(`选择文件夹失败：${err?.message || '未知错误'}`, 'error');
+        } finally {
+          pickNotesDirBtn.disabled = false;
+        }
+      });
+
+      openNotesDirBtn?.addEventListener('click', async () => {
+        const currentDirValue = notesDirInput?.value?.trim() || './data/notes';
+        openNotesDirBtn.disabled = true;
+        try {
+          await api.post('/api/files/open-external', {
+            path: currentDirValue,
+            reveal_folder: false,
+          });
+          showToast('已在系统文件管理器中打开目录', 'success');
+        } catch (err) {
+          showToast(`打开目录失败：${err?.message || '未知错误'}`, 'warning');
+        } finally {
+          openNotesDirBtn.disabled = false;
+        }
+      });
+
       card.querySelector('#cfg-cancel')?.addEventListener('click', closeSheet);
 
       card.querySelector('#cfg-save')?.addEventListener('click', async () => {
@@ -1927,9 +2019,11 @@ async function openSettingsSheet() {
 
         const docFontSize = Math.min(24, Math.max(12, Number(fontSlider?.value) || 15));
         const rawBaseUrl = baseUrlInput?.value?.trim() ?? '';
+        const autoSaveEnabled = Boolean(autoSaveChk?.checked);
         const payload = {
           theme: store.state.theme,
           doc_font_size: docFontSize,
+          auto_save_on_switch: autoSaveEnabled,
           ai: {
             base_url: rawBaseUrl,
             api_key: apiKeyInput?.value?.trim() || '',
@@ -1937,7 +2031,7 @@ async function openSettingsSheet() {
             web_search_param: searchParamInput?.value?.trim() || '',
             enable_free_ai: Boolean(freeAiChk?.checked),
           },
-          default_notes_dir: card.querySelector('#cfg-notes-dir')?.value?.trim() || './data/notes',
+          default_notes_dir: notesDirInput?.value?.trim() || './data/notes',
           default_progress_excel: card.querySelector('#cfg-default-excel')?.value?.trim() || '',
           whitelist_dirs: whitelistDirs,
         };
@@ -1945,7 +2039,17 @@ async function openSettingsSheet() {
         try {
           const updated = await api.put('/api/system/config', payload);
           applyDocTypographySafe(updated?.doc_font_size ?? docFontSize);
-          store.setState({ config: updated }, 'config:changed');
+          if (typeof storeMod.setAutoSaveOnSwitch === 'function') {
+            storeMod.setAutoSaveOnSwitch(autoSaveEnabled);
+          } else {
+            store.state.autoSaveOnSwitch = autoSaveEnabled;
+            try {
+              localStorage.setItem('sln_auto_save', autoSaveEnabled ? 'true' : 'false');
+            } catch {
+              // ignore storage errors
+            }
+          }
+          store.setState({ config: updated, autoSaveOnSwitch: autoSaveEnabled }, 'config:changed');
           store.emit('config:changed', updated);
           store.emit('files:updated');
           closeSheet();
@@ -2042,7 +2146,7 @@ export function initSpotlight() {
   document.getElementById('btn-voice-quick')?.addEventListener('click', openVoiceSheet);
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsSheet);
 
-  store.on('spotlight:open', openSpotlight);
+  store.on('spotlight:open', (opts) => openSpotlight(opts?.mode || opts));
   store.on('voice:open', openVoiceSheet);
   store.on('settings:open', openSettingsSheet);
 

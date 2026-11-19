@@ -374,13 +374,13 @@ async def _resolve_ai_runtime() -> dict[str, Any]:
     return {"mode": "offline", "label": _OFFLINE_LABEL}
 
 
-async def _call_chat_json(
+async def _call_chat_text(
     system_prompt: str,
     user_prompt: str,
     *,
     runtime: dict[str, Any] | None = None,
     timeout: float | None = None,
-) -> dict[str, Any]:
+) -> str:
     rt = runtime or await _resolve_ai_runtime()
     if rt.get("mode") == "offline":
         raise RuntimeError("AI runtime is in offline mode")
@@ -408,7 +408,20 @@ async def _call_chat_json(
     choices = data.get("choices") or []
     if not choices:
         raise ValueError("No choices in AI response")
-    content = str(((choices[0].get("message") or {}).get("content")) or "")
+    content = str(((choices[0].get("message") or {}).get("content")) or "").strip()
+    if not content:
+        raise ValueError("Empty AI response")
+    return content
+
+
+async def _call_chat_json(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    runtime: dict[str, Any] | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    content = await _call_chat_text(system_prompt, user_prompt, runtime=runtime, timeout=timeout)
     return _parse_json_robust(content)
 
 
@@ -1353,3 +1366,418 @@ async def semantic_rerank(query: str, candidates: list[dict[str, Any]], limit: i
         }
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 7. generate_mindmap_outline & polish_fragments (V3)
+# ---------------------------------------------------------------------------
+
+_PORTAL_ANCHOR_RE = re.compile(r"\[\[[^\]\r\n]+\]\]")
+_CHECKBOX_LINE_RE = re.compile(r"^[-*]\s*\[[ xX]\]\s+(.+)$")
+
+
+def _strip_outer_markdown_fence(raw_text: str) -> str:
+    cleaned = (raw_text or "").strip()
+    m = re.match(r"^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$", cleaned, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return cleaned
+
+
+def _extract_portal_anchors(text: str) -> list[str]:
+    seen: set[str] = set()
+    anchors: list[str] = []
+    for m in _PORTAL_ANCHOR_RE.findall(text or ""):
+        if m not in seen:
+            seen.add(m)
+            anchors.append(m)
+    return anchors
+
+
+def _ensure_anchors_preserved(source_text: str, result_md: str) -> str:
+    anchors = _extract_portal_anchors(source_text)
+    if not anchors:
+        return result_md
+    missing = [a for a in anchors if a not in result_md]
+    if not missing:
+        return result_md
+    tail = "\n".join(f"- {a}" for a in missing)
+    return f"{result_md.rstrip()}\n\n## 关联引用锚点\n{tail}"
+
+
+def _extract_mindmap_title(outline_md: str, fallback: str = "知识导图") -> str:
+    for ln in (outline_md or "").splitlines():
+        s = ln.strip()
+        if s.startswith("# "):
+            title = s[2:].strip()
+            if title:
+                return title[:60]
+    for ln in (outline_md or "").splitlines():
+        s = ln.strip().lstrip("#-*• ").strip()
+        if s:
+            return s[:40]
+    return fallback
+
+
+def _protect_anchors(text: str) -> tuple[str, list[str]]:
+    anchors: list[str] = []
+
+    def _repl(match: re.Match[str]) -> str:
+        idx = len(anchors)
+        anchors.append(match.group(0))
+        return f"\x00SLNANCHOR{idx}\x00"
+
+    return _PORTAL_ANCHOR_RE.sub(_repl, text), anchors
+
+
+def _restore_anchors(text: str, anchors: list[str]) -> str:
+    out = text
+    for idx, anchor in enumerate(anchors):
+        out = out.replace(f"\x00SLNANCHOR{idx}\x00", anchor)
+    return out
+
+
+def _build_mindmap_offline(combined_text: str, default_title: str = "知识导图") -> tuple[str, str]:
+    protected_text, anchors = _protect_anchors(combined_text)
+    lines = [ln.rstrip() for ln in protected_text.splitlines()]
+    non_empty = [ln.strip() for ln in lines if ln.strip()]
+
+    # Case 1: Existing Markdown headings/bullets structure
+    has_md_headings = any(re.match(r"^#{1,3}\s+\S", ln) for ln in non_empty)
+    if has_md_headings:
+        out_lines: list[str] = []
+        root_title = default_title
+        has_h1 = False
+        has_h2 = False
+
+        for raw in lines:
+            s = raw.strip()
+            if not s:
+                continue
+            h1 = re.match(r"^#\s+(.+)$", s)
+            h2 = re.match(r"^##\s+(.+)$", s)
+            h3 = re.match(r"^###+\s+(.+)$", s)
+            bullet = re.match(r"^(\s*)[-*•]\s+(.+)$", raw)
+            numbered = re.match(r"^(\s*)\d+[.)、]\s+(.+)$", raw)
+
+            if h1 and not has_h1:
+                root_title = _restore_anchors(h1.group(1).strip(), anchors)[:60]
+                out_lines.append(f"# {root_title}")
+                has_h1 = True
+            elif h1:
+                has_h2 = True
+                out_lines.append(f"## {h1.group(1).strip()}")
+            elif h2:
+                if not has_h1:
+                    out_lines.append(f"# {default_title}")
+                    has_h1 = True
+                has_h2 = True
+                out_lines.append(f"## {h2.group(1).strip()}")
+            elif h3:
+                if not has_h1:
+                    out_lines.append(f"# {default_title}")
+                    has_h1 = True
+                if not has_h2:
+                    out_lines.append("## 核心要点")
+                    has_h2 = True
+                out_lines.append(f"- {h3.group(1).strip()}")
+            elif bullet:
+                if not has_h1:
+                    out_lines.append(f"# {default_title}")
+                    has_h1 = True
+                if not has_h2:
+                    out_lines.append("## 核心要点")
+                    has_h2 = True
+                indent = "  " if len(bullet.group(1)) >= 2 else ""
+                out_lines.append(f"{indent}- {bullet.group(2).strip()}")
+            elif numbered:
+                if not has_h1:
+                    out_lines.append(f"# {default_title}")
+                    has_h1 = True
+                if not has_h2:
+                    out_lines.append("## 核心要点")
+                    has_h2 = True
+                indent = "  " if len(numbered.group(1)) >= 2 else ""
+                out_lines.append(f"{indent}- {numbered.group(2).strip()}")
+            else:
+                if not has_h1:
+                    out_lines.append(f"# {default_title}")
+                    has_h1 = True
+                if not has_h2:
+                    out_lines.append("## 内容概览")
+                    has_h2 = True
+                for seg in re.split(r"(?<=[。！？!?])\s*", s):
+                    seg_c = seg.strip()
+                    if seg_c:
+                        out_lines.append(f"  - {seg_c[:120]}")
+
+        outline = _restore_anchors("\n".join(out_lines).strip(), anchors)
+        return outline, _extract_mindmap_title(outline, root_title)
+
+    # Case 2: Page markers (PDF) or Sheets (Excel)
+    page_sections: list[tuple[str, list[str]]] = []
+    cur_heading: str | None = None
+    cur_items: list[str] = []
+    for s in non_empty:
+        page_m = re.match(r"^\[第\s*(\d+)\s*页\]$", s)
+        sheet_m = re.match(r"^(?:###\s*Sheet:\s*|当前摘要工作表：)(.+)$", s)
+        if page_m:
+            if cur_heading and cur_items:
+                page_sections.append((cur_heading, cur_items))
+            cur_heading = f"第 {page_m.group(1)} 页核心内容"
+            cur_items = []
+        elif sheet_m:
+            if cur_heading and cur_items:
+                page_sections.append((cur_heading, cur_items))
+            cur_heading = f"工作表：{sheet_m.group(1).strip()}"
+            cur_items = []
+        else:
+            if cur_heading is None:
+                cur_heading = "核心脉络"
+            cur_items.append(s)
+    if cur_heading and cur_items:
+        page_sections.append((cur_heading, cur_items))
+
+    root_title = default_title
+    if non_empty and len(non_empty[0]) <= 36 and not non_empty[0].startswith("[第"):
+        candidate_title = re.sub(r"^[#*\s]+", "", non_empty[0]).strip()
+        root_title = _restore_anchors(candidate_title, anchors)[:36] or default_title
+
+    out_lines = [f"# {root_title}"]
+    if len(page_sections) >= 2 or (len(page_sections) == 1 and page_sections[0][0] != "核心脉络"):
+        for sec_title, sec_lines in page_sections[:8]:
+            out_lines.append(f"## {sec_title}")
+            joined = " ".join(sec_lines)
+            sentences = [x.strip() for x in re.split(r"[。！？!\?\n；;]+", joined) if len(x.strip()) >= 3]
+            if not sentences:
+                sentences = sec_lines[:4]
+            for sent in sentences[:4]:
+                if "：" in sent or ":" in sent:
+                    head, tail = re.split(r"[：:]", sent, maxsplit=1)
+                    if 2 <= len(head.strip()) <= 24 and tail.strip():
+                        out_lines.append(f"- {head.strip()}")
+                        out_lines.append(f"  - {tail.strip()[:120]}")
+                        continue
+                out_lines.append(f"- {sent[:80]}")
+    else:
+        # Case 3: Unstructured paragraphs -> group into up to 6 branches
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", protected_text.strip()) if p.strip()]
+        if len(paragraphs) <= 1:
+            paragraphs = [s for s in non_empty if _restore_anchors(s, anchors) != root_title]
+        if not paragraphs:
+            paragraphs = non_empty
+
+        for idx, para in enumerate(paragraphs[:6], start=1):
+            p_lines = [x.strip() for x in para.splitlines() if x.strip()]
+            first_frag = re.split(r"[。！？!\?\n；;：:]+", p_lines[0])[0].strip() if p_lines else f"分支 {idx}"
+            branch_clean = re.sub(r"^(?:[-*•]\s*(?:\[[ xX]\]\s*)?|\d+[.)、]\s*)", "", first_frag).strip()
+            branch_title = branch_clean[:26] or f"核心分支 {idx}"
+            out_lines.append(f"## {branch_title}")
+            sents = [x.strip() for x in re.split(r"[。！？!\?\n；;]+", para) if len(x.strip()) >= 2]
+            for sent in sents[:5]:
+                clean_s = re.sub(r"^[-*•\d.)、\s]+", "", sent).strip()
+                if clean_s:
+                    if len(clean_s) > 45 and ("，" in clean_s or "," in clean_s):
+                        parts = [x.strip() for x in re.split(r"[，,]+", clean_s) if x.strip()]
+                        out_lines.append(f"- {parts[0][:40]}")
+                        for sub in parts[1:3]:
+                            out_lines.append(f"  - {sub[:80]}")
+                    else:
+                        out_lines.append(f"- {clean_s[:100]}")
+
+    outline = _restore_anchors("\n".join(out_lines).strip(), anchors)
+    outline = _ensure_anchors_preserved(combined_text, outline)
+    return outline, _extract_mindmap_title(outline, root_title)
+
+
+async def generate_mindmap_outline(text: str = "", file_path: str | None = None) -> dict[str, Any]:
+    """Generate a clean 3-level Markdown mindmap outline preserving [[...]] portal anchors."""
+    parts: list[str] = []
+    default_title = "知识导图"
+
+    if file_path:
+        resolved = safe_io.assert_not_private(file_path)
+        default_title = resolved.stem[:40] or default_title
+        doc_engine = _optional_import("core.doc_engine")
+        fn = getattr(doc_engine, "extract_text_for_ai", None) if doc_engine else None
+        if callable(fn):
+            extracted = fn(str(resolved), max_chars=7000)
+            if isinstance(extracted, dict):
+                extracted = extracted.get("text", "")
+            file_text = str(extracted or "")
+        else:
+            file_text = _extract_text_fallback(resolved, max_chars=7000)
+        if file_text.strip():
+            parts.append(file_text.strip())
+
+    if text and text.strip():
+        parts.append(text.strip())
+
+    combined_text = "\n\n".join(parts).strip()
+    if not combined_text:
+        raise ValueError("请输入文本或选择一份有内容的文档")
+
+    runtime = await _resolve_ai_runtime()
+    if runtime.get("mode") == "offline":
+        outline_md, root_title = _build_mindmap_offline(combined_text, default_title=default_title)
+        return {
+            "markdown": outline_md,
+            "title": root_title,
+            "offline_mode": True,
+            "provider_label": runtime["label"],
+        }
+
+    system_prompt = (
+        "你是 SmartLocalNote 思维导图架构师。请将用户输入整理为一个结构极其清晰的 3 级 Markdown 思维导图大纲。\n"
+        "严格遵循以下输出格式规范：\n"
+        "1. 第一行必须是中心主题：`# 中心主题`\n"
+        "2. 一级分支使用二级标题：`## 一级分支`\n"
+        "3. 二级要点使用无序列表：`- 二级要点`\n"
+        "4. 三级细节或引用使用两格缩进列表：`  - 细节与 [[锚点]]`\n"
+        "5. 必须完整保留原文中所有 `[[...]]` 双括号锚点胶囊语法（如 `[[高数重点讲义.pdf#page=2]]`），严禁删改或拆分括号。\n"
+        "6. 只输出纯 Markdown 大纲内容，不要输出代码块围栏或额外寒暄。"
+    )
+    user_prompt = f"参考标题：{default_title}\n\n原始内容：\n{_head_tail_truncate(combined_text, 6800)}"
+
+    try:
+        raw_md = await _call_chat_text(system_prompt, user_prompt, runtime=runtime, timeout=float(runtime.get("timeout", 45.0)))
+        outline_md = _strip_outer_markdown_fence(raw_md)
+        if "#" not in outline_md:
+            raise ValueError("Missing headings in mindmap output")
+        outline_md = _ensure_anchors_preserved(combined_text, outline_md)
+        root_title = _extract_mindmap_title(outline_md, default_title)
+        return {
+            "markdown": outline_md,
+            "title": root_title,
+            "offline_mode": False,
+            "provider_label": runtime["label"],
+        }
+    except Exception:
+        outline_md, root_title = _build_mindmap_offline(combined_text, default_title=default_title)
+        return {
+            "markdown": outline_md,
+            "title": root_title,
+            "offline_mode": True,
+            "provider_label": _OFFLINE_LABEL,
+        }
+
+
+def _polish_fragments_offline(clean_text: str, style: str = "article") -> str:
+    raw_lines = clean_text.splitlines()
+    todos: list[str] = []
+    seen_todos: set[str] = set()
+    body_blocks: list[list[str]] = []
+    current_block: list[str] = []
+
+    for raw in raw_lines:
+        s = raw.strip()
+        if not s:
+            if current_block:
+                body_blocks.append(current_block)
+                current_block = []
+            continue
+        if _CHECKBOX_LINE_RE.match(s):
+            norm_cb = re.sub(r"^[-*]\s*\[([ xX])\]\s+", lambda m: f"- [{m.group(1)}] ", s)
+            if norm_cb not in seen_todos:
+                seen_todos.add(norm_cb)
+                todos.append(norm_cb)
+            continue
+        current_block.append(s)
+
+    if current_block:
+        body_blocks.append(current_block)
+
+    out_sections: list[str] = []
+    has_h1 = any(b and b[0].startswith("# ") for b in body_blocks)
+    if not has_h1:
+        title_hint = "整理汇总笔记"
+        if body_blocks and body_blocks[0]:
+            candidate = re.sub(r"^[#*\->\s]+", "", body_blocks[0][0]).strip()
+            candidate = re.split(r"[。！？!\?\n；;]+", candidate)[0].strip()
+            if 2 <= len(candidate) <= 28:
+                title_hint = candidate
+        out_sections.append(f"# {title_hint}")
+
+    sec_idx = 1
+    for block in body_blocks:
+        if len(block) == 1 and re.match(r"^#{1,3}\s+", block[0]):
+            out_sections.append(block[0])
+            continue
+
+        if block and re.match(r"^#{1,3}\s+", block[0]):
+            out_sections.append(block[0])
+            content_lines = block[1:]
+        else:
+            if style == "outline":
+                heading_label = f"## 主题模块 {sec_idx}"
+            else:
+                first_clean = re.sub(r"^[-*•\d.)、\s]+", "", block[0]).strip()
+                heading_label = f"## {first_clean[:20]}" if 2 <= len(first_clean) <= 20 and len(block) > 1 else f"## 核心内容 {sec_idx}"
+            out_sections.append(heading_label)
+            sec_idx += 1
+            content_lines = block
+
+        if content_lines:
+            joined_lines: list[str] = []
+            for ln in content_lines:
+                if re.match(r"^[-*•]\s+", ln) or re.match(r"^\d+[.)、]\s+", ln) or ln.startswith(">"):
+                    joined_lines.append(ln)
+                else:
+                    joined_lines.append(ln)
+            out_sections.append("\n".join(joined_lines))
+
+    if todos:
+        out_sections.append("## 待办与行动清单\n" + "\n".join(todos))
+
+    polished = "\n\n".join(sec.strip() for sec in out_sections if sec.strip()).strip()
+    return _ensure_anchors_preserved(clean_text, polished)
+
+
+async def polish_fragments(text: str, style: str = "article") -> dict[str, Any]:
+    """Reorganize scattered note fragments into a coherent Markdown document preserving [[...]] anchors."""
+    clean_text = (text or "").strip()
+    if not clean_text:
+        raise ValueError("请输入需要组装润色的碎片内容")
+
+    eff_style = (style or "article").strip().lower() or "article"
+    runtime = await _resolve_ai_runtime()
+    if runtime.get("mode") == "offline":
+        return {
+            "markdown": _polish_fragments_offline(clean_text, eff_style),
+            "offline_mode": True,
+            "provider_label": runtime["label"],
+        }
+
+    style_desc = {
+        "article": "连贯流畅的结构化专题文章（包含清晰的 `#` 主标题与 `##` 分节标题）",
+        "outline": "条理分明的结构化复习大纲与核心要点列表",
+        "summary": "精炼干练的总结报告与行动清单",
+    }.get(eff_style, f"风格为 {eff_style} 的结构化 Markdown 文档")
+
+    system_prompt = (
+        f"你是 SmartLocalNote 文档编辑大师。请将用户提供的零散便签、摘录碎片重新组织润色为一篇{style_desc}。\n"
+        "严格要求：\n"
+        "1. 消除碎片感与冗余空行，补充逻辑过渡并生成清晰的 `#` / `##` 标题层级；若有待办勾选框 `- [ ]`，统一归类到 `## 待办与行动清单`。\n"
+        "2. 严禁修改、拆散或删除任何 `[[...]]` 传送门锚点胶囊（例如 `[[高数重点讲义.pdf#page=2]]`、`[[进度表.xlsx#Sheet1!B2]]`），必须原样精准保留在相关段落旁！\n"
+        "3. 不得捏造原文未提及的事实或数据。\n"
+        "4. 直接输出最终 Markdown 正文，不要包裹在 ```markdown 代码块中。"
+    )
+    user_prompt = f"待润色碎片内容：\n{_head_tail_truncate(clean_text, 6800)}"
+
+    try:
+        raw_md = await _call_chat_text(system_prompt, user_prompt, runtime=runtime, timeout=float(runtime.get("timeout", 45.0)))
+        polished_md = _strip_outer_markdown_fence(raw_md)
+        if not polished_md:
+            raise ValueError("Empty polished output")
+        polished_md = _ensure_anchors_preserved(clean_text, polished_md)
+        return {
+            "markdown": polished_md,
+            "offline_mode": False,
+            "provider_label": runtime["label"],
+        }
+    except Exception:
+        return {
+            "markdown": _polish_fragments_offline(clean_text, eff_style),
+            "offline_mode": True,
+            "provider_label": _OFFLINE_LABEL,
+        }

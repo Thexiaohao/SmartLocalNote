@@ -563,3 +563,53 @@ async def search_workspace(query: str, mode: str = "keyword", limit: int = 15) -
     if normalized_mode == "semantic":
         return await _semantic_search(clean_query, safe_limit)
     return _keyword_search(clean_query, safe_limit)
+
+
+def find_backlinks(path_str: str) -> dict[str, Any]:
+    """Scan workspace .md/.txt files for `[[<target.name>` backlinks (case-insensitive)."""
+    target = safe_io.resolve_safe_path(path_str)
+    target_key = str(target.resolve())
+    target_name = target.name
+    pattern = re.compile(
+        r"\[\[" + re.escape(target_name) + r"(?:[#!\|\]])",
+        re.IGNORECASE,
+    )
+
+    workspace = doc_engine.list_workspace_files()
+    backlinks: list[dict[str, Any]] = []
+
+    for item in workspace.get("items", []):
+        fpath = str(item.get("path") or "")
+        ext = str(item.get("ext") or "").lower()
+        if not fpath or ext not in (".md", ".txt"):
+            continue
+        try:
+            src = safe_io.resolve_safe_path(fpath, must_exist=True)
+        except (OSError, PermissionError, FileNotFoundError, ValueError):
+            continue
+        if str(src.resolve()) == target_key:
+            continue
+
+        try:
+            text = _read_text_file(src)
+        except OSError:
+            continue
+
+        for line_no, raw_line in enumerate(text.splitlines(), start=1):
+            if pattern.search(raw_line):
+                clean_line = re.sub(r"\s+", " ", raw_line).strip()
+                snippet = clean_line[:160] + ("..." if len(clean_line) > 160 else "")
+                backlinks.append({
+                    "path": str(src),
+                    "name": src.name,
+                    "ext": ext,
+                    "snippet": snippet,
+                    "line": line_no,
+                })
+                break
+
+    return {
+        "target": target_name,
+        "count": len(backlinks),
+        "backlinks": backlinks,
+    }

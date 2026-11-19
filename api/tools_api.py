@@ -54,6 +54,10 @@ class CreateReminderBody(BaseModel):
     file_paths: list[str] = Field(default_factory=list)
 
 
+class FetchUrlTitleBody(BaseModel):
+    url: str
+
+
 @router.get("/apps")
 def list_apps() -> dict:
     return ok(app_launcher.list_apps())
@@ -148,3 +152,8 @@ def create_reminder(body: CreateReminderBody) -> dict:
 @router.delete("/reminders/{reminder_id}")
 def delete_reminder(reminder_id: str) -> dict:
     return ok(scheduler.delete_reminder(reminder_id))
+
+
+@router.post("/tools/fetch-url-title")
+async def fetch_url_title(body: FetchUrlTitleBody) -> dict:
+    return ok(await app_launcher.fetch_url_title(body.url))

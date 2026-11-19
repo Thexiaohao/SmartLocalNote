@@ -43,6 +43,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "private_files": [],
     "default_notes_dir": "./data/notes",
     "default_progress_excel": "",
+    "auto_save_on_switch": False,
 }
 
 FREE_AI_PRESETS: list[dict[str, Any]] = [
@@ -285,9 +286,12 @@ def _merge_config(raw: dict[str, Any] | None) -> dict[str, Any]:
                 merged["doc_font_family"] = fam
         elif key == "ui_layout":
             merged["ui_layout"] = deepcopy(value) if isinstance(value, dict) else {}
+        elif key == "auto_save_on_switch":
+            merged["auto_save_on_switch"] = _normalize_bool(value, False)
         else:
             merged[key] = value
 
+    merged["auto_save_on_switch"] = _normalize_bool(merged.get("auto_save_on_switch"), False)
     merged["ai"]["enable_free_ai"] = _normalize_bool(merged["ai"].get("enable_free_ai"), True)
     return merged
 
@@ -315,6 +319,7 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
 def update_config(patch: dict[str, Any]) -> dict[str, Any]:
     """Deep-merge a partial configuration patch into config.json and return saved config."""
     current = load_config()
+    new_notes_dir: str | None = None
     if isinstance(patch, dict):
         for key, value in patch.items():
             if key == "ai" and isinstance(value, dict):
@@ -322,8 +327,33 @@ def update_config(patch: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(current_ai, dict):
                     current_ai = deepcopy(DEFAULT_CONFIG["ai"])
                 current["ai"] = {**current_ai, **value}
+            elif key == "default_notes_dir" and value is not None:
+                raw_dir = str(value).strip()
+                if raw_dir:
+                    new_notes_dir = raw_dir
             elif value is not None:
                 current[key] = value
+
+    if new_notes_dir is not None:
+        candidate = Path(new_notes_dir).expanduser()
+        if not candidate.is_absolute():
+            candidate = BASE_DIR / candidate
+        resolved_dir = candidate.resolve()
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+        resolved_str = str(resolved_dir)
+        current["default_notes_dir"] = resolved_str
+        whitelist = list(current.get("whitelist_dirs") or [])
+        norm_existing: set[str] = set()
+        for w in whitelist:
+            if w:
+                try:
+                    norm_existing.add(str(Path(w).expanduser().resolve()))
+                except OSError:
+                    norm_existing.add(str(w))
+        if resolved_str not in norm_existing:
+            whitelist.append(resolved_str)
+        current["whitelist_dirs"] = whitelist
+
     return save_config(current)
 
 

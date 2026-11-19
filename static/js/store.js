@@ -11,6 +11,7 @@ const DOC_FONT_FAMILY_KEY = 'sln_doc_font_family';
 const PANE_WIDTHS_KEY = 'sln_pane_widths';
 const UI_LAYOUT_KEY = 'sln_ui_layout';
 const RECENT_FILES_KEY = 'sln_recent_files';
+const AUTO_SAVE_KEY = 'sln_auto_save';
 const MAX_CONTEXT_FILES = 5;
 const MAX_TOASTS = 3;
 const MAX_RECENT_FILES = 8;
@@ -120,6 +121,17 @@ function loadInitialTheme() {
   return 'light';
 }
 
+function loadInitialAutoSaveOnSwitch() {
+  try {
+    const saved = localStorage.getItem(AUTO_SAVE_KEY);
+    if (saved === 'true' || saved === '1') return true;
+    if (saved === 'false' || saved === '0') return false;
+  } catch {
+    // ignore storage errors
+  }
+  return false;
+}
+
 function clampNumber(val, min, max, fallback) {
   const num = Number(val);
   if (!Number.isFinite(num)) return fallback;
@@ -188,6 +200,7 @@ function loadInitialRecentFiles() {
 export const store = {
   state: {
     theme: loadInitialTheme(),
+    autoSaveOnSwitch: loadInitialAutoSaveOnSwitch(),
     docFontSize: loadInitialDocFontSize(),
     docFontFamily: loadInitialDocFontFamily(),
     paneWidths: loadInitialPaneWidths(),
@@ -299,6 +312,103 @@ export function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Persist autoSaveOnSwitch setting to store & localStorage.
+ * @param {boolean} enabled
+ * @returns {boolean}
+ */
+export function setAutoSaveOnSwitch(enabled) {
+  const next = Boolean(enabled);
+  store.state.autoSaveOnSwitch = next;
+  try {
+    localStorage.setItem(AUTO_SAVE_KEY, next ? 'true' : 'false');
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('autosave:changed', next);
+  return next;
+}
+
+/**
+ * Splice a Markdown block cleanly at a 0-based line index with precision 1-blank-line padding.
+ * Guarantees no leading blank lines at start of file and collapses 3+ consecutive newlines around insertion to \n\n.
+ * @param {string} source
+ * @param {number | null | undefined} insertLineIdx
+ * @param {string} blockText
+ * @returns {string}
+ */
+export function insertMarkdownWithPadding(source, insertLineIdx, blockText) {
+  const normalizedSource = String(source ?? '').replace(/\r\n/g, '\n');
+  const trimmedBlock = String(blockText ?? '').replace(/\r\n/g, '\n').trim();
+  if (!trimmedBlock) return normalizedSource;
+
+  if (!normalizedSource.trim()) {
+    return `${trimmedBlock}\n`;
+  }
+
+  const lines = normalizedSource.split('\n');
+  const rawIdx = insertLineIdx === null || insertLineIdx === undefined || Number.isNaN(Number(insertLineIdx))
+    ? lines.length
+    : Number(insertLineIdx);
+  const clampedIdx = Math.max(0, Math.min(lines.length, Math.trunc(rawIdx)));
+
+  const before = lines.slice(0, clampedIdx).join('\n').replace(/\n+$/g, '');
+  const after = lines.slice(clampedIdx).join('\n').replace(/^\n+/g, '');
+
+  const parts = [];
+  if (before.trim()) {
+    parts.push(before);
+  }
+  parts.push(trimmedBlock);
+  if (after.trim()) {
+    parts.push(after);
+  }
+
+  let result = parts.join('\n\n').replace(/^\n+/, '');
+  if (!result.endsWith('\n')) {
+    result += '\n';
+  }
+  return result;
+}
+
+/**
+ * Splice a Markdown block cleanly at a character index (e.g. textarea cursor position)
+ * with precision 1-blank-line padding above and below.
+ * @param {string} source
+ * @param {number} charIdx
+ * @param {string} blockText
+ * @returns {{ text: string, cursor: number }}
+ */
+export function insertMarkdownAtCharIndex(source, charIdx, blockText) {
+  const normalizedSource = String(source ?? '').replace(/\r\n/g, '\n');
+  const trimmedBlock = String(blockText ?? '').replace(/\r\n/g, '\n').trim();
+  if (!trimmedBlock) {
+    const pos = Math.max(0, Math.min(normalizedSource.length, Number(charIdx) || 0));
+    return { text: normalizedSource, cursor: pos };
+  }
+
+  if (!normalizedSource.trim()) {
+    const text = `${trimmedBlock}\n`;
+    return { text, cursor: trimmedBlock.length };
+  }
+
+  const rawPos = Number.isFinite(Number(charIdx)) ? Number(charIdx) : normalizedSource.length;
+  const clampedPos = Math.max(0, Math.min(normalizedSource.length, Math.trunc(rawPos)));
+
+  const before = normalizedSource.slice(0, clampedPos).replace(/\n+$/g, '');
+  const after = normalizedSource.slice(clampedPos).replace(/^\n+/g, '');
+
+  let prefix = '';
+  if (before.trim()) {
+    prefix = `${before}\n\n`;
+  }
+  const suffix = after.trim() ? `\n\n${after}` : '\n';
+  const text = `${prefix}${trimmedBlock}${suffix}`.replace(/^\n+/, '');
+  const cursor = Math.min(text.length, prefix.length + trimmedBlock.length);
+
+  return { text, cursor };
+}
+
 function getOrCreateToastStack() {
   let stack = document.getElementById('toast-stack');
   if (!stack) {
@@ -310,13 +420,6 @@ function getOrCreateToastStack() {
   }
   return stack;
 }
-
-const TOAST_ICON_MAP = {
-  info: 'sparkles',
-  success: 'check',
-  warning: 'bell',
-  error: 'x',
-};
 
 /**
  * Render Sonner-like stacked pill toast (max 3 visible).
@@ -875,7 +978,19 @@ function simpleMarkdownFallback(mdText) {
   return html.join('\n');
 }
 
-const DANGEROUS_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'BASE', 'FORM']);
+const DANGEROUS_TAGS = new Set([
+  'SCRIPT',
+  'STYLE',
+  'IFRAME',
+  'OBJECT',
+  'EMBED',
+  'LINK',
+  'META',
+  'BASE',
+  'FORM',
+  'NOSCRIPT',
+  'TEMPLATE',
+]);
 const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction']);
 
 function sanitizeDomTree(root) {
@@ -883,6 +998,16 @@ function sanitizeDomTree(root) {
   for (const el of nodes) {
     if (DANGEROUS_TAGS.has(el.tagName)) {
       el.remove();
+      continue;
+    }
+    // Strip unknown style/event attributes while explicitly allowing safe <mark> tags
+    if (el.tagName === 'MARK') {
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        if (name !== 'class') {
+          el.removeAttribute(attr.name);
+        }
+      }
       continue;
     }
     for (const attr of Array.from(el.attributes)) {
@@ -894,7 +1019,11 @@ function sanitizeDomTree(root) {
       }
       if (URL_ATTRS.has(name)) {
         const lowerVal = val.replace(/\s+/g, '').toLowerCase();
-        if (lowerVal.startsWith('javascript:') || lowerVal.startsWith('vbscript:') || lowerVal.startsWith('data:text/html')) {
+        if (
+          lowerVal.startsWith('javascript:') ||
+          lowerVal.startsWith('vbscript:') ||
+          lowerVal.startsWith('data:text/html')
+        ) {
           el.removeAttribute(attr.name);
         }
       }
@@ -902,50 +1031,211 @@ function sanitizeDomTree(root) {
   }
 }
 
-function buildAnchorPillNode(rawToken) {
-  const hashIdx = rawToken.indexOf('#');
-  if (hashIdx <= 0) return null;
-  const file = rawToken.slice(0, hashIdx).trim();
-  const fragment = rawToken.slice(hashIdx + 1).trim();
-  if (!file || !fragment) return null;
+function getFileBaseNameLower(pathOrName) {
+  return String(pathOrName || '').split(/[\\/]/).pop().trim().toLowerCase();
+}
 
+function isFileMountedInStore(fileRef) {
+  const items = store.state.files?.items;
+  if (!Array.isArray(items) || items.length === 0) return true;
+  const target = String(fileRef || '').trim();
+  if (!target) return true;
+  const targetLower = target.toLowerCase();
+  const targetNorm = target.replace(/\\/g, '/').toLowerCase();
+  const targetBase = getFileBaseNameLower(target);
+
+  return items.some((item) => {
+    const itemPath = String(item?.path || '').replace(/\\/g, '/').toLowerCase();
+    const itemName = String(item?.name || '').toLowerCase();
+    const itemBase = getFileBaseNameLower(item?.path || item?.name || '');
+    return (
+      itemPath === targetNorm ||
+      itemName === targetLower ||
+      itemBase === targetBase
+    );
+  });
+}
+
+function markBrokenIfMissing(btn, fileRef) {
+  if (!fileRef) return;
+  if (!isFileMountedInStore(fileRef)) {
+    btn.classList.add('is-broken');
+    btn.title = '文件未找到或已移动，点击尝试自动寻回';
+  }
+}
+
+function createUrlPillNode(urlStr, labelStr = '') {
+  const rawUrl = String(urlStr || '').trim();
+  if (!/^https?:\/\//i.test(rawUrl)) return null;
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'anchor-pill';
-  btn.dataset.anchorFile = file;
+  btn.className = 'anchor-pill anchor-url';
+  btn.dataset.anchorType = 'url';
+  btn.dataset.anchorUrl = rawUrl;
+  let displayLabel = String(labelStr || '').trim();
+  if (!displayLabel) {
+    try {
+      const parsed = new URL(rawUrl);
+      displayLabel = parsed.hostname.replace(/^www\./i, '') + (parsed.pathname !== '/' ? parsed.pathname.slice(0, 20) : '');
+    } catch {
+      displayLabel = rawUrl.slice(0, 36);
+    }
+  }
+  btn.title = rawUrl;
+  btn.innerHTML = `${icon('globe', 13)}<span>${escapeHtml(displayLabel)}</span>`;
+  return btn;
+}
 
-  const pageMatch = fragment.match(/^page=(\d+)$/i);
-  if (pageMatch) {
-    const page = pageMatch[1];
+function buildAnchorPillNode(rawToken) {
+  const token = String(rawToken || '').trim();
+  if (!token) return null;
+
+  // 1. [[app:AppName]]
+  if (/^app:/i.test(token)) {
+    const appName = token.slice(4).trim();
+    if (!appName) return null;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-app';
+    btn.dataset.anchorType = 'app';
+    btn.dataset.anchorApp = appName;
+    btn.title = `启动应用：${appName}`;
+    btn.innerHTML = `${icon('rocket', 13)}<span>${escapeHtml(appName)}</span>`;
+    return btn;
+  }
+
+  // 2. [[url:Title|https://...]] or [[url:https://...]]
+  if (/^url:/i.test(token)) {
+    const rest = token.slice(4).trim();
+    if (!rest) return null;
+    let label = '';
+    let url = rest;
+    const pipeIdx = rest.indexOf('|');
+    if (pipeIdx > 0) {
+      label = rest.slice(0, pipeIdx).trim();
+      url = rest.slice(pipeIdx + 1).trim();
+    }
+    return createUrlPillNode(url, label);
+  }
+
+  // 3. Archive member syntax [[file.zip!member]] or [[file.zip]]
+  const archiveOnlyOrBangMatch = token.match(/^([^#!]+?\.(?:zip|tar|tgz|gz))(?:!(.+))?$/i);
+  if (archiveOnlyOrBangMatch) {
+    const file = archiveOnlyOrBangMatch[1].trim();
+    const member = (archiveOnlyOrBangMatch[2] || '').trim();
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-archive';
+    btn.dataset.anchorType = 'archive';
+    btn.dataset.anchorFile = file;
+    btn.dataset.anchorMember = member;
+    btn.innerHTML = `${icon('layers', 13)}<span>${escapeHtml(file)}${member ? ` · ${escapeHtml(member)}` : ''}</span>`;
+    markBrokenIfMissing(btn, file);
+    return btn;
+  }
+
+  const hashIdx = token.indexOf('#');
+  const file = (hashIdx > 0 ? token.slice(0, hashIdx) : token).trim();
+  const fragment = (hashIdx > 0 ? token.slice(hashIdx + 1) : '').trim();
+  if (!file) return null;
+
+  const lowerFile = file.toLowerCase();
+
+  // 4. PDF anchor: [[file.pdf#page=N]] or [[file.pdf]]
+  if (lowerFile.endsWith('.pdf') || /^page=\d+$/i.test(fragment)) {
+    const pageMatch = fragment.match(/^page=(\d+)$/i);
+    const page = pageMatch ? pageMatch[1] : '';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-pdf';
+    btn.dataset.anchorType = 'pdf';
+    btn.dataset.anchorFile = file;
     btn.dataset.anchorPage = page;
     btn.dataset.anchorSheet = '';
     btn.dataset.anchorCell = '';
-    btn.innerHTML = `${icon('file-pdf', 13)}<span>${escapeHtml(file)} · P.${escapeHtml(page)}</span>`;
+    btn.innerHTML = `${icon('file-pdf', 13)}<span>${escapeHtml(file)}${page ? ` · P.${escapeHtml(page)}` : ''}</span>`;
+    markBrokenIfMissing(btn, file);
     return btn;
   }
 
-  const sheetCellMatch = fragment.match(/^([^!]+)!([A-Za-z]+\d+)$/);
-  if (sheetCellMatch) {
-    const sheet = sheetCellMatch[1].trim();
-    const cell = sheetCellMatch[2].toUpperCase();
+  // 5. Excel anchor: [[file.xlsx#Sheet!Cell]] or [[file.xlsx#Cell]] or [[file.xlsx]]
+  if (/\.(xlsx|xlsm|xls|csv)$/i.test(lowerFile) || /^([^!]+!)?[A-Za-z]+\d+$/.test(fragment)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-excel';
+    btn.dataset.anchorType = 'excel';
+    btn.dataset.anchorFile = file;
     btn.dataset.anchorPage = '';
-    btn.dataset.anchorSheet = sheet;
-    btn.dataset.anchorCell = cell;
-    btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)} · ${escapeHtml(sheet)}!${escapeHtml(cell)}</span>`;
+
+    const sheetCellMatch = fragment.match(/^([^!]+)!([A-Za-z]+\d+)$/);
+    const cellOnlyMatch = fragment.match(/^([A-Za-z]+\d+)$/);
+    if (sheetCellMatch) {
+      const sheet = sheetCellMatch[1].trim();
+      const cell = sheetCellMatch[2].toUpperCase();
+      btn.dataset.anchorSheet = sheet;
+      btn.dataset.anchorCell = cell;
+      btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)} · ${escapeHtml(sheet)}!${escapeHtml(cell)}</span>`;
+    } else if (cellOnlyMatch) {
+      const cell = cellOnlyMatch[1].toUpperCase();
+      btn.dataset.anchorSheet = '';
+      btn.dataset.anchorCell = cell;
+      btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)} · ${escapeHtml(cell)}</span>`;
+    } else {
+      btn.dataset.anchorSheet = '';
+      btn.dataset.anchorCell = '';
+      btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)}</span>`;
+    }
+    markBrokenIfMissing(btn, file);
     return btn;
   }
 
-  const cellOnlyMatch = fragment.match(/^([A-Za-z]+\d+)$/);
-  if (cellOnlyMatch) {
-    const cell = cellOnlyMatch[1].toUpperCase();
-    btn.dataset.anchorPage = '';
-    btn.dataset.anchorSheet = '';
-    btn.dataset.anchorCell = cell;
-    btn.innerHTML = `${icon('file-spreadsheet', 13)}<span>${escapeHtml(file)} · ${escapeHtml(cell)}</span>`;
+  // 6. Media anchor: [[media.mp4#t=12:30]] / [[audio.mp3#t=95]] / [[video.webm]]
+  if (/\.(mp4|webm|mov|m4v|mkv|mp3|wav|m4a|ogg|flac|aac)$/i.test(lowerFile) || /^t=[\d:]+$/i.test(fragment)) {
+    const timeMatch = fragment.match(/^t=([\d:]+(?:\.\d+)?)$/i);
+    const timeStr = timeMatch ? timeMatch[1] : fragment.replace(/^t=/i, '');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-media';
+    btn.dataset.anchorType = 'media';
+    btn.dataset.anchorFile = file;
+    btn.dataset.anchorTime = timeStr || '';
+    btn.innerHTML = `${icon('play', 12)}<span>${escapeHtml(file)}${timeStr ? ` · ${escapeHtml(timeStr)}` : ''}</span>`;
+    markBrokenIfMissing(btn, file);
+    return btn;
+  }
+
+  // 7. Generic document / file portal: [[note.md]], [[note.md#Heading]], [[filename.ext]]
+  if (file.includes('.')) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-doc';
+    btn.dataset.anchorType = 'file';
+    btn.dataset.anchorFile = file;
+    btn.dataset.anchorHeading = fragment;
+    btn.innerHTML = `${icon('file-text', 13)}<span>${escapeHtml(file)}${fragment ? ` · #${escapeHtml(fragment)}` : ''}</span>`;
+    markBrokenIfMissing(btn, file);
     return btn;
   }
 
   return null;
+}
+
+function transformBareUrlsInDom(root) {
+  const anchors = Array.from(root.querySelectorAll('a[href]'));
+  for (const a of anchors) {
+    if (a.closest('pre, code')) continue;
+    const href = (a.getAttribute('href') || '').trim();
+    if (!/^https?:\/\//i.test(href)) continue;
+    const text = (a.textContent || '').trim();
+    const isBareOrUrlLike =
+      text === href ||
+      text.replace(/\/$/, '') === href.replace(/\/$/, '') ||
+      /^https?:\/\//i.test(text);
+    const pill = createUrlPillNode(href, isBareOrUrlLike ? '' : text);
+    if (pill) {
+      a.replaceWith(pill);
+    }
+  }
 }
 
 function transformAnchorsInDom(root) {
@@ -954,8 +1244,9 @@ function transformAnchorsInDom(root) {
   let node;
   while ((node = walker.nextNode())) {
     if (!node.nodeValue || !node.nodeValue.includes('[[')) continue;
-    const parentTag = node.parentElement?.tagName;
-    if (parentTag === 'SCRIPT' || parentTag === 'STYLE') continue;
+    const parentEl = node.parentElement;
+    const parentTag = parentEl?.tagName;
+    if (parentTag === 'SCRIPT' || parentTag === 'STYLE' || parentEl?.closest('pre, code')) continue;
     textNodes.push(node);
   }
 
@@ -988,13 +1279,177 @@ function transformAnchorsInDom(root) {
   }
 }
 
+const CALLOUT_META = {
+  TIP: { cls: 'callout-tip', label: '技巧 TIP', iconName: 'sparkles' },
+  WARNING: { cls: 'callout-warning', label: '注意 WARNING', iconName: 'bell' },
+  IMPORTANT: { cls: 'callout-important', label: '重要 IMPORTANT', iconName: 'zap' },
+  NOTE: { cls: 'callout-note', label: '说明 NOTE', iconName: 'book-open' },
+};
+
+function transformCalloutsInDom(root) {
+  const quotes = Array.from(root.querySelectorAll('blockquote'));
+  for (const bq of quotes) {
+    const firstP = bq.querySelector('p') || bq;
+    const rawFirstText = firstP.textContent || '';
+    const match = rawFirstText.match(/^\s*\[!(TIP|WARNING|IMPORTANT|NOTE)\]\s*/i);
+    if (!match) continue;
+
+    const kind = match[1].toUpperCase();
+    const meta = CALLOUT_META[kind] || CALLOUT_META.NOTE;
+
+    // Strip [!TYPE] marker cleanly from first text node inside firstP
+    const walker = document.createTreeWalker(firstP, NodeFilter.SHOW_TEXT);
+    const firstTextNode = walker.nextNode();
+    if (firstTextNode) {
+      firstTextNode.nodeValue = firstTextNode.nodeValue.replace(/^\s*\[!(TIP|WARNING|IMPORTANT|NOTE)\]\s*/i, '');
+      // Remove leading <br> if marked breaks:true added one right after [!TIP]
+      const nextSib = firstTextNode.nextSibling;
+      if (!firstTextNode.nodeValue.trim() && nextSib && nextSib.nodeName === 'BR') {
+        nextSib.remove();
+      }
+    }
+
+    const card = document.createElement('div');
+    card.className = `md-callout ${meta.cls}`;
+    const head = document.createElement('div');
+    head.className = 'md-callout-title';
+    head.innerHTML = `${icon(meta.iconName, 14)}<span>${escapeHtml(meta.label)}</span>`;
+
+    const body = document.createElement('div');
+    body.className = 'md-callout-body';
+    while (bq.firstChild) {
+      const child = bq.firstChild;
+      if (child.nodeType === 1 && child.tagName === 'P' && !child.textContent.trim() && !child.querySelector('button, img, mark, code')) {
+        child.remove();
+      } else {
+        body.appendChild(child);
+      }
+    }
+
+    card.appendChild(head);
+    card.appendChild(body);
+    bq.replaceWith(card);
+  }
+}
+
+function computeTopLevelBlockLineRanges(mdText) {
+  const normalized = String(mdText ?? '').replace(/\r\n/g, '\n');
+  if (typeof window !== 'undefined' && window.marked && typeof window.marked.lexer === 'function') {
+    try {
+      const tokens = window.marked.lexer(normalized, { breaks: true, gfm: true });
+      const ranges = [];
+      let curLine = 0;
+      for (const tok of tokens) {
+        const raw = String(tok.raw || '');
+        const newlines = (raw.match(/\n/g) || []).length;
+        if (tok.type === 'space') {
+          curLine += newlines;
+          continue;
+        }
+        const trimmedRaw = raw.replace(/\n+$/g, '');
+        const contentLines = trimmedRaw ? trimmedRaw.split('\n').length : 1;
+        const startLine = curLine;
+        const endLine = Math.max(startLine, startLine + contentLines - 1);
+        ranges.push({ start: startLine, end: endLine });
+        curLine += newlines;
+        // If token raw didn't end with newline and isn't followed by space, stay on line or advance
+        if (!raw.endsWith('\n')) {
+          curLine += 1;
+        }
+      }
+      return ranges;
+    } catch {
+      // fall through to heuristic parser
+    }
+  }
+
+  // Fallback block line range estimator
+  const lines = normalized.split('\n');
+  const ranges = [];
+  let i = 0;
+  let inCode = false;
+  let codeStart = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim().startsWith('```')) {
+      if (!inCode) {
+        inCode = true;
+        codeStart = i;
+      } else {
+        inCode = false;
+        ranges.push({ start: codeStart, end: i });
+      }
+      i += 1;
+      continue;
+    }
+    if (inCode) {
+      i += 1;
+      continue;
+    }
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+    if (/^#{1,6}\s+/.test(line)) {
+      ranges.push({ start: i, end: i });
+      i += 1;
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+\.\s+/.test(line)) {
+      const start = i;
+      while (i + 1 < lines.length && (/^\s*[-*+]\s+/.test(lines[i + 1]) || /^\s*\d+\.\s+/.test(lines[i + 1]))) {
+        i += 1;
+      }
+      ranges.push({ start, end: i });
+      i += 1;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const start = i;
+      while (i + 1 < lines.length && /^\s*>/.test(lines[i + 1])) {
+        i += 1;
+      }
+      ranges.push({ start, end: i });
+      i += 1;
+      continue;
+    }
+    ranges.push({ start: i, end: i });
+    i += 1;
+  }
+  if (inCode) {
+    ranges.push({ start: codeStart, end: Math.max(codeStart, lines.length - 1) });
+  }
+  return ranges;
+}
+
+function annotateTopLevelBlockLines(root, mdText) {
+  const ranges = computeTopLevelBlockLineRanges(mdText);
+  const children = Array.from(root.children);
+  const totalLines = String(mdText ?? '').replace(/\r\n/g, '\n').split('\n').length;
+
+  for (let i = 0; i < children.length; i += 1) {
+    const el = children[i];
+    const range = ranges[i];
+    if (range) {
+      el.dataset.mdStart = String(range.start);
+      el.dataset.mdEnd = String(range.end);
+    } else {
+      const fallbackLine = Math.max(0, Math.min(totalLines - 1, i));
+      el.dataset.mdStart = String(fallbackLine);
+      el.dataset.mdEnd = String(fallbackLine);
+    }
+  }
+}
+
 /**
- * Safely render Markdown to sanitized HTML and transform [[file.pdf#page=N]] & [[file.xlsx#Sheet!Cell]]
- * into clickable .anchor-pill buttons.
+ * Safely render Markdown to sanitized HTML and transform Universal Portal Capsules ([[...]]),
+ * bare URLs, GitHub Alert callouts, safe <mark> highlights, and optional source line mappings.
  * @param {string} mdText
+ * @param {{ withLineMap?: boolean }} [opts={}]
  * @returns {string}
  */
-export function renderMarkdownSafe(mdText) {
+export function renderMarkdownSafe(mdText, opts = {}) {
   const raw = String(mdText ?? '');
   let parsedHtml = '';
 
@@ -1015,6 +1470,11 @@ export function renderMarkdownSafe(mdText) {
   const tpl = document.createElement('template');
   tpl.innerHTML = parsedHtml;
   sanitizeDomTree(tpl.content);
+  transformCalloutsInDom(tpl.content);
+  transformBareUrlsInDom(tpl.content);
   transformAnchorsInDom(tpl.content);
+  if (opts && opts.withLineMap === true) {
+    annotateTopLevelBlockLines(tpl.content, raw);
+  }
   return tpl.innerHTML;
 }

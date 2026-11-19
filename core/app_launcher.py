@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import threading
 from typing import Any
+from urllib.parse import urlparse
 import uuid
+
+import httpx
 
 from config import APPS_FILE, atomic_write_json, ensure_data_dirs
 
@@ -595,4 +600,56 @@ def pick_local_path(mode: str = "file") -> dict[str, Any]:
         "cancelled": True,
         "headless": True,
         "message": "当前环境无桌面文件选择器，请直接输入本地路径或使用上传/快捷导入",
+    }
+
+
+async def fetch_url_title(url: str) -> dict[str, Any]:
+    """Fetch `<title>` from the first 64KB of an http/https page, falling back cleanly to hostname."""
+    cleaned = str(url or "").strip()
+    if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
+        raise ValueError("仅支持解析 http:// 或 https:// 网址")
+
+    parsed = urlparse(cleaned)
+    host = (parsed.hostname or "").strip() or cleaned
+    title = host
+
+    try:
+        async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as client:
+            async with client.stream(
+                "GET",
+                cleaned,
+                headers={"User-Agent": "SmartLocalNote/3.0"},
+            ) as resp:
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    if not chunk:
+                        continue
+                    remaining = 65536 - total
+                    chunks.append(chunk[:remaining])
+                    total += len(chunks[-1])
+                    if total >= 65536:
+                        break
+                raw_bytes = b"".join(chunks)
+                encoding = resp.encoding or "utf-8"
+                try:
+                    snippet = raw_bytes.decode(encoding, errors="replace")
+                except LookupError:
+                    snippet = raw_bytes.decode("utf-8", errors="replace")
+
+                m = re.search(r"<title[^>]*>([\s\S]*?)</title>", snippet, re.IGNORECASE)
+                if m:
+                    extracted = html.unescape(re.sub(r"\s+", " ", m.group(1))).strip()
+                    if extracted:
+                        title = extracted
+    except Exception:
+        title = host
+
+    safe_title = title.replace("|", "｜").replace("[", "【").replace("]", "】")
+    return {
+        "url": cleaned,
+        "title": title,
+        "host": host,
+        "markdown": f"[[url:{safe_title}|{cleaned}]]",
     }

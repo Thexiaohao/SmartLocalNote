@@ -30,7 +30,24 @@ from config import (
 )
 
 MAX_SNAPSHOTS_PER_FILE = 15
-SUPPORTED_DOC_EXTS = {".md", ".txt", ".pdf", ".xlsx"}
+TEXT_EDIT_EXTS = {
+    ".md", ".txt", ".json", ".csv", ".py", ".js", ".ts", ".css", ".html",
+    ".xml", ".yaml", ".yml", ".ini", ".toml", ".log", ".sql", ".sh", ".bat",
+}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv"}
+ARCHIVE_EXTS = {".zip", ".tar", ".tgz", ".gz"}
+OFFICE_PREVIEW_EXTS = {".docx", ".pptx"}
+SUPPORTED_DOC_EXTS = (
+    TEXT_EDIT_EXTS
+    | IMAGE_EXTS
+    | AUDIO_EXTS
+    | VIDEO_EXTS
+    | ARCHIVE_EXTS
+    | OFFICE_PREVIEW_EXTS
+    | {".pdf", ".xlsx"}
+)
 
 _snapshot_hook: Callable[[dict[str, Any]], None] | None = None
 
