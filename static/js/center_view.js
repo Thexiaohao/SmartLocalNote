@@ -1,18 +1,20 @@
 /**
- * SmartLocalNote - Center Workspace Panel (V3 Super-Upgrade)
- * Preserves ALL V1/V2 features:
+ * SmartLocalNote - Center Workspace Panel (V4 Super-Upgrade)
+ * Preserves ALL V1/V2/V3 features:
  *  - Welcome state, typography controls (A-/A+/font family), snapshots rollback
  *  - Markdown / TXT editor & preview, atomic save, AI summary, doc:append
  *  - Excel pagination, inline cell edit, batch patch, search, sort, append row, CSV export, cell anchor pulse
- *  - PDF PyMuPDF HD viewer + zoom + native iframe toggle + annotation + companion note
- * Adds V3 capabilities:
- *  1. Unsaved Changes Guard + Auto-Save on Switch / Window Blur
- *  2. Multi-Format Readers: Archive (read-only virtual tree + in-memory preview), Image (zoomable),
- *     Audio/Video (native Range stream + timestamp anchor capsules), Office Preview, Generic Info Card
- *  3. Universal Portal Jump (app, url, pdf, excel, archive, media, file#heading) + Auto-Relocate + Backlinks Badge
- *  4. Preview-Mode WYSIWYG Selection Toolbar (.preview-format-bar) & Inline Block Double-Click Edit
- *  5. Precision Blue Drop Indicator (.drop-insert-line) & Smart Blank-Line Padding
- *  6. 3-Mode Segmented Pill (编辑 | 预览 | 🧠 脑图) + AI Polish Button
+ *  - PDF PyMuPDF HD viewer + zoom + native iframe toggle + annotation + companion note + AI mindmap
+ *  - Multi-Format Readers: Archive (read-only virtual tree + in-memory preview), Image (zoomable),
+ *    Audio/Video (native Range stream + timestamp anchor capsules), Office Preview, Generic Info Card
+ *  - Unsaved Changes Guard + Auto-Save on Switch / Window Blur, Backlinks Badge, Auto-Relocate
+ *  - Universal Portal Jump (app, url, pdf, excel, archive, media, file#heading) & Native SVG Mind Map
+ * Adds V4 capabilities:
+ *  1. Obsidian-Style Block Live Preview (live | source | mindmap, default 'live')
+ *  2. Rock-solid Precision Blue-Line Drop + Guaranteed Blank Lines in live & source modes
+ *  3. Interactive Inline Image & Video Poster Playback + Drag/Preset Width Resize
+ *  4. 80-step Undo/Redo History Stack + Ctrl+F Find & Replace + Ctrl+B/I/Slash/Z/Y/S Shortcuts
+ *  5. Updated full multi-format Welcome Copy & center:polish-doc listener
  *
  * Communicates strictly via store EventBus.
  */
@@ -149,17 +151,307 @@ function hasCompanionNote(doc) {
   return Boolean(doc && doc.companionPath);
 }
 
+function escapeRegExp(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Parse Markdown text into cohesive top-level blocks with 0-based inclusive line ranges.
+ * Splits cleanly on blank lines while keeping fenced code blocks, Markdown tables,
+ * GitHub callout blockquotes, and contiguous list items intact.
+ * @param {string} mdText
+ * @returns {Array<{ startLine: number, endLine: number, raw: string }>}
+ */
+export function parseMarkdownBlocks(mdText) {
+  const normalized = String(mdText ?? '').replace(/\r\n/g, '\n');
+  if (!normalized.trim()) return [];
+
+  const lines = normalized.split('\n');
+  const blocks = [];
+  const total = lines.length;
+  let i = 0;
+
+  const isFenceStart = (ln) => /^\s*(`{3,}|~{3,})/.test(ln);
+  const isHeading = (ln) => /^\s{0,3}#{1,6}(?:\s+|$)/.test(ln);
+  const isQuote = (ln) => /^\s*>/.test(ln);
+  const isListItem = (ln) => /^\s*(?:[-*+]|\d+[.)])\s+/.test(ln);
+  const isTableSep = (ln) => /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(ln) || /^\s*\|\s*:?-{3,}:?\s*\|\s*$/.test(ln);
+  const isTableStart = (idx) => {
+    const cur = lines[idx] || '';
+    if (!cur.includes('|')) return false;
+    if (/^\s*\|/.test(cur)) return true;
+    return idx + 1 < total && isTableSep(lines[idx + 1]);
+  };
+
+  while (i < total) {
+    if (lines[i].trim() === '') {
+      i += 1;
+      continue;
+    }
+
+    const line = lines[i];
+
+    // 1. Fenced code block (``` ... ``` or ~~~ ... ~~~)
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const fenceChar = fenceMatch[1][0];
+      const fenceLen = fenceMatch[1].length;
+      const closeRe = new RegExp(`^\\s*${fenceChar}{${fenceLen},}\\s*$`);
+      const start = i;
+      i += 1;
+      while (i < total && !closeRe.test(lines[i])) {
+        i += 1;
+      }
+      const end = i < total ? i : total - 1;
+      blocks.push({
+        startLine: start,
+        endLine: end,
+        raw: lines.slice(start, end + 1).join('\n'),
+      });
+      i = end + 1;
+      continue;
+    }
+
+    // 2. ATX Heading
+    if (isHeading(line)) {
+      blocks.push({
+        startLine: i,
+        endLine: i,
+        raw: line,
+      });
+      i += 1;
+      continue;
+    }
+
+    // 3. Blockquote / GitHub Callout (> ...)
+    if (isQuote(line)) {
+      const start = i;
+      while (i + 1 < total && isQuote(lines[i + 1])) {
+        i += 1;
+      }
+      blocks.push({
+        startLine: start,
+        endLine: i,
+        raw: lines.slice(start, i + 1).join('\n'),
+      });
+      i += 1;
+      continue;
+    }
+
+    // 4. Markdown Table (| ... |)
+    if (isTableStart(i)) {
+      const start = i;
+      while (
+        i + 1 < total &&
+        lines[i + 1].trim() !== '' &&
+        lines[i + 1].includes('|') &&
+        !isFenceStart(lines[i + 1]) &&
+        !isHeading(lines[i + 1]) &&
+        !isQuote(lines[i + 1])
+      ) {
+        i += 1;
+      }
+      blocks.push({
+        startLine: start,
+        endLine: i,
+        raw: lines.slice(start, i + 1).join('\n'),
+      });
+      i += 1;
+      continue;
+    }
+
+    // 5. Contiguous List Block (including indented continuation lines)
+    if (isListItem(line)) {
+      const start = i;
+      while (i + 1 < total) {
+        const next = lines[i + 1];
+        if (next.trim() === '') break;
+        if (isFenceStart(next) || isHeading(next) || isQuote(next)) break;
+        if (isListItem(next) || /^\s+\S/.test(next)) {
+          i += 1;
+        } else {
+          break;
+        }
+      }
+      blocks.push({
+        startLine: start,
+        endLine: i,
+        raw: lines.slice(start, i + 1).join('\n'),
+      });
+      i += 1;
+      continue;
+    }
+
+    // 6. Standard Paragraph / Multi-line prose block
+    const start = i;
+    while (i + 1 < total) {
+      const next = lines[i + 1];
+      if (next.trim() === '') break;
+      if (isFenceStart(next) || isHeading(next) || isQuote(next) || isListItem(next) || isTableStart(i + 1)) {
+        break;
+      }
+      i += 1;
+    }
+    blocks.push({
+      startLine: start,
+      endLine: i,
+      raw: lines.slice(start, i + 1).join('\n'),
+    });
+    i += 1;
+  }
+
+  return blocks;
+}
+
+function injectV4CenterStyles() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById('sln-center-v4-style')) return;
+  const style = document.createElement('style');
+  style.id = 'sln-center-v4-style';
+  style.textContent = `
+    :where(.lp-container) {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 20px 26px 80px;
+      min-height: 100%;
+    }
+    :where(.lp-block) {
+      position: relative;
+      border-radius: var(--radius-control);
+      padding: 4px 8px;
+      margin: 0 -8px;
+      transition: opacity var(--dur-fast) var(--ease-apple),
+                  transform var(--dur-fast) var(--ease-apple),
+                  background-color var(--dur-fast) var(--ease-apple);
+    }
+    :where(.lp-block:not(.is-editing)):hover {
+      background: var(--bg-subtle);
+    }
+    :where(.lp-block.is-editing) {
+      background: var(--bg-island);
+      box-shadow: 0 0 0 2px var(--accent-soft), inset 0 0 0 1px var(--accent);
+      padding: 8px 10px;
+    }
+    :where(.lp-block-view) > :first-child { margin-top: 0; }
+    :where(.lp-block-view) > :last-child { margin-bottom: 0; }
+    .lp-block.is-editing .lp-block-editor {
+      width: 100%;
+      display: block;
+      min-height: 26px;
+      border: none;
+      outline: none;
+      resize: none;
+      overflow: hidden;
+      background: transparent;
+      color: var(--text-primary);
+      font-family: var(--doc-font-family);
+      font-size: var(--doc-font-size);
+      line-height: 1.72;
+      padding: 0;
+      margin: 0;
+    }
+    .media-embed-card.is-playing .video-play-badge {
+      display: none !important;
+    }
+    .media-embed-card.is-resizing {
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    :where(.lp-add-block-zone) {
+      margin-top: 8px;
+      padding: 14px 12px;
+      border-radius: var(--radius-control);
+      color: var(--text-tertiary);
+      font-size: 13px;
+      cursor: text;
+      border: 1px dashed transparent;
+      transition: opacity var(--dur-fast) var(--ease-apple),
+                  background-color var(--dur-fast) var(--ease-apple),
+                  border-color var(--dur-fast) var(--ease-apple);
+    }
+    :where(.lp-add-block-zone):hover {
+      background: var(--bg-subtle);
+      border-color: var(--border-hairline);
+      color: var(--text-secondary);
+    }
+    @keyframes slnJustDroppedPulse {
+      0% { opacity: 0.55; transform: scale(0.985); }
+      40% { opacity: 1; transform: scale(1.008); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+    :where(.lp-block.just-dropped) {
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 2px var(--accent);
+      animation: slnJustDroppedPulse 900ms var(--ease-spring);
+    }
+    :where(.doc-find-bar) {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 7px 14px;
+      border-bottom: 1px solid var(--border-hairline);
+      background: var(--bg-glass);
+      backdrop-filter: var(--blur-glass);
+      -webkit-backdrop-filter: var(--blur-glass);
+      flex-shrink: 0;
+      animation: islandFadeIn var(--dur-fast) var(--ease-apple);
+    }
+    :where(.doc-find-hl) {
+      background: rgba(255, 214, 10, 0.42);
+      color: inherit;
+      border-radius: 3px;
+      padding: 0 1px;
+    }
+    :where(.doc-find-hl.is-active) {
+      background: var(--warning);
+      color: #1D1D1F;
+      box-shadow: 0 0 0 2px rgba(255, 149, 0, 0.35);
+    }
+    :where(.media-embed-card) {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      max-width: 100%;
+      margin: 6px 0;
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-subtle);
+      overflow: hidden;
+    }
+    :where(.media-embed-card img),
+    :where(.media-embed-card video) {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 520px;
+      object-fit: contain;
+    }
+    :where(.media-resize-handle) {
+      cursor: ew-resize;
+      touch-action: none;
+      user-select: none;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 /**
  * Initialize Center Workspace Panel.
  * @param {HTMLElement} containerEl
  */
 export function initCenterView(containerEl) {
   if (!containerEl) return;
+  injectV4CenterStyles();
 
   const state = {
     activeDoc: null,
     dirty: false,
-    mdMode: 'preview', // 'edit' | 'preview' | 'mindmap'
+    mdMode: 'live', // 'live' | 'source' | 'mindmap'
+    editingBlockIdx: null,
+    editingBlockRange: null, // { startLine, endLine }
+    editingDraftNewBlock: false,
+    justDroppedTarget: null, // { lineIdx, previewPrefix }
     loading: false,
     saving: false,
     hasOpenedOnce: false,
@@ -170,6 +462,20 @@ export function initCenterView(containerEl) {
     excelSearchTimer: null,
     companionOpen: false, // collapsible companion note for archive/image/office/generic
     backlinks: { count: 0, items: [] },
+    history: {
+      path: '',
+      undoStack: [],
+      redoStack: [],
+      typingBaseline: null,
+      timer: null,
+    },
+    findBar: {
+      open: false,
+      query: '',
+      replaceText: '',
+      matches: [],
+      activeIdx: -1,
+    },
     excel: {
       sheets: [],
       currentSheet: '',
@@ -250,13 +556,16 @@ export function initCenterView(containerEl) {
       line.className = 'drop-insert-line';
       line.style.cssText = [
         'position:fixed',
+        'top:0px',
+        'left:0px',
+        'right:auto',
         'height:2.5px',
         'background:var(--accent)',
         'border-radius:9999px',
         'box-shadow:0 0 8px rgba(0,122,255,0.5)',
         'pointer-events:none',
         'z-index:90',
-        'transition:opacity 120ms ease',
+        'transition:transform 90ms var(--ease-apple), opacity 120ms ease',
       ].join(';');
       document.body.appendChild(line);
     }
@@ -636,8 +945,8 @@ export function initCenterView(containerEl) {
             ${icon('book-open', 24)}
           </div>
           <h2 class="empty-title" style="font-size:16px;">欢迎使用 SmartLocalNote</h2>
-          <p class="empty-desc" style="max-width:350px;">
-            本地优先的苹果风学习与办公工作台。支持 Markdown / 脑图编辑、Excel 原位编辑、PDF 高清双栏、压缩包免解压预览与音视频时间戳锚点。
+          <p class="empty-desc" style="max-width:380px;line-height:1.65;">
+            本地优先的苹果风学习与办公工作台。全面支持 Markdown、TXT/代码、Excel 表格、PDF 高清阅览、ZIP 压缩包免解压预览、图片与音视频、Word/PPT 速览。
           </p>
           <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:10px;">
             <button type="button" class="pill-btn pill-btn-primary" data-action="welcome-new-note">
@@ -797,7 +1106,421 @@ export function initCenterView(containerEl) {
   }
 
   // =========================================================================
-  // Rendering: Markdown / TXT Mode (3-mode: Edit | Preview | 🧠 MindMap + Polish)
+  // Undo / Redo History Stack (80 snapshots) & In-Doc Find / Replace Bar
+  // =========================================================================
+  const MAX_HISTORY_SNAPSHOTS = 80;
+
+  function resetHistory(docPath = '') {
+    if (state.history.timer) {
+      window.clearTimeout(state.history.timer);
+      state.history.timer = null;
+    }
+    state.history = {
+      path: docPath,
+      undoStack: [],
+      redoStack: [],
+      typingBaseline: null,
+      timer: null,
+    };
+    updateMdUndoRedoButtons();
+  }
+
+  function flushPendingUndo() {
+    if (state.history.timer) {
+      window.clearTimeout(state.history.timer);
+      state.history.timer = null;
+    }
+    const baseline = state.history.typingBaseline;
+    state.history.typingBaseline = null;
+    if (baseline !== null && state.activeDoc) {
+      const current = String(state.activeDoc.content ?? '');
+      if (baseline !== current) {
+        const stack = state.history.undoStack;
+        if (stack.length === 0 || stack[stack.length - 1] !== baseline) {
+          stack.push(baseline);
+          if (stack.length > MAX_HISTORY_SNAPSHOTS) {
+            stack.shift();
+          }
+        }
+        state.history.redoStack = [];
+      }
+    }
+  }
+
+  function pushUndoSnapshot(prevContent, { immediate = true } = {}) {
+    if (!state.activeDoc || (state.activeDoc.type !== 'markdown' && state.activeDoc.type !== 'text')) return;
+    const prevStr = String(prevContent ?? '');
+
+    if (!immediate) {
+      if (state.history.typingBaseline === null) {
+        state.history.typingBaseline = prevStr;
+        state.history.redoStack = [];
+      }
+      if (state.history.timer) {
+        window.clearTimeout(state.history.timer);
+      }
+      state.history.timer = window.setTimeout(() => {
+        flushPendingUndo();
+        updateMdUndoRedoButtons();
+      }, 450);
+      updateMdUndoRedoButtons();
+      return;
+    }
+
+    flushPendingUndo();
+    const stack = state.history.undoStack;
+    if (stack.length === 0 || stack[stack.length - 1] !== prevStr) {
+      stack.push(prevStr);
+      if (stack.length > MAX_HISTORY_SNAPSHOTS) {
+        stack.shift();
+      }
+    }
+    state.history.redoStack = [];
+    updateMdUndoRedoButtons();
+  }
+
+  function updateMdUndoRedoButtons() {
+    const canUndo = state.history.undoStack.length > 0 || state.history.typingBaseline !== null;
+    const canRedo = state.history.redoStack.length > 0;
+    const undoBtn = containerEl.querySelector('[data-action="md-undo"]');
+    const redoBtn = containerEl.querySelector('[data-action="md-redo"]');
+    if (undoBtn) undoBtn.disabled = !canUndo;
+    if (redoBtn) redoBtn.disabled = !canRedo;
+  }
+
+  function performUndo() {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return false;
+    flushPendingUndo();
+    if (state.history.undoStack.length === 0) {
+      updateMdUndoRedoButtons();
+      return false;
+    }
+    const prevContent = state.history.undoStack.pop();
+    const currentContent = String(doc.content ?? '');
+    state.history.redoStack.push(currentContent);
+    if (state.history.redoStack.length > MAX_HISTORY_SNAPSHOTS) {
+      state.history.redoStack.shift();
+    }
+    doc.content = prevContent;
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.editingDraftNewBlock = false;
+    store.state.activeDocumentText = prevContent;
+    if (state.findBar.open) computeFindMatches();
+    renderMarkdownMode();
+    showToast('已撤回', 'info', { duration: 1500 });
+    return true;
+  }
+
+  function performRedo() {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return false;
+    flushPendingUndo();
+    if (state.history.redoStack.length === 0) {
+      updateMdUndoRedoButtons();
+      return false;
+    }
+    const nextContent = state.history.redoStack.pop();
+    const currentContent = String(doc.content ?? '');
+    state.history.undoStack.push(currentContent);
+    if (state.history.undoStack.length > MAX_HISTORY_SNAPSHOTS) {
+      state.history.undoStack.shift();
+    }
+    doc.content = nextContent;
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.editingDraftNewBlock = false;
+    store.state.activeDocumentText = nextContent;
+    if (state.findBar.open) computeFindMatches();
+    renderMarkdownMode();
+    showToast('已重做', 'info', { duration: 1500 });
+    return true;
+  }
+
+  function computeFindMatches() {
+    const fb = state.findBar;
+    const doc = state.activeDoc;
+    const query = String(fb.query || '');
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text') || !query) {
+      fb.matches = [];
+      fb.activeIdx = -1;
+      return;
+    }
+    const haystack = String(doc.content || '').toLowerCase();
+    const needle = query.toLowerCase();
+    const matches = [];
+    let pos = 0;
+    while (pos <= haystack.length - needle.length) {
+      const idx = haystack.indexOf(needle, pos);
+      if (idx === -1) break;
+      matches.push({ start: idx, end: idx + needle.length });
+      pos = idx + Math.max(1, needle.length);
+      if (matches.length >= 2000) break;
+    }
+    fb.matches = matches;
+    if (matches.length === 0) {
+      fb.activeIdx = -1;
+    } else if (fb.activeIdx < 0 || fb.activeIdx >= matches.length) {
+      fb.activeIdx = 0;
+    }
+  }
+
+  function clearLiveFindHighlights() {
+    const lp = containerEl.querySelector('.lp-container');
+    if (!lp) return;
+    const marks = Array.from(lp.querySelectorAll('mark.doc-find-hl'));
+    for (const mk of marks) {
+      const parent = mk.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(document.createTextNode(mk.textContent || ''), mk);
+      parent.normalize();
+    }
+  }
+
+  function applyLiveFindHighlights({ scrollToActive = false } = {}) {
+    clearLiveFindHighlights();
+    const fb = state.findBar;
+    const query = String(fb.query || '');
+    const lp = containerEl.querySelector('.lp-container');
+    if (!lp || !query || state.mdMode !== 'live') return;
+
+    const needle = query.toLowerCase();
+    const views = Array.from(lp.querySelectorAll('.lp-block-view'));
+    const hlNodes = [];
+
+    for (const view of views) {
+      const walker = document.createTreeWalker(view, NodeFilter.SHOW_TEXT);
+      const textNodes = [];
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.nodeValue) continue;
+        const pTag = node.parentElement?.tagName;
+        if (pTag === 'SCRIPT' || pTag === 'STYLE') continue;
+        textNodes.push(node);
+      }
+
+      for (const tNode of textNodes) {
+        const val = tNode.nodeValue;
+        const lowerVal = val.toLowerCase();
+        if (!lowerVal.includes(needle)) continue;
+        const frag = document.createDocumentFragment();
+        let last = 0;
+        let idx;
+        while ((idx = lowerVal.indexOf(needle, last)) !== -1) {
+          if (idx > last) {
+            frag.appendChild(document.createTextNode(val.slice(last, idx)));
+          }
+          const mk = document.createElement('mark');
+          mk.className = 'doc-find-hl';
+          mk.textContent = val.slice(idx, idx + needle.length);
+          hlNodes.push(mk);
+          frag.appendChild(mk);
+          last = idx + needle.length;
+        }
+        if (last < val.length) {
+          frag.appendChild(document.createTextNode(val.slice(last)));
+        }
+        tNode.replaceWith(frag);
+      }
+    }
+
+    if (hlNodes.length > 0 && fb.activeIdx >= 0) {
+      const targetIdx = Math.min(hlNodes.length - 1, fb.activeIdx);
+      const activeMk = hlNodes[targetIdx];
+      activeMk.classList.add('is-active');
+      if (scrollToActive) {
+        activeMk.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    } else if (scrollToActive && fb.matches.length > 0 && fb.activeIdx >= 0) {
+      const m = fb.matches[fb.activeIdx];
+      const lineNum = String(state.activeDoc?.content || '').slice(0, m.start).split('\n').length - 1;
+      const blkEl = Array.from(lp.querySelectorAll('.lp-block[data-md-start]')).find((b) => {
+        const s = Number(b.dataset.mdStart);
+        const e = Number(b.dataset.mdEnd);
+        return lineNum >= s && lineNum <= e;
+      });
+      blkEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  function syncSourceFindSelection({ focusEditor = false } = {}) {
+    if (state.mdMode !== 'source') return;
+    const fb = state.findBar;
+    const ta = containerEl.querySelector('.md-editor:not([data-role])');
+    if (!ta || fb.matches.length === 0 || fb.activeIdx < 0) return;
+    const m = fb.matches[fb.activeIdx];
+    if (focusEditor) {
+      ta.focus();
+    }
+    if (focusEditor || document.activeElement === ta) {
+      ta.setSelectionRange(m.start, m.end);
+    }
+    const lineIdx = ta.value.slice(0, m.start).split('\n').length - 1;
+    const cs = window.getComputedStyle(ta);
+    const lh = Number.parseFloat(cs.lineHeight) || (Number.parseFloat(cs.fontSize) || 15) * 1.7;
+    const targetTop = Math.max(0, lineIdx * lh - ta.clientHeight * 0.35);
+    ta.scrollTo({ top: targetTop, behavior: 'smooth' });
+  }
+
+  function updateFindBarUi({ scrollToActive = false, focusEditor = false } = {}) {
+    computeFindMatches();
+    const fb = state.findBar;
+    const countEl = containerEl.querySelector('[data-role="doc-find-count"]');
+    if (countEl) {
+      countEl.textContent = fb.matches.length > 0 ? `${fb.activeIdx + 1} / ${fb.matches.length}` : '0 / 0';
+    }
+    if (state.mdMode === 'live') {
+      applyLiveFindHighlights({ scrollToActive });
+    } else if (state.mdMode === 'source' && scrollToActive) {
+      syncSourceFindSelection({ focusEditor });
+    }
+  }
+
+  function renderFindBarHtml() {
+    if (!state.findBar.open) return '';
+    const fb = state.findBar;
+    const countText = fb.matches.length > 0 ? `${fb.activeIdx + 1} / ${fb.matches.length}` : '0 / 0';
+    return `
+      <div class="doc-find-bar" data-role="doc-find-bar">
+        <div style="display:inline-flex;align-items:center;gap:6px;flex:1 1 220px;min-width:180px;">
+          <span style="color:var(--text-tertiary);display:inline-flex;">${icon('search', 14)}</span>
+          <input
+            type="text"
+            class="apple-input"
+            data-role="doc-find-input"
+            placeholder="查找文档内容…"
+            value="${escapeHtml(fb.query)}"
+            style="height:28px;padding:3px 10px;font-size:12.5px;min-width:120px;"
+          />
+          <span data-role="doc-find-count" style="font-size:11.5px;font-family:var(--font-mono);color:var(--text-secondary);min-width:46px;text-align:center;white-space:nowrap;">${countText}</span>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="find-prev" title="上一个 (Shift+Enter)" style="width:26px;padding:0;">↑</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="find-next" title="下一个 (Enter)" style="width:26px;padding:0;">↓</button>
+        </div>
+        <div style="display:inline-flex;align-items:center;gap:6px;flex:1 1 220px;min-width:180px;">
+          <input
+            type="text"
+            class="apple-input"
+            data-role="doc-replace-input"
+            placeholder="替换为…"
+            value="${escapeHtml(fb.replaceText)}"
+            style="height:28px;padding:3px 10px;font-size:12.5px;min-width:110px;"
+          />
+          <button type="button" class="pill-btn pill-btn-sm" data-action="find-replace-one">替换</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="find-replace-all">全部替换</button>
+          <button type="button" class="icon-pill" data-action="find-close" title="关闭 (Esc)" style="width:26px;height:26px;">
+            ${icon('x', 13)}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function openFindBar() {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    if (state.mdMode === 'mindmap') {
+      state.mdMode = 'live';
+    }
+    const prevSel = window.getSelection()?.toString()?.trim();
+    if (!state.findBar.open && prevSel && !prevSel.includes('\n') && prevSel.length <= 80) {
+      state.findBar.query = prevSel;
+    }
+    state.findBar.open = true;
+    computeFindMatches();
+    renderMarkdownMode();
+    window.requestAnimationFrame(() => {
+      const inp = containerEl.querySelector('[data-role="doc-find-input"]');
+      if (inp) {
+        inp.focus();
+        inp.select();
+      }
+      updateFindBarUi({ scrollToActive: Boolean(state.findBar.query) });
+    });
+  }
+
+  function closeFindBar() {
+    if (!state.findBar.open) return;
+    state.findBar.open = false;
+    clearLiveFindHighlights();
+    const bar = containerEl.querySelector('[data-role="doc-find-bar"]');
+    if (bar) bar.remove();
+  }
+
+  function stepFindMatch(delta = 1) {
+    const fb = state.findBar;
+    computeFindMatches();
+    if (fb.matches.length === 0) {
+      updateFindBarUi();
+      return;
+    }
+    fb.activeIdx = (fb.activeIdx + delta + fb.matches.length) % fb.matches.length;
+    updateFindBarUi({ scrollToActive: true, focusEditor: false });
+  }
+
+  function replaceCurrentMatch() {
+    const doc = state.activeDoc;
+    const fb = state.findBar;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    computeFindMatches();
+    if (fb.matches.length === 0 || fb.activeIdx < 0) {
+      showToast('未找到可替换的内容', 'warning', { duration: 1600 });
+      return;
+    }
+    const m = fb.matches[fb.activeIdx];
+    const content = String(doc.content || '');
+    pushUndoSnapshot(content, { immediate: true });
+    const rep = String(fb.replaceText ?? '');
+    const nextContent = `${content.slice(0, m.start)}${rep}${content.slice(m.end)}`;
+    doc.content = nextContent;
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.editingDraftNewBlock = false;
+    store.state.activeDocumentText = nextContent;
+    computeFindMatches();
+    renderMarkdownMode();
+    window.requestAnimationFrame(() => {
+      updateFindBarUi({ scrollToActive: true });
+      containerEl.querySelector('[data-role="doc-replace-input"]')?.focus();
+    });
+  }
+
+  function replaceAllMatches() {
+    const doc = state.activeDoc;
+    const fb = state.findBar;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    computeFindMatches();
+    if (fb.matches.length === 0) {
+      showToast('未找到可替换的内容', 'warning', { duration: 1600 });
+      return;
+    }
+    const count = fb.matches.length;
+    const content = String(doc.content || '');
+    const rep = String(fb.replaceText ?? '');
+    pushUndoSnapshot(content, { immediate: true });
+    let result = '';
+    let cursor = 0;
+    for (const m of fb.matches) {
+      result += content.slice(cursor, m.start) + rep;
+      cursor = m.end;
+    }
+    result += content.slice(cursor);
+    doc.content = result;
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.editingDraftNewBlock = false;
+    store.state.activeDocumentText = result;
+    computeFindMatches();
+    renderMarkdownMode();
+    showToast(`已全部替换 ${count} 处`, 'success', { duration: 2000 });
+  }
+
+  // =========================================================================
+  // Rendering: Markdown / TXT Mode (3-mode: 实时阅览 | 纯源码 | 🧠 脑图)
   // =========================================================================
   function mountMindMapStage() {
     const doc = state.activeDoc;
@@ -808,6 +1531,7 @@ export function initCenterView(containerEl) {
       markdown: doc.content || '',
       docName: doc.name,
       onUpdateMarkdown(newMd) {
+        pushUndoSnapshot(doc.content, { immediate: true });
         doc.content = String(newMd ?? '');
         state.dirty = true;
         store.state.activeDocumentText = doc.content;
@@ -857,8 +1581,11 @@ export function initCenterView(containerEl) {
               copyInternal(outline, '已复制 AI 脑图大纲');
             });
             card.querySelector('#ai-mm-apply')?.addEventListener('click', () => {
+              pushUndoSnapshot(doc.content, { immediate: true });
               doc.content = outline;
               state.dirty = true;
+              state.editingBlockIdx = null;
+              state.editingBlockRange = null;
               store.state.activeDocumentText = outline;
               closeSheet();
               renderMarkdownMode();
@@ -871,20 +1598,215 @@ export function initCenterView(containerEl) {
     });
   }
 
+  function syncBlockEditorHeight(ta) {
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.max(28, ta.scrollHeight)}px`;
+  }
+
+  function renderLiveBlocksHtml(doc) {
+    const blocks = parseMarkdownBlocks(doc.content || '');
+    const editingIdx = state.editingBlockIdx;
+    const draftNew = state.editingDraftNewBlock && editingIdx === blocks.length;
+
+    const blocksHtml = blocks
+      .map((blk, idx) => {
+        const isEditing = editingIdx === idx;
+        if (isEditing) {
+          state.editingBlockRange = { startLine: blk.startLine, endLine: blk.endLine };
+          return `
+            <div class="lp-block is-editing" data-block-idx="${idx}" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
+              <textarea class="lp-block-editor" data-block-idx="${idx}" spellcheck="false" rows="1">${escapeHtml(blk.raw)}</textarea>
+            </div>
+          `;
+        }
+        return `
+          <div class="lp-block" data-block-idx="${idx}" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
+            <div class="lp-block-view" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
+              ${renderMarkdownSafe(blk.raw, { withLineMap: false })}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    let draftHtml = '';
+    if (draftNew) {
+      const totalLines = getMdLines().length;
+      const startLine = Math.max(0, totalLines - 1);
+      state.editingBlockRange = { startLine, endLine: startLine };
+      draftHtml = `
+        <div class="lp-block is-editing" data-block-idx="${blocks.length}" data-md-start="${startLine}" data-md-end="${startLine}" data-draft-block="1">
+          <textarea class="lp-block-editor" data-block-idx="${blocks.length}" spellcheck="false" rows="1" placeholder="输入内容，支持 # 标题、- 列表、[[文件名]] 胶囊…"></textarea>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="md-scroll-area">
+        <div class="lp-container md-preview">
+          ${blocksHtml}
+          ${draftHtml}
+          <div class="lp-add-block-zone" data-action="lp-add-block" role="button" tabindex="0">
+            ${blocks.length === 0 && !draftNew ? '+ 点击此处开始书写笔记（支持 # 标题、代码块、[[文件锚点]]）…' : '+ 点击此处继续书写…'}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function focusActiveBlockEditor(cursorMode = 'end') {
+    window.requestAnimationFrame(() => {
+      const ta = containerEl.querySelector('.lp-block-editor');
+      if (!ta) return;
+      syncBlockEditorHeight(ta);
+      ta.focus();
+      const len = ta.value.length;
+      if (cursorMode === 'start') {
+        ta.setSelectionRange(0, 0);
+      } else if (typeof cursorMode === 'number' && Number.isFinite(cursorMode)) {
+        const pos = Math.max(0, Math.min(len, cursorMode));
+        ta.setSelectionRange(pos, pos);
+      } else {
+        ta.setSelectionRange(len, len);
+      }
+    });
+  }
+
+  function cleanupEmptyTrailingDraftIfNeeded() {
+    if (!state.editingDraftNewBlock || !state.activeDoc) return;
+    state.editingDraftNewBlock = false;
+    const raw = String(state.activeDoc.content ?? '').replace(/\r\n/g, '\n');
+    const blocks = parseMarkdownBlocks(raw);
+    if (blocks.length === 0) {
+      state.activeDoc.content = '';
+    } else {
+      const lastEnd = blocks[blocks.length - 1].endLine;
+      const lines = raw.split('\n');
+      if (lines.length > lastEnd + 2) {
+        state.activeDoc.content = `${lines.slice(0, lastEnd + 1).join('\n')}\n`;
+      }
+    }
+    store.state.activeDocumentText = state.activeDoc.content;
+  }
+
+  function commitActiveBlock({ reRender = true } = {}) {
+    if (state.editingBlockIdx === null && !state.editingDraftNewBlock) return false;
+    const doc = state.activeDoc;
+    const ta = containerEl.querySelector('.lp-block-editor');
+    if (doc && ta) {
+      const val = ta.value.replace(/\r\n/g, '\n');
+      if (state.editingDraftNewBlock && !val.trim()) {
+        cleanupEmptyTrailingDraftIfNeeded();
+      } else {
+        state.editingDraftNewBlock = false;
+        if (!val.trim() && state.editingBlockRange) {
+          // If an existing block was cleared completely, collapse surrounding redundant blank lines cleanly
+          const { startLine, endLine } = state.editingBlockRange;
+          const lines = getMdLines();
+          let delStart = startLine;
+          let delCount = endLine - startLine + 1;
+          if (delStart > 0 && lines[delStart - 1].trim() === '' && delStart + delCount < lines.length && lines[delStart + delCount].trim() === '') {
+            delCount += 1;
+          }
+          lines.splice(delStart, delCount);
+          doc.content = lines.join('\n').replace(/^\n+/, '');
+          store.state.activeDocumentText = doc.content;
+        }
+      }
+    } else {
+      state.editingDraftNewBlock = false;
+    }
+
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    if (reRender && doc && (doc.type === 'markdown' || doc.type === 'text') && state.mdMode === 'live') {
+      renderMarkdownMode();
+    }
+    return true;
+  }
+
+  function activateBlockByStartLine(targetStartLine, cursorMode = 'end') {
+    const doc = state.activeDoc;
+    if (!doc || state.mdMode !== 'live') return;
+    const prevRangeStart = state.editingBlockRange?.startLine ?? Infinity;
+    const prevLineCount = getMdLines().length;
+    commitActiveBlock({ reRender: false });
+    const lineDelta = getMdLines().length - prevLineCount;
+    const adjustedLine =
+      lineDelta !== 0 && prevRangeStart < targetStartLine
+        ? Math.max(0, targetStartLine + lineDelta)
+        : targetStartLine;
+    const blocks = parseMarkdownBlocks(doc.content || '');
+    let idx = blocks.findIndex((b) => b.startLine === adjustedLine);
+    if (idx === -1) {
+      idx = blocks.findIndex((b) => adjustedLine >= b.startLine && adjustedLine <= b.endLine);
+    }
+    if (idx === -1) return;
+    state.editingBlockIdx = idx;
+    state.editingDraftNewBlock = false;
+    renderMarkdownMode();
+    focusActiveBlockEditor(cursorMode);
+  }
+
+  function activateBlockByIndex(targetIdx, cursorMode = 'end') {
+    const doc = state.activeDoc;
+    if (!doc || state.mdMode !== 'live') return;
+    commitActiveBlock({ reRender: false });
+    const blocks = parseMarkdownBlocks(doc.content || '');
+    if (targetIdx < 0 || targetIdx >= blocks.length) {
+      renderMarkdownMode();
+      return;
+    }
+    state.editingBlockIdx = targetIdx;
+    state.editingDraftNewBlock = false;
+    renderMarkdownMode();
+    focusActiveBlockEditor(cursorMode);
+  }
+
+  function appendNewBlockAndFocus() {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    commitActiveBlock({ reRender: false });
+    const blocks = parseMarkdownBlocks(doc.content || '');
+    const normalized = String(doc.content ?? '').replace(/\r\n/g, '\n');
+    if (blocks.length > 0 && !normalized.endsWith('\n\n')) {
+      const trimmedEnd = normalized.replace(/\n+$/g, '');
+      doc.content = `${trimmedEnd}\n\n`;
+    } else if (!normalized.trim()) {
+      doc.content = '';
+    }
+    state.editingBlockIdx = blocks.length;
+    state.editingDraftNewBlock = true;
+    store.state.activeDocumentText = doc.content;
+    renderMarkdownMode();
+    focusActiveBlockEditor('start');
+  }
+
   function renderMarkdownMode() {
     hideFormatBar();
     removeDropInsertLine();
     const doc = state.activeDoc;
+    if (!doc) return;
     const isMd = doc.type === 'markdown';
     if (!isMd && state.mdMode === 'mindmap') {
-      state.mdMode = 'preview';
+      state.mdMode = 'live';
+    }
+    if (!['live', 'source', 'mindmap'].includes(state.mdMode)) {
+      state.mdMode = 'live';
     }
     const mode = state.mdMode;
-    const isEdit = mode === 'edit';
-    const isPreview = mode === 'preview';
+    const isLive = mode === 'live';
+    const isSource = mode === 'source';
     const isMindmap = mode === 'mindmap';
-    const segIdx = isMd ? (isEdit ? 0 : isPreview ? 1 : 2) : (isEdit ? 0 : 1);
+    const segIdx = isMd ? (isLive ? 0 : isSource ? 1 : 2) : (isLive ? 0 : 1);
     const thumbWidth = isMd ? 'calc(33.333% - 3px)' : 'calc(50% - 3px)';
+
+    const prevScrollEl = containerEl.querySelector('.md-scroll-area') || containerEl.querySelector('.md-editor:not([data-role])');
+    const prevScrollTop = prevScrollEl ? prevScrollEl.scrollTop : 0;
+
+    const canUndo = state.history.undoStack.length > 0 || state.history.typingBaseline !== null;
+    const canRedo = state.history.redoStack.length > 0;
 
     containerEl.innerHTML = `
       <div class="center-toolbar">
@@ -907,11 +1829,11 @@ export function initCenterView(containerEl) {
         <div class="center-toolbar-group">
           <div class="segmented-pill" data-seg="md-mode" role="tablist" aria-label="文档模式切换">
             <div class="segmented-thumb" style="width:${thumbWidth}; transform:translateX(${segIdx * 100}%);"></div>
-            <button type="button" class="segmented-btn ${isEdit ? 'is-active' : ''}" data-md-mode="edit" role="tab" aria-selected="${isEdit}">
-              编辑
+            <button type="button" class="segmented-btn ${isLive ? 'is-active' : ''}" data-md-mode="live" role="tab" aria-selected="${isLive}">
+              实时阅览
             </button>
-            <button type="button" class="segmented-btn ${isPreview ? 'is-active' : ''}" data-md-mode="preview" role="tab" aria-selected="${isPreview}">
-              预览
+            <button type="button" class="segmented-btn ${isSource ? 'is-active' : ''}" data-md-mode="source" role="tab" aria-selected="${isSource}">
+              纯源码
             </button>
             ${
               isMd
@@ -920,6 +1842,11 @@ export function initCenterView(containerEl) {
                   </button>`
                 : ''
             }
+          </div>
+
+          <div style="display:inline-flex;align-items:center;gap:3px;">
+            <button type="button" class="pill-btn pill-btn-sm" data-action="md-undo" title="撤回 (Ctrl+Z)" ${canUndo ? '' : 'disabled'} style="padding:0 8px;min-width:28px;">↶</button>
+            <button type="button" class="pill-btn pill-btn-sm" data-action="md-redo" title="重做 (Ctrl+Y / Ctrl+Shift+Z)" ${canRedo ? '' : 'disabled'} style="padding:0 8px;min-width:28px;">↷</button>
           </div>
 
           ${renderTypographyControlsHtml(false)}
@@ -939,11 +1866,13 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
+      ${renderFindBarHtml()}
+
       ${
         isMindmap
           ? `<div data-role="mindmap-stage" style="flex:1 1 auto; min-height:0; min-width:0; position:relative; overflow:hidden; display:flex; flex-direction:column;"></div>`
-          : isPreview
-          ? `<div class="md-scroll-area"><div class="md-preview">${renderMarkdownSafe(doc.content || '', { withLineMap: true })}</div></div>`
+          : isLive
+          ? renderLiveBlocksHtml(doc)
           : `<div style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:column; overflow:hidden;"><textarea class="md-editor" spellcheck="false" placeholder="随时记录想法、笔记或输入 [[文件名.pdf#page=1]] / [[表格.xlsx#Sheet1!C4]] / [[app:应用名]]...">${escapeHtml(doc.content || '')}</textarea></div>`
       }
     `;
@@ -951,6 +1880,44 @@ export function initCenterView(containerEl) {
 
     if (isMindmap) {
       mountMindMapStage();
+    } else if (isLive) {
+      const nextScrollEl = containerEl.querySelector('.md-scroll-area');
+      if (nextScrollEl && prevScrollTop > 0) {
+        nextScrollEl.scrollTop = prevScrollTop;
+      }
+      const activeTa = containerEl.querySelector('.lp-block-editor');
+      if (activeTa) {
+        syncBlockEditorHeight(activeTa);
+      }
+      if (state.justDroppedTarget) {
+        const dropInfo = state.justDroppedTarget;
+        state.justDroppedTarget = null;
+        const lpBlocks = Array.from(containerEl.querySelectorAll('.lp-container .lp-block'));
+        let targetBlk =
+          (Number.isFinite(dropInfo.actualStartLine)
+            ? lpBlocks.find((b) => Number(b.dataset.mdStart) === dropInfo.actualStartLine)
+            : null) ||
+          (dropInfo.prefix
+            ? lpBlocks.find((b) => (b.textContent || '').includes(dropInfo.prefix))
+            : null) ||
+          lpBlocks.find((b) => Number(b.dataset.mdStart) >= dropInfo.lineIdx) ||
+          lpBlocks[lpBlocks.length - 1];
+        if (targetBlk) {
+          targetBlk.classList.add('just-dropped');
+          targetBlk.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          window.setTimeout(() => {
+            targetBlk.classList.remove('just-dropped');
+          }, 1300);
+        }
+      }
+      if (state.findBar.open && state.findBar.query) {
+        applyLiveFindHighlights({ scrollToActive: false });
+      }
+    } else if (isSource) {
+      const ta = containerEl.querySelector('.md-editor:not([data-role])');
+      if (ta && prevScrollTop > 0) {
+        ta.scrollTop = prevScrollTop;
+      }
     }
   }
 
@@ -963,6 +1930,7 @@ export function initCenterView(containerEl) {
     if (saveBtn) {
       saveBtn.classList.toggle('pill-btn-primary', Boolean(state.dirty));
     }
+    updateMdUndoRedoButtons();
   }
 
   // =========================================================================
@@ -1047,8 +2015,11 @@ export function initCenterView(containerEl) {
             });
             footerEl.querySelector('#polish-apply')?.addEventListener('click', () => {
               const latest = bodyEl?.querySelector('[data-role="polish-raw"]')?.value ?? polished;
+              pushUndoSnapshot(doc.content, { immediate: true });
               doc.content = latest;
               state.dirty = true;
+              state.editingBlockIdx = null;
+              state.editingBlockRange = null;
               store.state.activeDocumentText = latest;
               closeSheet();
               renderMarkdownMode();
@@ -1064,17 +2035,26 @@ export function initCenterView(containerEl) {
     });
   }
 
+  function triggerAiPolish() {
+    openAiPolishSheet();
+  }
+
   // =========================================================================
-  // Pain Point #7: Preview-Mode WYSIWYG Selection Toolbar & Inline Block Edit
+  // Pain Point #7: Live-Preview WYSIWYG Selection Toolbar
   // =========================================================================
   function getMdLines() {
     return String(state.activeDoc?.content ?? '').replace(/\r\n/g, '\n').split('\n');
   }
 
-  function commitMdContentChange(nextContent, { toastMsg = '' } = {}) {
+  function commitMdContentChange(nextContent, { toastMsg = '', pushUndo = true } = {}) {
     if (!state.activeDoc) return;
+    if (pushUndo) {
+      pushUndoSnapshot(state.activeDoc.content, { immediate: true });
+    }
     state.activeDoc.content = nextContent;
     state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
     store.state.activeDocumentText = nextContent;
     renderMarkdownMode();
     if (toastMsg) {
@@ -1171,11 +2151,11 @@ export function initCenterView(containerEl) {
       hideFormatBar();
       return;
     }
-    if (state.mdMode !== 'preview') {
+    if (state.mdMode !== 'live') {
       hideFormatBar();
       return;
     }
-    const previewEl = containerEl.querySelector('.md-preview');
+    const previewEl = containerEl.querySelector('.lp-container') || containerEl.querySelector('.md-preview');
     if (!previewEl) {
       hideFormatBar();
       return;
@@ -1199,12 +2179,18 @@ export function initCenterView(containerEl) {
       hideFormatBar();
       return;
     }
-    if (commonEl.closest('[data-role="inline-block-editor-wrap"]') || commonEl.closest('.anchor-pill')) {
+    if (
+      commonEl.closest('.lp-block.is-editing') ||
+      commonEl.closest('.lp-block-editor') ||
+      commonEl.closest('[data-role="inline-block-editor-wrap"]') ||
+      commonEl.closest('.anchor-pill') ||
+      commonEl.closest('.media-embed-card')
+    ) {
       hideFormatBar();
       return;
     }
 
-    const blockEl = commonEl.closest('[data-md-start]');
+    const blockEl = commonEl.closest('.lp-block[data-md-start]') || commonEl.closest('[data-md-start]');
     const startIdx = blockEl ? Number.parseInt(blockEl.dataset.mdStart, 10) : NaN;
     const endIdx = blockEl ? Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10) : startIdx;
 
@@ -1285,62 +2271,146 @@ export function initCenterView(containerEl) {
     activeFormatBar.style.top = `${Math.round(topPos)}px`;
   }
 
-  function startInlineBlockEdit(blockEl) {
-    const doc = state.activeDoc;
-    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text') || state.mdMode !== 'preview') return;
-    if (!blockEl || blockEl.dataset.inlineEditing === '1') return;
-
-    const startIdx = Number.parseInt(blockEl.dataset.mdStart, 10);
-    const endIdxRaw = Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10);
-    if (!Number.isFinite(startIdx) || startIdx < 0) return;
-
-    const allLines = getMdLines();
-    if (startIdx >= allLines.length) return;
-    const endIdx = Math.min(allLines.length - 1, Math.max(startIdx, Number.isFinite(endIdxRaw) ? endIdxRaw : startIdx));
-    const sliceText = allLines.slice(startIdx, endIdx + 1).join('\n');
-    const rowCount = Math.min(14, Math.max(2, sliceText.split('\n').length + 1));
-
-    hideFormatBar();
-    const wrap = document.createElement('div');
-    wrap.className = 'inline-block-editor-wrap glass-card';
-    wrap.dataset.role = 'inline-block-editor-wrap';
-    wrap.style.cssText = 'padding:10px;margin:8px 0;border:1.5px solid var(--accent);box-shadow:0 0 0 3px var(--accent-soft);';
-    wrap.innerHTML = `
-      <textarea class="apple-textarea" data-role="inline-block-editor" rows="${rowCount}" style="font-family:var(--doc-font-family);font-size:var(--doc-font-size);line-height:1.65;">${escapeHtml(sliceText)}</textarea>
-      <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:8px;">
-        <button type="button" class="pill-btn pill-btn-sm" data-inline-act="cancel">取消 (Esc)</button>
-        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-inline-act="apply">✓ 应用 (Ctrl+Enter)</button>
-      </div>
-    `;
-
-    blockEl.replaceWith(wrap);
-    const ta = wrap.querySelector('[data-role="inline-block-editor"]');
-    if (!ta) return;
-
-    const applyEdit = () => {
-      const editedLines = ta.value.replace(/\r\n/g, '\n').split('\n');
-      const nextAll = getMdLines();
-      nextAll.splice(startIdx, endIdx - startIdx + 1, ...editedLines);
-      commitMdContentChange(nextAll.join('\n'), { toastMsg: '已更新段落' });
-    };
-
-    const cancelEdit = () => {
-      renderMarkdownMode();
-    };
-
-    wrap.querySelector('[data-inline-act="apply"]')?.addEventListener('click', applyEdit);
-    wrap.querySelector('[data-inline-act="cancel"]')?.addEventListener('click', cancelEdit);
-    ta.addEventListener('keydown', (ev) => {
-      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
-        ev.preventDefault();
-        applyEdit();
-      } else if (ev.key === 'Escape') {
-        ev.preventDefault();
-        cancelEdit();
+  // =========================================================================
+  // V4 Inline Media Card Token Resize Helper
+  // =========================================================================
+  function resolveMediaCardFileRef(card, triggerEl = null) {
+    const candidates = [
+      triggerEl?.dataset?.mediaFile,
+      triggerEl?.dataset?.file,
+      card?.dataset?.mediaFile,
+      card?.dataset?.file,
+      card?.dataset?.anchorFile,
+    ];
+    for (const c of candidates) {
+      if (c && String(c).trim()) return String(c).trim();
+    }
+    const rawTok =
+      card?.dataset?.mediaRaw ||
+      card?.dataset?.mediaToken ||
+      card?.dataset?.rawToken ||
+      card?.dataset?.token ||
+      '';
+    if (rawTok) {
+      const inner = rawTok.replace(/^\[\[/, '').replace(/\]\]$/, '').split('|')[0].split('#')[0].trim();
+      if (inner) return inner;
+    }
+    const mediaNode = card?.querySelector('img, video');
+    const srcAttr = mediaNode?.getAttribute('src') || '';
+    const match = srcAttr.match(/[?&]path=([^&]+)/);
+    if (match) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch {
+        // ignore decode error
       }
-    });
-    ta.focus();
-    ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+    const alt = mediaNode?.getAttribute('alt') || '';
+    return alt.trim();
+  }
+
+  function replaceMediaTokenWidth(innerToken, newW) {
+    const clean = String(innerToken || '').trim();
+    if (!clean) return clean;
+    if (/\|\s*w\s*=\s*\d+(?:px)?/i.test(clean)) {
+      return clean.replace(/\|\s*w\s*=\s*\d+(?:px)?/i, `|w=${newW}`);
+    }
+    return `${clean}|w=${newW}`;
+  }
+
+  function commitMediaCardWidth(card, rawWidthPx) {
+    const doc = state.activeDoc;
+    if (!card || !doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    const newW = Math.max(160, Math.min(960, Math.round(Number(rawWidthPx) || 420)));
+    card.style.width = `${newW}px`;
+    card.style.maxWidth = '100%';
+    card.dataset.mediaWidth = String(newW);
+
+    const widthLabel = card.querySelector('[data-role="media-width-label"]');
+    if (widthLabel) widthLabel.textContent = `${newW}px`;
+
+    const rawTokAttr =
+      card.dataset.mediaRaw ||
+      card.dataset.mediaToken ||
+      card.dataset.rawToken ||
+      card.dataset.token ||
+      '';
+    const fileRef = resolveMediaCardFileRef(card);
+    const baseName = getBaseName(fileRef);
+
+    const replaceInRange = (sourceStr, tokHint, fName, occurrenceIdx = 0) => {
+      if (tokHint) {
+        const inner = tokHint.replace(/^\[\[/, '').replace(/\]\]$/, '').trim();
+        const exact = `[[${inner}]]`;
+        const idx = sourceStr.indexOf(exact);
+        if (idx >= 0) {
+          const nextInner = replaceMediaTokenWidth(inner, newW);
+          return {
+            text: `${sourceStr.slice(0, idx)}[[${nextInner}]]${sourceStr.slice(idx + exact.length)}`,
+            nextInner,
+          };
+        }
+      }
+      if (fName) {
+        const re = new RegExp(`\\[\\[([^\\[\\]]*?${escapeRegExp(fName)}[^\\[\\]]*?)\\]\\]`, 'g');
+        let match;
+        let seen = 0;
+        while ((match = re.exec(sourceStr)) !== null) {
+          if (seen === occurrenceIdx) {
+            const nextInner = replaceMediaTokenWidth(match[1], newW);
+            return {
+              text: `${sourceStr.slice(0, match.index)}[[${nextInner}]]${sourceStr.slice(match.index + match[0].length)}`,
+              nextInner,
+            };
+          }
+          seen += 1;
+        }
+      }
+      return null;
+    };
+
+    const prevContent = String(doc.content || '');
+    const blockEl = card.closest('.lp-block[data-md-start]');
+    let updated = null;
+
+    if (blockEl) {
+      const sIdx = Number.parseInt(blockEl.dataset.mdStart, 10);
+      const eIdx = Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10);
+      if (Number.isFinite(sIdx) && sIdx >= 0) {
+        const lines = getMdLines();
+        const slice = lines.slice(sIdx, Math.max(sIdx, eIdx) + 1).join('\n');
+        const cardsInBlock = Array.from(blockEl.querySelectorAll('.media-embed-card'));
+        const sameFileIdx = cardsInBlock
+          .filter((c) => getBaseName(resolveMediaCardFileRef(c)) === baseName)
+          .indexOf(card);
+        const res = replaceInRange(slice, rawTokAttr, baseName, Math.max(0, sameFileIdx));
+        if (res) {
+          lines.splice(sIdx, Math.max(sIdx, eIdx) - sIdx + 1, ...res.text.split('\n'));
+          updated = { text: lines.join('\n'), nextInner: res.nextInner };
+        }
+      }
+    }
+
+    if (!updated) {
+      const allCards = Array.from(containerEl.querySelectorAll('.media-embed-card'));
+      const globalIdx = allCards
+        .filter((c) => getBaseName(resolveMediaCardFileRef(c)) === baseName)
+        .indexOf(card);
+      updated = replaceInRange(prevContent, rawTokAttr, baseName, Math.max(0, globalIdx));
+    }
+
+    if (updated && updated.text !== prevContent) {
+      pushUndoSnapshot(prevContent, { immediate: true });
+      doc.content = updated.text;
+      state.dirty = true;
+      store.state.activeDocumentText = updated.text;
+      card.dataset.mediaRaw = `[[${updated.nextInner}]]`;
+      if (card.dataset.mediaToken !== undefined) card.dataset.mediaToken = updated.nextInner;
+      if (card.dataset.rawToken !== undefined) card.dataset.rawToken = `[[${updated.nextInner}]]`;
+      if (card.dataset.token !== undefined) card.dataset.token = updated.nextInner;
+      updateMdDirtyIndicators();
+      showToast(`已调整预览宽度：${newW}px`, 'success', { duration: 1600 });
+    }
   }
 
   // =========================================================================
@@ -2679,7 +3749,7 @@ export function initCenterView(containerEl) {
   function scrollToMarkdownHeading(headingText) {
     const query = String(headingText || '').trim().toLowerCase();
     if (!query) return false;
-    const previewEl = containerEl.querySelector('.md-preview');
+    const previewEl = containerEl.querySelector('.lp-container') || containerEl.querySelector('.md-preview');
     if (!previewEl) return false;
     const headings = Array.from(previewEl.querySelectorAll('h1, h2, h3, h4, h5, h6'));
     const match =
@@ -2716,8 +3786,10 @@ export function initCenterView(containerEl) {
     ) {
       const t = state.activeDoc.type;
       if ((t === 'markdown' || t === 'text') && (opts.mode || opts.heading)) {
-        const nextMode = opts.heading ? 'preview' : (opts.mode || state.mdMode);
+        const mappedMode = opts.mode === 'preview' ? 'live' : opts.mode === 'edit' ? 'source' : opts.mode;
+        const nextMode = opts.heading ? 'live' : (mappedMode || state.mdMode);
         if (nextMode !== state.mdMode) {
+          commitActiveBlock({ reRender: false });
           state.mdMode = nextMode;
           renderMarkdownMode();
         }
@@ -2790,17 +3862,25 @@ export function initCenterView(containerEl) {
       state.loading = false;
       state.hasOpenedOnce = true;
       state.companionOpen = false;
+      state.editingBlockIdx = null;
+      state.editingBlockRange = null;
+      state.editingDraftNewBlock = false;
+      state.findBar.open = false;
+      state.findBar.matches = [];
+      state.findBar.activeIdx = -1;
+      resetHistory(state.activeDoc.path);
 
       // Async backlinks badge
       loadBacklinksForActiveDoc(state.activeDoc.path, seq);
 
       if (type === 'markdown' || type === 'text') {
+        const reqMode = opts.mode === 'preview' ? 'live' : opts.mode === 'edit' ? 'source' : opts.mode;
         if (opts.heading) {
-          state.mdMode = 'preview';
-        } else if (opts.mode === 'edit' || opts.mode === 'preview' || (opts.mode === 'mindmap' && type === 'markdown')) {
-          state.mdMode = opts.mode;
+          state.mdMode = 'live';
+        } else if (reqMode === 'live' || reqMode === 'source' || (reqMode === 'mindmap' && type === 'markdown')) {
+          state.mdMode = reqMode;
         } else {
-          state.mdMode = (state.activeDoc.content || '').trim() ? 'preview' : 'edit';
+          state.mdMode = 'live';
         }
         syncActiveFileStore();
         renderMarkdownMode();
@@ -2942,6 +4022,8 @@ export function initCenterView(containerEl) {
     const doc = state.activeDoc;
     if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return false;
     if (state.saving) return false;
+    cleanupEmptyTrailingDraftIfNeeded();
+    flushPendingUndo();
 
     state.saving = true;
     try {
@@ -3116,7 +4198,10 @@ export function initCenterView(containerEl) {
               // ignore refresh error
             }
             if (created?.path) {
-              await openFile(created.path, { mode: 'edit' });
+              await openFile(created.path, { mode: 'live' });
+              if (!String(created.content || content || '').trim()) {
+                appendNewBlockAndFocus();
+              }
             }
             showToast(`已创建笔记：${created?.name || title}`, 'success');
           } catch (err) {
@@ -3303,6 +4388,7 @@ export function initCenterView(containerEl) {
         showToast('目标追加路径与当前打开文档不一致', 'warning');
         return;
       }
+      pushUndoSnapshot(doc.content, { immediate: true });
       const nextContent = insertMarkdownWithPadding(
         doc.content || '',
         getMdLines().length,
@@ -3313,6 +4399,8 @@ export function initCenterView(containerEl) {
         const res = await api.put('/api/files/write', { path: doc.path, content: nextContent });
         doc.content = nextContent;
         state.dirty = false;
+        state.editingBlockIdx = null;
+        state.editingBlockRange = null;
         syncActiveFileStore();
         renderMarkdownMode();
         store.emit('file:saved', { path: doc.path, snapshot_id: res?.snapshot_id || null });
@@ -3356,6 +4444,9 @@ export function initCenterView(containerEl) {
     insertDroppedMarkdown({ markdown, label: payload.label || '内容块' });
   });
 
+  // Center Right-Click Menu: AI Polish
+  store.on('center:polish-doc', () => triggerAiPolish());
+
   // Innovation D: center:toggle-mindmap listener
   store.on('center:toggle-mindmap', async (payload = {}) => {
     ensureDocTabOnMobile();
@@ -3368,7 +4459,8 @@ export function initCenterView(containerEl) {
       return;
     }
     if (state.activeDoc.type === 'markdown') {
-      state.mdMode = payload?.toggle && state.mdMode === 'mindmap' ? 'preview' : 'mindmap';
+      commitActiveBlock({ reRender: false });
+      state.mdMode = payload?.toggle && state.mdMode === 'mindmap' ? 'live' : 'mindmap';
       renderMarkdownMode();
     } else if (state.activeDoc.type === 'pdf') {
       openPdfMindMapSheet();
@@ -3548,7 +4640,7 @@ export function initCenterView(containerEl) {
 
       // Case 5: File / Markdown Heading Anchor [[note.md]] or [[note.md#Heading]]
       const heading = String(payload.heading || '').trim();
-      await openFile(targetItem.path, { mode: heading ? 'preview' : undefined, heading });
+      await openFile(targetItem.path, { mode: heading ? 'live' : undefined, heading });
       if (heading) {
         showToast(`已跳转至 ${targetItem.name} # ${heading}`, 'success');
       }
@@ -3576,86 +4668,109 @@ export function initCenterView(containerEl) {
 
   function updatePrecisionDropLine(e) {
     const doc = state.activeDoc;
-    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text') || state.mdMode !== 'preview') {
-      removeDropInsertLine();
-      return false;
-    }
-    const previewEl = containerEl.querySelector('.md-preview');
-    if (!previewEl) {
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) {
       removeDropInsertLine();
       return false;
     }
 
-    const blocks = Array.from(previewEl.querySelectorAll('[data-md-start]'));
-    const previewRect = previewEl.getBoundingClientRect();
-    const linesCount = getMdLines().length;
+    if (state.mdMode === 'live') {
+      const lpContainer = containerEl.querySelector('.lp-container');
+      const scrollArea = containerEl.querySelector('.md-scroll-area');
+      if (!lpContainer) {
+        removeDropInsertLine();
+        return false;
+      }
 
-    let chosenY = previewRect.top + 16;
-    let targetLineIdx = linesCount;
+      const blocks = Array.from(lpContainer.querySelectorAll('.lp-block[data-block-idx]'));
+      const refRect = (scrollArea || lpContainer).getBoundingClientRect();
+      const linesCount = getMdLines().length;
 
-    if (blocks.length === 0) {
-      chosenY = previewRect.top + 20;
-      targetLineIdx = 0;
-    } else {
-      let matched = false;
-      for (const blk of blocks) {
-        const r = blk.getBoundingClientRect();
-        const midY = r.top + r.height / 2;
-        const startIdx = Number.parseInt(blk.dataset.mdStart, 10);
-        const endIdx = Number.parseInt(blk.dataset.mdEnd ?? blk.dataset.mdStart, 10);
-        if (e.clientY <= midY) {
-          chosenY = r.top - 2;
-          targetLineIdx = Number.isFinite(startIdx) ? startIdx : 0;
-          matched = true;
-          break;
+      let chosenY = refRect.top + 22;
+      let targetLineIdx = linesCount;
+
+      if (blocks.length === 0) {
+        const containerRect = lpContainer.getBoundingClientRect();
+        chosenY = Math.max(refRect.top + 16, Math.min(refRect.bottom - 8, containerRect.top + 20));
+        targetLineIdx = 0;
+      } else {
+        let matched = false;
+        for (let i = 0; i < blocks.length; i += 1) {
+          const blk = blocks[i];
+          const r = blk.getBoundingClientRect();
+          const midY = (r.top + r.bottom) / 2;
+          const startIdx = Number.parseInt(blk.dataset.mdStart, 10);
+          if (e.clientY < midY) {
+            if (i === 0) {
+              chosenY = r.top - 4;
+            } else {
+              const prevR = blocks[i - 1].getBoundingClientRect();
+              chosenY = (prevR.bottom + r.top) / 2;
+            }
+            targetLineIdx = Number.isFinite(startIdx) ? startIdx : 0;
+            matched = true;
+            break;
+          }
         }
-        if (e.clientY <= r.bottom) {
-          chosenY = r.bottom + 2;
-          targetLineIdx = Number.isFinite(endIdx) ? endIdx + 1 : linesCount;
-          matched = true;
-          break;
+        if (!matched) {
+          const last = blocks[blocks.length - 1];
+          const lastRect = last.getBoundingClientRect();
+          const lastEnd = Number.parseInt(last.dataset.mdEnd ?? last.dataset.mdStart, 10);
+          chosenY = lastRect.bottom + 6;
+          targetLineIdx = Number.isFinite(lastEnd) ? lastEnd + 1 : linesCount;
         }
       }
-      if (!matched) {
-        const last = blocks[blocks.length - 1];
-        const lastRect = last.getBoundingClientRect();
-        const lastEnd = Number.parseInt(last.dataset.mdEnd ?? last.dataset.mdStart, 10);
-        chosenY = lastRect.bottom + 4;
-        targetLineIdx = Number.isFinite(lastEnd) ? lastEnd + 1 : linesCount;
-      }
+
+      chosenY = Math.max(refRect.top + 3, Math.min(refRect.bottom - 3, chosenY));
+      dropTargetLineIdx = Math.max(0, Math.min(linesCount, targetLineIdx));
+
+      const lineEl = ensureDropInsertLine();
+      lineEl.style.left = `${Math.round(refRect.left + 16)}px`;
+      lineEl.style.width = `${Math.max(80, Math.round(refRect.width - 32))}px`;
+      lineEl.style.transform = `translate3d(0, ${Math.round(chosenY)}px, 0) translateY(-50%)`;
+      return true;
     }
 
-    dropTargetLineIdx = Math.max(0, Math.min(linesCount, targetLineIdx));
-    const lineEl = ensureDropInsertLine();
-    lineEl.style.left = `${Math.round(previewRect.left + 16)}px`;
-    lineEl.style.width = `${Math.max(80, Math.round(previewRect.width - 32))}px`;
-    lineEl.style.top = `${Math.round(chosenY)}px`;
-    return true;
+    if (state.mdMode === 'source') {
+      const ta = containerEl.querySelector('.md-editor:not([data-role])');
+      if (!ta) {
+        removeDropInsertLine();
+        return false;
+      }
+      const rect = ta.getBoundingClientRect();
+      const cs = window.getComputedStyle(ta);
+      const approxLineHeight =
+        Number.parseFloat(cs.lineHeight) || (Number.parseFloat(cs.fontSize) || 15) * 1.7;
+      const linesCount = getMdLines().length;
+      const rawLine = (e.clientY - rect.top + ta.scrollTop - 18) / approxLineHeight;
+      const dropLine = Math.max(0, Math.min(linesCount, Math.round(rawLine)));
+      dropTargetLineIdx = dropLine;
+
+      const visualY = rect.top + 18 + dropLine * approxLineHeight - ta.scrollTop;
+      const clampedY = Math.max(rect.top + 4, Math.min(rect.bottom - 4, visualY));
+      const lineEl = ensureDropInsertLine();
+      lineEl.style.left = `${Math.round(rect.left + 16)}px`;
+      lineEl.style.width = `${Math.max(80, Math.round(rect.width - 32))}px`;
+      lineEl.style.transform = `translate3d(0, ${Math.round(clampedY)}px, 0) translateY(-50%)`;
+      return true;
+    }
+
+    removeDropInsertLine();
+    return false;
   }
 
-  function resolveEditDropCaret(ta, dropEvent) {
-    if (!ta) return 0;
-    if (dropEvent && typeof document.caretPositionFromPoint === 'function') {
-      try {
-        const pos = document.caretPositionFromPoint(dropEvent.clientX, dropEvent.clientY);
-        if (pos && Number.isFinite(pos.offset) && (pos.offsetNode === ta || ta.contains(pos.offsetNode))) {
-          return pos.offset;
-        }
-      } catch {
-        // ignore
-      }
+  function resolveSourceDropLine(ta, dropEvent) {
+    if (!ta) return getMdLines().length;
+    if (dropEvent) {
+      const rect = ta.getBoundingClientRect();
+      const cs = window.getComputedStyle(ta);
+      const approxLineHeight =
+        Number.parseFloat(cs.lineHeight) || (Number.parseFloat(cs.fontSize) || 15) * 1.7;
+      const linesCount = getMdLines().length;
+      const rawLine = (dropEvent.clientY - rect.top + ta.scrollTop - 18) / approxLineHeight;
+      return Math.max(0, Math.min(linesCount, Math.round(rawLine)));
     }
-    if (dropEvent && typeof document.caretRangeFromPoint === 'function') {
-      try {
-        const range = document.caretRangeFromPoint(dropEvent.clientX, dropEvent.clientY);
-        if (range && Number.isFinite(range.startOffset) && (range.startContainer === ta || ta.contains(range.startContainer))) {
-          return range.startOffset;
-        }
-      } catch {
-        // ignore
-      }
-    }
-    return ta.selectionStart ?? ta.value.length;
+    const caret = ta.selectionStart ?? ta.value.length;
+    return ta.value.slice(0, caret).split('\n').length - 1;
   }
 
   function insertDroppedMarkdown(payload, { lineIdx = null, dropEvent = null } = {}) {
@@ -3670,37 +4785,42 @@ export function initCenterView(containerEl) {
     }
 
     if (doc.type === 'markdown' || doc.type === 'text') {
-      if (state.mdMode === 'edit') {
+      commitActiveBlock({ reRender: false });
+      pushUndoSnapshot(doc.content, { immediate: true });
+
+      if (state.mdMode === 'source') {
         const ta = containerEl.querySelector('.md-editor:not([data-role])');
+        const targetLine = Number.isFinite(lineIdx) ? lineIdx : resolveSourceDropLine(ta, dropEvent);
+        const nextVal = insertMarkdownWithPadding(doc.content || '', targetLine, markdown);
+        doc.content = nextVal;
+        state.dirty = true;
+        store.state.activeDocumentText = nextVal;
         if (ta) {
-          const caret = resolveEditDropCaret(ta, dropEvent);
-          const nextVal = insertMarkdownAtCharIndex(ta.value, caret, markdown);
           ta.value = nextVal;
           ta.focus();
-          doc.content = nextVal;
-          state.dirty = true;
-          store.state.activeDocumentText = nextVal;
-          updateMdDirtyIndicators();
-          showToast(`已插入「${label}」到当前笔记（Ctrl+S 保存）`, 'success');
-          return;
         }
+        updateMdDirtyIndicators();
+        showToast(`已精准拖入「${label}」（Ctrl+Z 可撤回）`, 'success');
+        return;
       }
 
       const lines = getMdLines();
       const targetLine = Number.isFinite(lineIdx) ? lineIdx : lines.length;
-      doc.content = insertMarkdownWithPadding(doc.content || '', targetLine, markdown);
+      const clampedLine = Math.max(0, Math.min(lines.length, targetLine));
+      const beforeSlice = lines.slice(0, clampedLine).join('\n').replace(/\n+$/g, '');
+      const actualStartLine = beforeSlice.trim() ? beforeSlice.split('\n').length + 1 : 0;
+      const firstLinePrefix = markdown.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 16);
+      doc.content = insertMarkdownWithPadding(doc.content || '', clampedLine, markdown);
       state.dirty = true;
+      state.editingBlockIdx = null;
+      state.editingBlockRange = null;
+      state.justDroppedTarget = { lineIdx: clampedLine, actualStartLine, prefix: firstLinePrefix };
       store.state.activeDocumentText = doc.content;
-      renderMarkdownMode();
-      if (lineIdx == null) {
-        window.requestAnimationFrame(() => {
-          const scrollArea = containerEl.querySelector('.md-scroll-area');
-          if (scrollArea) {
-            scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
-          }
-        });
+      if (state.mdMode === 'mindmap') {
+        state.mdMode = 'live';
       }
-      showToast(`已插入「${label}」到当前笔记（Ctrl+S 保存）`, 'success');
+      renderMarkdownMode();
+      showToast(`已精准拖入「${label}」（Ctrl+Z 可撤回）`, 'success');
       return;
     }
 
@@ -3776,16 +4896,150 @@ export function initCenterView(containerEl) {
   // =========================================================================
   // DOM Event Delegation on containerEl & Global Shortcuts / Window Blur
   // =========================================================================
+  function syncBlockEditorInput(ta) {
+    const doc = state.activeDoc;
+    if (!doc || !ta) return;
+    const blockEl = ta.closest('.lp-block');
+    if (!blockEl) return;
+
+    const prevContent = String(doc.content ?? '');
+    pushUndoSnapshot(prevContent, { immediate: false });
+
+    const range = state.editingBlockRange || {
+      startLine: Number.parseInt(blockEl.dataset.mdStart, 10) || 0,
+      endLine: Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10) || 0,
+    };
+
+    const lines = prevContent.replace(/\r\n/g, '\n').split('\n');
+    const editedLines = ta.value.replace(/\r\n/g, '\n').split('\n');
+    const oldCount = Math.max(1, range.endLine - range.startLine + 1);
+    const delta = editedLines.length - oldCount;
+
+    lines.splice(range.startLine, oldCount, ...editedLines);
+    const newEndLine = range.startLine + editedLines.length - 1;
+    state.editingBlockRange = { startLine: range.startLine, endLine: newEndLine };
+    blockEl.dataset.mdEnd = String(newEndLine);
+
+    if (delta !== 0) {
+      let sib = blockEl.nextElementSibling;
+      while (sib) {
+        if (sib.classList.contains('lp-block') && sib.dataset.mdStart !== undefined) {
+          const s = Number.parseInt(sib.dataset.mdStart, 10);
+          const e = Number.parseInt(sib.dataset.mdEnd ?? sib.dataset.mdStart, 10);
+          if (Number.isFinite(s)) sib.dataset.mdStart = String(s + delta);
+          if (Number.isFinite(e)) sib.dataset.mdEnd = String(e + delta);
+        }
+        sib = sib.nextElementSibling;
+      }
+    }
+
+    if (ta.value.trim()) {
+      state.editingDraftNewBlock = false;
+      blockEl.removeAttribute('data-draft-block');
+    }
+
+    doc.content = lines.join('\n');
+    state.dirty = true;
+    store.state.activeDocumentText = doc.content;
+    syncBlockEditorHeight(ta);
+    updateMdDirtyIndicators();
+  }
+
+  function applyEditorInlineShortcut(ta, kind) {
+    const doc = state.activeDoc;
+    if (!doc || !ta) return;
+    const start = ta.selectionStart ?? 0;
+    const end = ta.selectionEnd ?? start;
+    const val = ta.value;
+
+    pushUndoSnapshot(doc.content, { immediate: true });
+
+    let nextVal = val;
+    let nextSelStart = start;
+    let nextSelEnd = end;
+
+    if (kind === 'bold' || kind === 'italic') {
+      const marker = kind === 'bold' ? '**' : '*';
+      const mLen = marker.length;
+      const selected = val.slice(start, end);
+      const before = val.slice(Math.max(0, start - mLen), start);
+      const after = val.slice(end, end + mLen);
+      const canUnwrap =
+        before === marker &&
+        after === marker &&
+        (kind === 'bold' || (val.slice(Math.max(0, start - 2), start) !== '**' && val.slice(end, end + 2) !== '**'));
+
+      if (canUnwrap) {
+        nextVal = `${val.slice(0, start - mLen)}${selected}${val.slice(end + mLen)}`;
+        nextSelStart = start - mLen;
+        nextSelEnd = end - mLen;
+      } else if (selected) {
+        nextVal = `${val.slice(0, start)}${marker}${selected}${marker}${val.slice(end)}`;
+        nextSelStart = start + mLen;
+        nextSelEnd = end + mLen;
+      } else {
+        nextVal = `${val.slice(0, start)}${marker}${marker}${val.slice(end)}`;
+        nextSelStart = start + mLen;
+        nextSelEnd = start + mLen;
+      }
+    } else if (kind === 'quote') {
+      const lineStart = val.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+      const lineEndIdx = val.indexOf('\n', end);
+      const lineEnd = lineEndIdx === -1 ? val.length : lineEndIdx;
+      const blockSlice = val.slice(lineStart, lineEnd);
+      const segs = blockSlice.split('\n');
+      const allQuoted = segs.every((ln) => /^\s*>/.test(ln));
+      const toggled = allQuoted
+        ? segs.map((ln) => ln.replace(/^\s*>\s?/, ''))
+        : segs.map((ln) => `> ${ln}`);
+      const joined = toggled.join('\n');
+      nextVal = `${val.slice(0, lineStart)}${joined}${val.slice(lineEnd)}`;
+      nextSelStart = lineStart;
+      nextSelEnd = lineStart + joined.length;
+    }
+
+    ta.value = nextVal;
+    ta.setSelectionRange(nextSelStart, nextSelEnd);
+
+    if (ta.classList.contains('lp-block-editor')) {
+      syncBlockEditorInput(ta);
+    } else {
+      doc.content = nextVal;
+      state.dirty = true;
+      store.state.activeDocumentText = nextVal;
+      updateMdDirtyIndicators();
+    }
+  }
+
   containerEl.addEventListener('input', (e) => {
     const target = e.target;
 
-    // Markdown / TXT editor
+    // Live Preview inline block editor
+    if (target.matches('.lp-block-editor')) {
+      syncBlockEditorInput(target);
+      return;
+    }
+
+    // Markdown / TXT source editor
     if (target.matches('.md-editor') && !target.dataset.role) {
       if (!state.activeDoc) return;
+      pushUndoSnapshot(state.activeDoc.content, { immediate: false });
       state.activeDoc.content = target.value;
       state.dirty = true;
       store.state.activeDocumentText = target.value;
       updateMdDirtyIndicators();
+      return;
+    }
+
+    // In-Doc Find & Replace inputs
+    if (target.matches('[data-role="doc-find-input"]')) {
+      state.findBar.query = target.value;
+      state.findBar.activeIdx = 0;
+      updateFindBarUi({ scrollToActive: true });
+      return;
+    }
+    if (target.matches('[data-role="doc-replace-input"]')) {
+      state.findBar.replaceText = target.value;
       return;
     }
 
@@ -3828,13 +5082,143 @@ export function initCenterView(containerEl) {
     maybeShowPreviewFormatBar();
   });
 
+  // V4 #6: Drag Resize Handle (.media-resize-handle) pointerdown -> pointermove -> pointerup
+  containerEl.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.media-resize-handle');
+    if (!handle) return;
+    const card = handle.closest('.media-embed-card');
+    if (!card) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const startX = e.clientX;
+    const startW = card.getBoundingClientRect().width || 420;
+    let currentW = Math.round(Math.max(160, Math.min(960, startW)));
+    card.classList.add('is-resizing');
+
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX;
+      currentW = Math.round(Math.max(160, Math.min(960, startW + dx)));
+      card.style.width = `${currentW}px`;
+      card.style.maxWidth = '100%';
+      const wLabel = card.querySelector('[data-role="media-width-label"]');
+      if (wLabel) wLabel.textContent = `${currentW}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      card.classList.remove('is-resizing');
+      commitMediaCardWidth(card, currentW);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  });
+
   document.addEventListener('mousedown', (e) => {
-    if (activeFormatBar && !activeFormatBar.contains(e.target) && !e.target.closest('.md-preview')) {
+    if (activeFormatBar && !activeFormatBar.contains(e.target) && !e.target.closest('.lp-container, .md-preview')) {
       hideFormatBar();
+    }
+    // Commit active block editor when clicking outside any .lp-block (and not clicking find bar or add-block zone)
+    if (
+      state.activeDoc &&
+      (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text') &&
+      state.mdMode === 'live' &&
+      (state.editingBlockIdx !== null || state.editingDraftNewBlock)
+    ) {
+      if (
+        !e.target.closest('.lp-block') &&
+        !e.target.closest('.lp-add-block-zone') &&
+        !e.target.closest('[data-role="doc-find-bar"]') &&
+        !e.target.closest('[data-md-mode]') &&
+        !e.target.closest('[data-action="md-undo"]') &&
+        !e.target.closest('[data-action="md-redo"]')
+      ) {
+        commitActiveBlock({ reRender: true });
+      }
     }
   });
 
   containerEl.addEventListener('click', (e) => {
+    // 0a. Inline Media Card actions (play-inline, open-media, preset width buttons)
+    const mediaPlayBtn = e.target.closest('[data-media-action="play-inline"]');
+    if (mediaPlayBtn) {
+      e.stopPropagation();
+      const card = mediaPlayBtn.closest('.media-embed-card');
+      mediaPlayBtn.style.display = 'none';
+      if (card) {
+        card.classList.add('is-playing');
+        const badge = card.querySelector('.media-play-badge');
+        if (badge && badge !== mediaPlayBtn) badge.style.display = 'none';
+        const video = card.querySelector('video');
+        if (video) {
+          video.controls = true;
+          video.muted = false;
+          video.play().catch(() => {});
+        }
+      }
+      return;
+    }
+
+    const mediaOpenBtn = e.target.closest('[data-media-action="open-media"], [data-media-action="open-external"]');
+    if (mediaOpenBtn) {
+      e.stopPropagation();
+      const card = mediaOpenBtn.closest('.media-embed-card');
+      const fileRef = resolveMediaCardFileRef(card, mediaOpenBtn);
+      const mediaPath = card?.dataset?.mediaPath || '';
+      const timeStr = card?.dataset?.mediaTime || '';
+      const initialTime = timeStr ? parseMediaTimeSeconds(timeStr) : 0;
+      const targetItem =
+        (mediaPath ? { path: mediaPath, name: getBaseName(mediaPath) } : null) ||
+        findWorkspaceFile(fileRef);
+      if (targetItem?.path) {
+        store.emit('file:open', {
+          ...targetItem,
+          ...(initialTime > 0 ? { initialTime, autoPlay: true } : {}),
+        });
+      } else if (fileRef) {
+        store.emit('anchor:jump', { type: 'media', file: fileRef, time: timeStr });
+      }
+      return;
+    }
+
+    const mediaCard = e.target.closest('.media-embed-card');
+    if (mediaCard) {
+      const clickedBtn = e.target.closest('button');
+      if (clickedBtn) {
+        const pctAttr = clickedBtn.dataset.mediaPreset ?? clickedBtn.dataset.mediaPct ?? '';
+        const wAttr =
+          clickedBtn.dataset.mediaWidth ??
+          clickedBtn.dataset.width ??
+          clickedBtn.dataset.widthPct ??
+          clickedBtn.dataset.resize ??
+          '';
+        const txt = (clickedBtn.textContent || '').trim();
+        const pctMatch = pctAttr
+          ? [pctAttr, pctAttr]
+          : (wAttr || txt).match(/^(\d{2,3})%$/);
+        const pxMatch = !pctMatch ? wAttr.match(/^(\d{2,4})(?:px)?$/) : null;
+        if (pctMatch || pxMatch) {
+          e.stopPropagation();
+          let targetPx = 420;
+          if (pctMatch) {
+            const pct = Math.max(10, Math.min(100, Number.parseInt(pctMatch[1], 10))) / 100;
+            const parentEl = mediaCard.closest('.lp-block-view, .lp-container, .md-preview') || mediaCard.parentElement;
+            const availW = Math.min(960, Math.max(240, Math.round((parentEl?.clientWidth || 720) - 12)));
+            targetPx = Math.round(availW * pct);
+          } else if (pxMatch) {
+            targetPx = Number.parseInt(pxMatch[1], 10);
+          }
+          commitMediaCardWidth(mediaCard, targetPx);
+          return;
+        }
+      }
+    }
+
     // 1. Anchor pill click in MD preview or companion preview
     const anchorPill = e.target.closest('.anchor-pill');
     if (anchorPill) {
@@ -3850,14 +5234,15 @@ export function initCenterView(containerEl) {
       return;
     }
 
-    // 2. Markdown Edit / Preview / MindMap segmented pill
+    // 2. Markdown Live / Source / MindMap segmented pill
     const mdSegBtn = e.target.closest('[data-md-mode]');
     if (mdSegBtn && state.activeDoc) {
       const nextMode = mdSegBtn.dataset.mdMode;
-      if (['edit', 'preview', 'mindmap'].includes(nextMode) && nextMode !== state.mdMode) {
+      if (['live', 'source', 'mindmap'].includes(nextMode) && nextMode !== state.mdMode) {
+        commitActiveBlock({ reRender: false });
         state.mdMode = nextMode;
         renderMarkdownMode();
-        if (nextMode === 'edit') {
+        if (nextMode === 'source') {
           containerEl.querySelector('.md-editor')?.focus();
         }
       }
@@ -3927,171 +5312,260 @@ export function initCenterView(containerEl) {
 
     // 6. Toolbar & Action Buttons
     const actionBtn = e.target.closest('[data-action]');
-    if (!actionBtn) return;
-    const action = actionBtn.dataset.action;
+    if (actionBtn) {
+      const action = actionBtn.dataset.action;
 
-    if (action === 'font-dec') {
-      updateTypographyAndPersist((store.state.docFontSize || 15) - 1, store.state.docFontFamily);
-    } else if (action === 'font-inc') {
-      updateTypographyAndPersist((store.state.docFontSize || 15) + 1, store.state.docFontFamily);
-    } else if (action === 'welcome-new-note') {
-      openNewNoteSheet();
-    } else if (action === 'welcome-ai-summary') {
-      store.emit('ai:summarize-request', {
-        text: store.state.activeDocumentText || '',
-        file_path: state.activeDoc?.path || '',
-      });
-    } else if (action === 'quick-open') {
-      const p = actionBtn.dataset.path;
-      if (p) openFile(p);
-    } else if (action === 'md-save') {
-      saveMarkdownDoc();
-    } else if (action === 'ai-polish') {
-      openAiPolishSheet();
-    } else if (action === 'open-snapshots') {
-      openSnapshotsSheet();
-    } else if (action === 'open-backlinks') {
-      openBacklinksSheet();
-    } else if (action === 'open-folder') {
-      if (state.activeDoc?.path) openExternalFile(state.activeDoc.path, true);
-    } else if (action === 'open-system') {
-      if (state.activeDoc?.path) openExternalFile(state.activeDoc.path, false);
-    } else if (action === 'copy-file-anchor') {
-      if (state.activeDoc?.name) {
-        copyInternal(`[[${state.activeDoc.name}]]`, '已复制文件胶囊锚点');
-      }
-    } else if (action === 'insert-file-anchor') {
-      if (state.activeDoc?.name) {
-        insertTextIntoCompanionNote(`[[${state.activeDoc.name}]]`, { toastMsg: '已插入文件锚点' });
-      }
-    } else if (action === 'toggle-companion') {
-      state.companionOpen = !state.companionOpen;
-      renderActiveView();
-    } else if (action === 'archive-copy-member-anchor') {
-      if (state.activeDoc && state.archive.selectedMember) {
-        copyInternal(`[[${state.activeDoc.name}!${state.archive.selectedMember}]]`, '已复制内部文件锚点');
-      }
-    } else if (action === 'archive-insert-member-anchor') {
-      if (state.activeDoc && state.archive.selectedMember) {
-        insertTextIntoCompanionNote(`[[${state.activeDoc.name}!${state.archive.selectedMember}]]`, {
-          toastMsg: '已插入压缩包成员锚点',
+      if (action === 'lp-add-block') {
+        appendNewBlockAndFocus();
+        return;
+      } else if (action === 'md-undo') {
+        performUndo();
+        return;
+      } else if (action === 'md-redo') {
+        performRedo();
+        return;
+      } else if (action === 'find-prev') {
+        stepFindMatch(-1);
+        return;
+      } else if (action === 'find-next') {
+        stepFindMatch(1);
+        return;
+      } else if (action === 'find-replace-one') {
+        replaceCurrentMatch();
+        return;
+      } else if (action === 'find-replace-all') {
+        replaceAllMatches();
+        return;
+      } else if (action === 'find-close') {
+        closeFindBar();
+        return;
+      } else if (action === 'font-dec') {
+        updateTypographyAndPersist((store.state.docFontSize || 15) - 1, store.state.docFontFamily);
+        return;
+      } else if (action === 'font-inc') {
+        updateTypographyAndPersist((store.state.docFontSize || 15) + 1, store.state.docFontFamily);
+        return;
+      } else if (action === 'welcome-new-note') {
+        openNewNoteSheet();
+        return;
+      } else if (action === 'welcome-ai-summary') {
+        store.emit('ai:summarize-request', {
+          text: store.state.activeDocumentText || '',
+          file_path: state.activeDoc?.path || '',
         });
-      }
-    } else if (action === 'img-zoom-out') {
-      const cur = state.image.fit ? 1.0 : state.image.zoom;
-      const prev = [...IMAGE_ZOOM_STEPS].reverse().find((z) => z < cur - 0.01) || IMAGE_ZOOM_STEPS[0];
-      state.image.fit = false;
-      state.image.zoom = prev;
-      renderImageMode();
-    } else if (action === 'img-zoom-in') {
-      const cur = state.image.fit ? 1.0 : state.image.zoom;
-      const next = IMAGE_ZOOM_STEPS.find((z) => z > cur + 0.01) || IMAGE_ZOOM_STEPS[IMAGE_ZOOM_STEPS.length - 1];
-      state.image.fit = false;
-      state.image.zoom = next;
-      renderImageMode();
-    } else if (action === 'img-zoom-fit') {
-      state.image.fit = true;
-      state.image.zoom = 1.0;
-      renderImageMode();
-    } else if (action === 'media-insert-timestamp') {
-      if (!state.activeDoc) return;
-      const mediaEl = containerEl.querySelector('[data-role="media-player-el"]');
-      const ts = formatMediaTimestamp(mediaEl?.currentTime || 0);
-      const anchor = `[[${state.activeDoc.name}#t=${ts}]]`;
-      copyInternal(anchor, false);
-      insertTextIntoCompanionNote(anchor, { toastMsg: `已插入并复制时间戳锚点 ${ts}` });
-    } else if (action === 'ai-summarize') {
-      if (!state.activeDoc) return;
-      const text =
-        state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text'
-          ? state.activeDoc.content
-          : state.activeDoc.type === 'excel'
-          ? buildExcelSummaryText()
-          : state.activeDoc.type === 'office_preview'
-          ? state.activeDoc.previewMarkdown || state.activeDoc.companionContent
-          : state.activeDoc.companionContent;
-      store.emit('ai:summarize-request', {
-        text: text || '',
-        file_path: state.activeDoc.path,
-      });
-    } else if (action === 'excel-switch-sheet') {
-      switchExcelSheet(actionBtn.dataset.sheet);
-    } else if (action === 'excel-copy-anchor') {
-      const sel = state.excel.selectedCell;
-      if (!sel || !state.activeDoc) {
-        showToast('请先点击选择一个单元格', 'warning');
+        return;
+      } else if (action === 'quick-open') {
+        const p = actionBtn.dataset.path;
+        if (p) openFile(p);
+        return;
+      } else if (action === 'md-save') {
+        saveMarkdownDoc();
+        return;
+      } else if (action === 'ai-polish') {
+        triggerAiPolish();
+        return;
+      } else if (action === 'open-snapshots') {
+        openSnapshotsSheet();
+        return;
+      } else if (action === 'open-backlinks') {
+        openBacklinksSheet();
+        return;
+      } else if (action === 'open-folder') {
+        if (state.activeDoc?.path) openExternalFile(state.activeDoc.path, true);
+        return;
+      } else if (action === 'open-system') {
+        if (state.activeDoc?.path) openExternalFile(state.activeDoc.path, false);
+        return;
+      } else if (action === 'copy-file-anchor') {
+        if (state.activeDoc?.name) {
+          copyInternal(`[[${state.activeDoc.name}]]`, '已复制文件胶囊锚点');
+        }
+        return;
+      } else if (action === 'insert-file-anchor') {
+        if (state.activeDoc?.name) {
+          insertTextIntoCompanionNote(`[[${state.activeDoc.name}]]`, { toastMsg: '已插入文件锚点' });
+        }
+        return;
+      } else if (action === 'toggle-companion') {
+        state.companionOpen = !state.companionOpen;
+        renderActiveView();
+        return;
+      } else if (action === 'archive-copy-member-anchor') {
+        if (state.activeDoc && state.archive.selectedMember) {
+          copyInternal(`[[${state.activeDoc.name}!${state.archive.selectedMember}]]`, '已复制内部文件锚点');
+        }
+        return;
+      } else if (action === 'archive-insert-member-anchor') {
+        if (state.activeDoc && state.archive.selectedMember) {
+          insertTextIntoCompanionNote(`[[${state.activeDoc.name}!${state.archive.selectedMember}]]`, {
+            toastMsg: '已插入压缩包成员锚点',
+          });
+        }
+        return;
+      } else if (action === 'img-zoom-out') {
+        const cur = state.image.fit ? 1.0 : state.image.zoom;
+        const prev = [...IMAGE_ZOOM_STEPS].reverse().find((z) => z < cur - 0.01) || IMAGE_ZOOM_STEPS[0];
+        state.image.fit = false;
+        state.image.zoom = prev;
+        renderImageMode();
+        return;
+      } else if (action === 'img-zoom-in') {
+        const cur = state.image.fit ? 1.0 : state.image.zoom;
+        const next = IMAGE_ZOOM_STEPS.find((z) => z > cur + 0.01) || IMAGE_ZOOM_STEPS[IMAGE_ZOOM_STEPS.length - 1];
+        state.image.fit = false;
+        state.image.zoom = next;
+        renderImageMode();
+        return;
+      } else if (action === 'img-zoom-fit') {
+        state.image.fit = true;
+        state.image.zoom = 1.0;
+        renderImageMode();
+        return;
+      } else if (action === 'media-insert-timestamp') {
+        if (!state.activeDoc) return;
+        const mediaEl = containerEl.querySelector('[data-role="media-player-el"]');
+        const ts = formatMediaTimestamp(mediaEl?.currentTime || 0);
+        const anchor = `[[${state.activeDoc.name}#t=${ts}]]`;
+        copyInternal(anchor, false);
+        insertTextIntoCompanionNote(anchor, { toastMsg: `已插入并复制时间戳锚点 ${ts}` });
+        return;
+      } else if (action === 'ai-summarize') {
+        if (!state.activeDoc) return;
+        const text =
+          state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text'
+            ? state.activeDoc.content
+            : state.activeDoc.type === 'excel'
+            ? buildExcelSummaryText()
+            : state.activeDoc.type === 'office_preview'
+            ? state.activeDoc.previewMarkdown || state.activeDoc.companionContent
+            : state.activeDoc.companionContent;
+        store.emit('ai:summarize-request', {
+          text: text || '',
+          file_path: state.activeDoc.path,
+        });
+        return;
+      } else if (action === 'excel-switch-sheet') {
+        switchExcelSheet(actionBtn.dataset.sheet);
+        return;
+      } else if (action === 'excel-copy-anchor') {
+        const sel = state.excel.selectedCell;
+        if (!sel || !state.activeDoc) {
+          showToast('请先点击选择一个单元格', 'warning');
+          return;
+        }
+        const anchor = `[[${state.activeDoc.name}#${state.excel.currentSheet}!${sel.colLetter}${sel.row}]]`;
+        copyInternal(anchor, '已复制单元格锚点');
+        return;
+      } else if (action === 'excel-save') {
+        saveExcelChanges();
+        return;
+      } else if (action === 'excel-append-row') {
+        openAppendRowSheet();
+        return;
+      } else if (action === 'excel-export-csv') {
+        if (!state.activeDoc) return;
+        const url = `/api/excel/export-csv?path=${encodeURIComponent(state.activeDoc.path)}&sheet=${encodeURIComponent(state.excel.currentSheet)}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${state.activeDoc.name.replace(/\.xlsx$/i, '')}_${state.excel.currentSheet}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showToast('正在导出 CSV 文件…', 'info', { duration: 2000 });
+        return;
+      } else if (action === 'excel-prev-page') {
+        if (state.excel.page > 1) {
+          state.excel.page -= 1;
+          loadExcelRows({ preservePending: true });
+        }
+        return;
+      } else if (action === 'excel-next-page') {
+        if (state.excel.page < state.excel.totalPages) {
+          state.excel.page += 1;
+          loadExcelRows({ preservePending: true });
+        }
+        return;
+      } else if (action === 'pdf-jump-page') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        const inp = containerEl.querySelector('[data-role="pdf-page-input"]');
+        const raw = Number.parseInt(inp?.value, 10) || 1;
+        setPdfPage(raw);
+        return;
+      } else if (action === 'pdf-prev-page') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        setPdfPage(state.pdf.currentPage - 1);
+        return;
+      } else if (action === 'pdf-next-page') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        setPdfPage(state.pdf.currentPage + 1);
+        return;
+      } else if (action === 'pdf-zoom-out') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        const cur = Number(state.pdf.zoom || 1.6);
+        const prevStep = [...PDF_ZOOM_STEPS].reverse().find((z) => z < cur - 0.01);
+        if (prevStep) {
+          state.pdf.zoom = prevStep;
+          renderPdfViewerStage();
+        }
+        return;
+      } else if (action === 'pdf-zoom-in') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        const cur = Number(state.pdf.zoom || 1.6);
+        const nextStep = PDF_ZOOM_STEPS.find((z) => z > cur + 0.01);
+        if (nextStep) {
+          state.pdf.zoom = nextStep;
+          renderPdfViewerStage();
+        }
+        return;
+      } else if (action === 'pdf-hd-retry') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        updatePdfFrameAndControls({ forceReload: true });
+        return;
+      } else if (action === 'pdf-copy-anchor') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        const anchor = `[[${state.activeDoc.name}#page=${state.pdf.currentPage}]]`;
+        copyInternal(anchor, '已复制页码锚点');
+        return;
+      } else if (action === 'pdf-annotate') {
+        openPdfAnnotateSheet();
+        return;
+      } else if (action === 'pdf-ai-mindmap') {
+        openPdfMindMapSheet();
+        return;
+      } else if (action === 'pdf-insert-anchor') {
+        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+        const anchor = `[[${state.activeDoc.name}#page=${state.pdf.currentPage}]]`;
+        insertTextIntoCompanionNote(anchor, { toastMsg: '已插入页码锚点到伴生笔记' });
+        return;
+      } else if (action === 'pdf-save-companion') {
+        saveCompanionNote();
         return;
       }
-      const anchor = `[[${state.activeDoc.name}#${state.excel.currentSheet}!${sel.colLetter}${sel.row}]]`;
-      copyInternal(anchor, '已复制单元格锚点');
-    } else if (action === 'excel-save') {
-      saveExcelChanges();
-    } else if (action === 'excel-append-row') {
-      openAppendRowSheet();
-    } else if (action === 'excel-export-csv') {
-      if (!state.activeDoc) return;
-      const url = `/api/excel/export-csv?path=${encodeURIComponent(state.activeDoc.path)}&sheet=${encodeURIComponent(state.excel.currentSheet)}`;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${state.activeDoc.name.replace(/\.xlsx$/i, '')}_${state.excel.currentSheet}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      showToast('正在导出 CSV 文件…', 'info', { duration: 2000 });
-    } else if (action === 'excel-prev-page') {
-      if (state.excel.page > 1) {
-        state.excel.page -= 1;
-        loadExcelRows({ preservePending: true });
+    }
+
+    // 7. V4 Live Preview click-to-edit block activation
+    if (
+      (state.activeDoc?.type === 'markdown' || state.activeDoc?.type === 'text') &&
+      state.mdMode === 'live'
+    ) {
+      const lpBlock = e.target.closest('.lp-container .lp-block');
+      if (lpBlock && !lpBlock.classList.contains('is-editing')) {
+        if (
+          e.target.closest(
+            '.anchor-pill, button, a, video, audio, input, textarea, select, .media-resize-handle, .media-embed-toolbar, [data-media-action]'
+          )
+        ) {
+          return;
+        }
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+          return;
+        }
+        const startLine = Number.parseInt(lpBlock.dataset.mdStart, 10);
+        if (Number.isFinite(startLine)) {
+          activateBlockByStartLine(startLine, 'end');
+        }
       }
-    } else if (action === 'excel-next-page') {
-      if (state.excel.page < state.excel.totalPages) {
-        state.excel.page += 1;
-        loadExcelRows({ preservePending: true });
-      }
-    } else if (action === 'pdf-jump-page') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      const inp = containerEl.querySelector('[data-role="pdf-page-input"]');
-      const raw = Number.parseInt(inp?.value, 10) || 1;
-      setPdfPage(raw);
-    } else if (action === 'pdf-prev-page') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      setPdfPage(state.pdf.currentPage - 1);
-    } else if (action === 'pdf-next-page') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      setPdfPage(state.pdf.currentPage + 1);
-    } else if (action === 'pdf-zoom-out') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      const cur = Number(state.pdf.zoom || 1.6);
-      const prevStep = [...PDF_ZOOM_STEPS].reverse().find((z) => z < cur - 0.01);
-      if (prevStep) {
-        state.pdf.zoom = prevStep;
-        renderPdfViewerStage();
-      }
-    } else if (action === 'pdf-zoom-in') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      const cur = Number(state.pdf.zoom || 1.6);
-      const nextStep = PDF_ZOOM_STEPS.find((z) => z > cur + 0.01);
-      if (nextStep) {
-        state.pdf.zoom = nextStep;
-        renderPdfViewerStage();
-      }
-    } else if (action === 'pdf-hd-retry') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      updatePdfFrameAndControls({ forceReload: true });
-    } else if (action === 'pdf-copy-anchor') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      const anchor = `[[${state.activeDoc.name}#page=${state.pdf.currentPage}]]`;
-      copyInternal(anchor, '已复制页码锚点');
-    } else if (action === 'pdf-annotate') {
-      openPdfAnnotateSheet();
-    } else if (action === 'pdf-ai-mindmap') {
-      openPdfMindMapSheet();
-    } else if (action === 'pdf-insert-anchor') {
-      if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-      const anchor = `[[${state.activeDoc.name}#page=${state.pdf.currentPage}]]`;
-      insertTextIntoCompanionNote(anchor, { toastMsg: '已插入页码锚点到伴生笔记' });
-    } else if (action === 'pdf-save-companion') {
-      saveCompanionNote();
     }
   });
 
@@ -4105,27 +5579,138 @@ export function initCenterView(containerEl) {
       startExcelInlineEdit(rowNum, col1);
       return;
     }
-
-    // Pain Point #7: Markdown preview inline block double-click edit
-    if (
-      (state.activeDoc?.type === 'markdown' || state.activeDoc?.type === 'text') &&
-      state.mdMode === 'preview'
-    ) {
-      if (
-        e.target.closest('.anchor-pill') ||
-        e.target.closest('[data-role="inline-block-editor-wrap"]') ||
-        e.target.closest('button, a, input, textarea')
-      ) {
-        return;
-      }
-      const blockEl = e.target.closest('.md-preview [data-md-start]');
-      if (blockEl) {
-        startInlineBlockEdit(blockEl);
-      }
-    }
   });
 
   containerEl.addEventListener('keydown', (e) => {
+    // V4: Inline block editor keyboard flow (ArrowUp, ArrowDown, Escape, Ctrl+B/I//)
+    if (e.target.matches('.lp-block-editor')) {
+      const ta = e.target;
+      const idx = Number.parseInt(ta.dataset.blockIdx, 10);
+      const mod = e.metaKey || e.ctrlKey;
+
+      if (mod && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        applyEditorInlineShortcut(ta, 'bold');
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        applyEditorInlineShortcut(ta, 'italic');
+        return;
+      }
+      if (mod && e.key === '/') {
+        e.preventDefault();
+        applyEditorInlineShortcut(ta, 'quote');
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        commitActiveBlock({ reRender: true });
+        return;
+      }
+      if (
+        e.key === 'ArrowUp' &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !mod &&
+        ta.selectionStart === ta.selectionEnd &&
+        !ta.value.slice(0, ta.selectionStart).includes('\n')
+      ) {
+        const blockEl = ta.closest('.lp-block');
+        const curStart = state.editingBlockRange?.startLine ?? (Number.parseInt(blockEl?.dataset?.mdStart, 10) || 0);
+        if (curStart > 0) {
+          e.preventDefault();
+          commitActiveBlock({ reRender: false });
+          const blocks = parseMarkdownBlocks(state.activeDoc?.content || '');
+          const prevBlkIdx = blocks.reduce((acc, b, i) => (b.startLine < curStart ? i : acc), -1);
+          if (prevBlkIdx >= 0) {
+            activateBlockByIndex(prevBlkIdx, 'end');
+          } else {
+            renderMarkdownMode();
+          }
+        }
+        return;
+      }
+      if (
+        e.key === 'ArrowDown' &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !mod &&
+        ta.selectionStart === ta.selectionEnd &&
+        !ta.value.slice(ta.selectionStart).includes('\n')
+      ) {
+        const blockEl = ta.closest('.lp-block');
+        const curEnd =
+          state.editingBlockRange?.endLine ??
+          (Number.parseInt(blockEl?.dataset?.mdEnd ?? blockEl?.dataset?.mdStart, 10) || 0);
+        const prevLineCount = getMdLines().length;
+        const blocksBefore = parseMarkdownBlocks(state.activeDoc?.content || '');
+        const hasNext = blocksBefore.some((b) => b.startLine > curEnd);
+        if (hasNext) {
+          e.preventDefault();
+          commitActiveBlock({ reRender: false });
+          const lineDelta = getMdLines().length - prevLineCount;
+          const blocksAfter = parseMarkdownBlocks(state.activeDoc?.content || '');
+          const nextBlkIdx = blocksAfter.findIndex((b) => b.startLine > curEnd + lineDelta);
+          if (nextBlkIdx >= 0) {
+            activateBlockByIndex(nextBlkIdx, 'start');
+          } else {
+            renderMarkdownMode();
+          }
+        }
+        return;
+      }
+      return;
+    }
+
+    // V4: Source mode Ctrl+B / Ctrl+I / Ctrl+/
+    if (e.target.matches('.md-editor') && !e.target.dataset.role) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        applyEditorInlineShortcut(e.target, 'bold');
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        applyEditorInlineShortcut(e.target, 'italic');
+        return;
+      }
+      if (mod && e.key === '/') {
+        e.preventDefault();
+        applyEditorInlineShortcut(e.target, 'quote');
+        return;
+      }
+    }
+
+    // V4: Find & Replace bar keyboard navigation
+    if (e.target.matches('[data-role="doc-find-input"]')) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        stepFindMatch(e.shiftKey ? -1 : 1);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFindBar();
+      }
+      return;
+    }
+    if (e.target.matches('[data-role="doc-replace-input"]')) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        replaceCurrentMatch();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFindBar();
+      }
+      return;
+    }
+
+    if (e.target.matches('.lp-add-block-zone') && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      appendNewBlockAndFocus();
+      return;
+    }
+
     if (e.target.matches('input.excel-cell-input')) {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -4164,14 +5749,17 @@ export function initCenterView(containerEl) {
     }, 30);
   });
 
-  // Global Ctrl+S / Cmd+S + PDF Left/Right page navigation shortcuts
+  // Global Shortcuts: Ctrl+S, Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z, Ctrl+F, PDF Left/Right
   document.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
-      if (!state.activeDoc) return;
-      const sheetOpen = document.getElementById('sheet-overlay')?.classList.contains('is-open');
-      const spotlightOpen = document.getElementById('spotlight-overlay')?.classList.contains('is-open');
-      if (sheetOpen || spotlightOpen) return;
+    const sheetOpen = document.getElementById('sheet-overlay')?.classList.contains('is-open');
+    const spotlightOpen = document.getElementById('spotlight-overlay')?.classList.contains('is-open');
+    if (sheetOpen || spotlightOpen) return;
 
+    const mod = e.metaKey || e.ctrlKey;
+    const keyLower = String(e.key || '').toLowerCase();
+
+    if (mod && keyLower === 's') {
+      if (!state.activeDoc) return;
       e.preventDefault();
       if (state.activeDoc.type === 'excel') {
         const activeInput = containerEl.querySelector('input.excel-cell-input');
@@ -4187,12 +5775,56 @@ export function initCenterView(containerEl) {
       return;
     }
 
+    if (mod && keyLower === 'f') {
+      if (!state.activeDoc) return;
+      if (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text') {
+        e.preventDefault();
+        openFindBar();
+        return;
+      }
+      if (state.activeDoc.type === 'excel') {
+        e.preventDefault();
+        const searchEl = containerEl.querySelector('[data-role="excel-search"]');
+        searchEl?.focus();
+        searchEl?.select?.();
+        return;
+      }
+    }
+
+    if (mod && (keyLower === 'z' || keyLower === 'y')) {
+      const doc = state.activeDoc;
+      if (doc && (doc.type === 'markdown' || doc.type === 'text')) {
+        const activeEl = document.activeElement;
+        const isUnrelatedInput =
+          activeEl &&
+          activeEl.matches('input, textarea, select, [contenteditable="true"]') &&
+          !activeEl.classList.contains('lp-block-editor') &&
+          !(activeEl.classList.contains('md-editor') && containerEl.contains(activeEl) && !activeEl.dataset.role);
+
+        if (!isUnrelatedInput) {
+          e.preventDefault();
+          if (keyLower === 'z' && !e.shiftKey) {
+            performUndo();
+          } else {
+            performRedo();
+          }
+          return;
+        }
+      }
+    }
+
+    if (e.key === 'Escape' && state.findBar.open) {
+      const activeEl = document.activeElement;
+      if (!activeEl || activeEl === document.body || containerEl.contains(activeEl)) {
+        e.preventDefault();
+        closeFindBar();
+        return;
+      }
+    }
+
     if (state.activeDoc?.type === 'pdf' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       const activeEl = document.activeElement;
       if (activeEl && activeEl.matches('input, textarea, select, [contenteditable="true"]')) return;
-      const sheetOpen = document.getElementById('sheet-overlay')?.classList.contains('is-open');
-      const spotlightOpen = document.getElementById('spotlight-overlay')?.classList.contains('is-open');
-      if (sheetOpen || spotlightOpen) return;
       if (e.key === 'ArrowLeft' && state.pdf.currentPage > 1) {
         e.preventDefault();
         setPdfPage(state.pdf.currentPage - 1);

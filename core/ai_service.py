@@ -25,9 +25,11 @@ import httpx
 from config import APPS_FILE, TREE_FILE, ensure_data_dirs, load_config
 from core import safe_io
 
-MAX_CHAT_CONTEXT_FILES = 5
-PER_FILE_MAX_CHARS = 4000
-TOTAL_CONTEXT_MAX_CHARS = 12000
+MAX_CHAT_CONTEXT_FILES = 20
+MAX_CONTEXT_FILES = MAX_CHAT_CONTEXT_FILES
+PER_FILE_MAX_CHARS = 5000
+TOTAL_CONTEXT_MAX_CHARS = 30000
+MAX_TOTAL_CONTEXT_CHARS = TOTAL_CONTEXT_MAX_CHARS
 SUMMARIZE_FILE_MAX_CHARS = 6000
 TRUNCATED_MARKER = "\n...[总上下文超长已智能截断]...\n"
 
@@ -430,13 +432,13 @@ async def _call_chat_json(
 # ---------------------------------------------------------------------------
 
 def validate_chat_context(context_paths: list[str] | None) -> list[dict[str, Any]]:
-    """Validate and extract text from up to 5 cross-format files for AI chat.
+    """Validate and extract text from up to 20 cross-format files for AI chat.
 
     Enforces:
-    - Max 5 files (`ValueError` if exceeded)
+    - Max 20 files (`ValueError` if exceeded)
     - `safe_io.assert_not_private` on every path (`PermissionError` naming exact file)
-    - Per-file limit: 4000 chars
-    - Total combined context limit: 12000 chars (head/tail truncated cleanly)
+    - Dynamic per-file budget: max(1200, min(5000, 30000 // max(1, len(unique_paths))))
+    - Total combined context limit: 30000 chars (head/tail truncated cleanly)
     """
     if not context_paths:
         return []
@@ -449,29 +451,35 @@ def validate_chat_context(context_paths: list[str] | None) -> list[dict[str, Any
             seen_raw.add(s)
             deduped.append(s)
 
-    if len(deduped) > MAX_CHAT_CONTEXT_FILES:
-        raise ValueError("跨格式联合问答最多同时勾选 5 份文件")
+    if len(deduped) > MAX_CONTEXT_FILES:
+        raise ValueError("跨格式联合问答最多同时勾选 20 份文件")
 
-    docs: list[dict[str, Any]] = []
+    unique_paths: list[Path] = []
     seen_resolved: set[str] = set()
     for raw_path in deduped:
-        resolved, extracted = _extract_text_for_ai(raw_path, max_chars=PER_FILE_MAX_CHARS)
+        resolved = safe_io.assert_not_private(raw_path)
         resolved_str = str(resolved)
-        if resolved_str in seen_resolved:
-            continue
-        seen_resolved.add(resolved_str)
+        if resolved_str not in seen_resolved:
+            seen_resolved.add(resolved_str)
+            unique_paths.append(resolved)
+
+    per_file_chars = max(1200, min(5000, MAX_TOTAL_CONTEXT_CHARS // max(1, len(unique_paths))))
+
+    docs: list[dict[str, Any]] = []
+    for resolved in unique_paths:
+        resolved_checked, extracted = _extract_text_for_ai(str(resolved), max_chars=per_file_chars)
         docs.append({
-            "path": resolved_str,
-            "name": resolved.name,
-            "ext": resolved.suffix.lower(),
+            "path": str(resolved_checked),
+            "name": resolved_checked.name,
+            "ext": resolved_checked.suffix.lower(),
             "text": extracted,
         })
 
-    # Enforce 12000-char combined context budget across extracted texts.
+    # Enforce 30000-char combined context budget across extracted texts.
     total_chars = sum(len(d["text"]) for d in docs)
-    if total_chars > TOTAL_CONTEXT_MAX_CHARS and docs:
-        per_doc_budget = max(300, TOTAL_CONTEXT_MAX_CHARS // len(docs))
-        remaining_budget = TOTAL_CONTEXT_MAX_CHARS
+    if total_chars > MAX_TOTAL_CONTEXT_CHARS and docs:
+        per_doc_budget = max(300, MAX_TOTAL_CONTEXT_CHARS // len(docs))
+        remaining_budget = MAX_TOTAL_CONTEXT_CHARS
         for idx, doc in enumerate(docs):
             left_docs = len(docs) - idx
             alloc = min(per_doc_budget, remaining_budget) if left_docs > 1 else remaining_budget
@@ -815,7 +823,7 @@ def _generate_offline_chat_reply(
 
     if not context_docs:
         lines.append(f"针对您的问题：**“{last_user or '当前咨询'}”**\n")
-        lines.append("- 目前左侧文件树未勾选参考文档。您可以勾选最多 **5 份** PDF / Excel / Markdown / TXT 文件进行跨格式联合问答。")
+        lines.append(f"- 目前左侧文件树未勾选参考文档。您可以勾选最多 **{MAX_CONTEXT_FILES} 份** PDF / Excel / Markdown / TXT 文件进行跨格式联合问答。")
         lines.append("- 您也可以在右上角设置中填写兼容 OpenAI 接口的 `Base URL` 与 `API Key` 解锁完整云端大模型流式对话。")
         return "\n".join(lines)
 

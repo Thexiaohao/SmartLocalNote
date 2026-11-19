@@ -1,11 +1,13 @@
 /**
- * SmartLocalNote - Floating Frosted-Glass Stickies & Global Apple Context Menu (V3)
- * Pain Point #6 + Innovation E:
- *  - Right-click anywhere (except Mind Map canvas/nodes & selected text in inputs) -> Apple frosted context menu
- *  - Spawn floating stickies anywhere, drag freely, pick 4 soft Apple tints, minimize to bottom-left dock pill
- *  - Drag sticky directly into Center Markdown note via setDragPayload() or send to AI Todo extraction
- *  - Alt+N global shortcut + store.on('sticky:spawn')
+ * SmartLocalNote - Original Spark Card (闪念卡) & Scoped Center Context Menu (V4)
+ *  - Original neutral frosted Spark Card with subtle 3px left accent strip (NO macOS Stickies look)
+ *  - Zero-lag 60fps dragging via window pointermove + requestAnimationFrame + translate3d
+ *  - Bottom-right resize handle (w: 220..520, h: 160..460), persisted in localStorage
+ *  - Clean header with drag grip, title, minimize [—], and strict close [✕] (zero color mutation)
+ *  - Clean footer with compact tag/accent cycler pill, [⠿ 拖入笔记], and [✨ 待办]
+ *  - Right-click context menu STRICTLY scoped to #center-panel (never triggers on left/right/top/mindmap/spark-card)
  *
+ * Exports: initStickies, spawnStickyNote (preserved for compatibility).
  * Communicates strictly via store EventBus.
  */
 
@@ -22,13 +24,20 @@ import { api } from './api_client.js';
 import { icon } from './icons.js';
 
 const STICKIES_STORAGE_KEY = 'sln_stickies';
-const STICKY_COLORS = ['yellow', 'blue', 'green', 'pink'];
-const STICKY_COLOR_LABELS = {
-  yellow: '奶油黄',
-  blue: '晴空蓝',
-  green: '薄荷绿',
-  pink: '樱花粉',
+const SPARK_ACCENTS = ['blue', 'amber', 'green', 'slate'];
+const SPARK_TAG_META = {
+  blue: { label: '闪念', badge: '🏷 闪念' },
+  amber: { label: '重点', badge: '🏷 重点' },
+  green: { label: '待办', badge: '🏷 待办' },
+  slate: { label: '灵感', badge: '🏷 灵感' },
 };
+
+const DEFAULT_W = 280;
+const DEFAULT_H = 210;
+const MIN_W = 220;
+const MAX_W = 520;
+const MIN_H = 160;
+const MAX_H = 460;
 
 let initialized = false;
 let stickies = [];
@@ -36,6 +45,37 @@ let layerEl = null;
 let dockEl = null;
 let menuEl = null;
 let zCounter = 55;
+
+function migrateAccent(raw) {
+  if (SPARK_ACCENTS.includes(raw)) return raw;
+  if (raw === 'yellow') return 'amber';
+  if (raw === 'pink') return 'slate';
+  return 'blue';
+}
+
+function clampWidth(w) {
+  const num = Number(w);
+  if (!Number.isFinite(num)) return DEFAULT_W;
+  return Math.max(MIN_W, Math.min(MAX_W, Math.round(num)));
+}
+
+function clampHeight(h) {
+  const num = Number(h);
+  if (!Number.isFinite(num)) return DEFAULT_H;
+  return Math.max(MIN_H, Math.min(MAX_H, Math.round(num)));
+}
+
+function clampPosX(x, w = DEFAULT_W) {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const maxLeft = Math.max(12, vw - Math.min(w, vw - 24) - 12);
+  return Math.max(12, Math.min(maxLeft, Math.round(x)));
+}
+
+function clampPosY(y, h = DEFAULT_H) {
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const maxTop = Math.max(58, vh - Math.min(h, vh - 70) - 12);
+  return Math.max(58, Math.min(maxTop, Math.round(y)));
+}
 
 function loadStickies() {
   try {
@@ -45,14 +85,21 @@ function loadStickies() {
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((item) => item && typeof item === 'object')
-      .map((item, idx) => ({
-        id: String(item.id || `sticky_${Date.now()}_${idx}`),
-        text: typeof item.text === 'string' ? item.text : '',
-        x: clampPosX(Number(item.x) || 80 + (idx % 4) * 28),
-        y: clampPosY(Number(item.y) || 90 + (idx % 4) * 24),
-        color: STICKY_COLORS.includes(item.color) ? item.color : 'yellow',
-        minimized: Boolean(item.minimized),
-      }));
+      .map((item, idx) => {
+        const w = clampWidth(item.w);
+        const h = clampHeight(item.h);
+        const accent = migrateAccent(item.accent || item.color);
+        return {
+          id: String(item.id || `spark_${Date.now()}_${idx}`),
+          text: typeof item.text === 'string' ? item.text : '',
+          x: clampPosX(Number(item.x) || 80 + (idx % 4) * 28, w),
+          y: clampPosY(Number(item.y) || 90 + (idx % 4) * 24, h),
+          w,
+          h,
+          accent,
+          minimized: Boolean(item.minimized),
+        };
+      });
   } catch {
     return [];
   }
@@ -64,16 +111,6 @@ function saveStickies() {
   } catch {
     // ignore storage quota errors
   }
-}
-
-function clampPosX(x) {
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-  return Math.max(12, Math.min(Math.max(12, vw - 276), Math.round(x)));
-}
-
-function clampPosY(y) {
-  const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-  return Math.max(58, Math.min(Math.max(58, vh - 190), Math.round(y)));
 }
 
 function ensureLayer() {
@@ -99,7 +136,7 @@ function ensureDockPill() {
       dockEl.id = 'sticky-dock-pill';
       dockEl.type = 'button';
       dockEl.className = 'sticky-dock-pill hidden';
-      dockEl.title = '展开已最小化的灵感便签';
+      dockEl.title = '展开已最小化的闪念卡';
       dockEl.addEventListener('click', () => {
         let changed = false;
         stickies = stickies.map((s) => {
@@ -174,7 +211,7 @@ function openUrlCapsuleSheet() {
         if (!/^https?:\/\//i.test(rawUrl)) {
           rawUrl = `https://${rawUrl}`;
         }
-        let customTitle = String(titleInp?.value || '').trim();
+        const customTitle = String(titleInp?.value || '').trim();
         if (submitBtn) {
           submitBtn.disabled = true;
           submitBtn.textContent = '正在读取标题…';
@@ -187,7 +224,6 @@ function openUrlCapsuleSheet() {
             if (res?.title) finalTitle = String(res.title).trim();
             if (res?.url) finalUrl = String(res.url).trim();
           } catch {
-            // fallback to hostname if endpoint unavailable or offline
             try {
               finalTitle = new URL(rawUrl).hostname.replace(/^www\./i, '');
             } catch {
@@ -220,22 +256,22 @@ function showContextMenu(clientX, clientY) {
 
   menu.innerHTML = `
     <button type="button" class="context-menu-item" data-ctx-action="spawn-sticky" role="menuitem">
-      <span class="ctx-item-left"><span>📝</span><span>在此处召唤灵感便签</span></span>
+      <span class="ctx-item-left"><span>📝</span><span>在此处召唤闪念卡</span></span>
       <kbd class="ctx-kbd">Alt+N</kbd>
     </button>
     <button type="button" class="context-menu-item" data-ctx-action="insert-url" role="menuitem">
       <span class="ctx-item-left"><span>🌐</span><span>插入网址直达胶囊</span></span>
     </button>
     <div class="context-menu-sep" role="separator"></div>
-    <button type="button" class="context-menu-item" data-ctx-action="ai-summarize" role="menuitem">
-      <span class="ctx-item-left"><span>✨</span><span>AI 总结当前文档</span></span>
+    <button type="button" class="context-menu-item" data-ctx-action="ai-polish" role="menuitem">
+      <span class="ctx-item-left"><span>✨</span><span>AI 润色当前笔记</span></span>
     </button>
     <button type="button" class="context-menu-item" data-ctx-action="toggle-mindmap" role="menuitem">
       <span class="ctx-item-left"><span>🧠</span><span>切换脑图视图</span></span>
     </button>
     <button type="button" class="context-menu-item" data-ctx-action="semantic-search" role="menuitem">
       <span class="ctx-item-left"><span>🔍</span><span>语义描述检索</span></span>
-      <kbd class="ctx-kbd">⌘K</kbd>
+      <kbd class="ctx-kbd">Ctrl+K</kbd>
     </button>
   `;
 
@@ -244,7 +280,6 @@ function showContextMenu(clientX, clientY) {
   menu.classList.remove('hidden');
   menu.setAttribute('aria-hidden', 'false');
 
-  // Measure then clamp strictly inside viewport
   const rect = menu.getBoundingClientRect();
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -260,35 +295,58 @@ function showContextMenu(clientX, clientY) {
 }
 
 function bindCardInteractions(card, sticky) {
-  const header = card.querySelector('.sticky-header');
-  const textarea = card.querySelector('.sticky-textarea');
-  const dragPill = card.querySelector('[data-sticky-action="drag-to-note"]');
+  const header = card.querySelector('.spark-header');
+  const textarea = card.querySelector('.spark-textarea');
+  const dragPill = card.querySelector('[data-spark-action="drag-to-note"]');
+  const resizeHandle = card.querySelector('.spark-resize-handle');
+  const tagBtn = card.querySelector('[data-spark-action="cycle-tag"]');
+  const minBtn = card.querySelector('[data-spark-action="minimize"]');
+  const closeBtn = card.querySelector('[data-spark-action="delete"]');
+  const todoBtn = card.querySelector('[data-spark-action="ai-todo"]');
 
-  // Bring card forward on interaction
   card.addEventListener('pointerdown', () => {
     zCounter += 1;
     card.style.zIndex = String(zCounter);
   });
 
-  // Free screen-space dragging via header pointer events
+  // Zero-lag 60fps dragging via window listeners + requestAnimationFrame
   if (header) {
     let dragging = false;
+    let rafId = 0;
     let startX = 0;
     let startY = 0;
     let origX = sticky.x;
     let origY = sticky.y;
+    let pendingX = sticky.x;
+    let pendingY = sticky.y;
 
-    const stopDrag = (e) => {
+    const flushPosition = () => {
+      rafId = 0;
+      sticky.x = pendingX;
+      sticky.y = pendingY;
+      card.style.transform = `translate3d(${pendingX}px, ${pendingY}px, 0)`;
+    };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      pendingX = clampPosX(origX + (e.clientX - startX), sticky.w);
+      pendingY = clampPosY(origY + (e.clientY - startY), sticky.h);
+      if (!rafId) {
+        rafId = window.requestAnimationFrame(flushPosition);
+      }
+    };
+
+    const stopDrag = () => {
       if (!dragging) return;
       dragging = false;
-      card.classList.remove('is-moving');
-      if (e?.pointerId != null) {
-        try {
-          header.releasePointerCapture?.(e.pointerId);
-        } catch {
-          // ignore
-        }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', stopDrag);
+      window.removeEventListener('pointercancel', stopDrag);
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+        flushPosition();
       }
+      card.classList.remove('is-moving');
       saveStickies();
     };
 
@@ -301,25 +359,73 @@ function bindCardInteractions(card, sticky) {
       startY = e.clientY;
       origX = sticky.x;
       origY = sticky.y;
+      pendingX = sticky.x;
+      pendingY = sticky.y;
       card.classList.add('is-moving');
-      try {
-        header.setPointerCapture?.(e.pointerId);
-      } catch {
-        // ignore
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', stopDrag);
+      window.addEventListener('pointercancel', stopDrag);
+    });
+  }
+
+  // Smooth corner resizing via window pointer events + rAF
+  if (resizeHandle) {
+    let resizing = false;
+    let rafId = 0;
+    let startX = 0;
+    let startY = 0;
+    let origW = sticky.w;
+    let origH = sticky.h;
+    let pendingW = sticky.w;
+    let pendingH = sticky.h;
+
+    const flushSize = () => {
+      rafId = 0;
+      sticky.w = pendingW;
+      sticky.h = pendingH;
+      card.style.width = `${pendingW}px`;
+      card.style.height = `${pendingH}px`;
+    };
+
+    const onResizeMove = (e) => {
+      if (!resizing) return;
+      pendingW = clampWidth(origW + (e.clientX - startX));
+      pendingH = clampHeight(origH + (e.clientY - startY));
+      if (!rafId) {
+        rafId = window.requestAnimationFrame(flushSize);
       }
-    });
+    };
 
-    header.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const nextX = clampPosX(origX + (e.clientX - startX));
-      const nextY = clampPosY(origY + (e.clientY - startY));
-      sticky.x = nextX;
-      sticky.y = nextY;
-      card.style.transform = `translate3d(${nextX}px, ${nextY}px, 0)`;
-    });
+    const stopResize = () => {
+      if (!resizing) return;
+      resizing = false;
+      window.removeEventListener('pointermove', onResizeMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+        flushSize();
+      }
+      card.classList.remove('is-resizing');
+      saveStickies();
+    };
 
-    header.addEventListener('pointerup', stopDrag);
-    header.addEventListener('pointercancel', stopDrag);
+    resizeHandle.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resizing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      origW = sticky.w;
+      origH = sticky.h;
+      pendingW = sticky.w;
+      pendingH = sticky.h;
+      card.classList.add('is-resizing');
+      window.addEventListener('pointermove', onResizeMove);
+      window.addEventListener('pointerup', stopResize);
+      window.addEventListener('pointercancel', stopResize);
+    });
   }
 
   // Persist text edits live
@@ -328,59 +434,63 @@ function bindCardInteractions(card, sticky) {
     saveStickies();
   });
 
-  // Color dot switching
-  card.querySelectorAll('[data-sticky-color]').forEach((dot) => {
-    dot.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const nextColor = dot.dataset.stickyColor;
-      if (!STICKY_COLORS.includes(nextColor)) return;
-      sticky.color = nextColor;
-      saveStickies();
-      renderStickies();
-    });
+  // Footer tag / accent cycler (explicitly separate from close button)
+  tagBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const curIdx = SPARK_ACCENTS.indexOf(sticky.accent);
+    const nextAccent = SPARK_ACCENTS[(curIdx + 1) % SPARK_ACCENTS.length];
+    sticky.accent = nextAccent;
+    card.classList.remove('accent-blue', 'accent-amber', 'accent-green', 'accent-slate');
+    card.classList.add(`accent-${nextAccent}`);
+    tagBtn.textContent = SPARK_TAG_META[nextAccent].badge;
+    saveStickies();
   });
 
-  // Minimize toggle
-  card.querySelector('[data-sticky-action="minimize"]')?.addEventListener('click', (e) => {
+  // Minimize card to dock pill
+  minBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
     e.stopPropagation();
     sticky.minimized = true;
     saveStickies();
     renderStickies();
   });
 
-  // Delete sticky
-  card.querySelector('[data-sticky-action="delete"]')?.addEventListener('click', (e) => {
+  // Strict close: stop propagation and delete ONLY this card (zero color mutation)
+  closeBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
     e.stopPropagation();
     stickies = stickies.filter((item) => item.id !== sticky.id);
     saveStickies();
     renderStickies();
   });
 
-  // AI Todo extraction
-  card.querySelector('[data-sticky-action="ai-todo"]')?.addEventListener('click', (e) => {
+  // Send card text to AI Todo extraction
+  todoBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
     e.stopPropagation();
     const text = String(sticky.text || '').trim();
     if (!text) {
-      showToast('请先在便签中输入想法或待办内容', 'warning');
+      showToast('请先在闪念卡中输入想法或待办内容', 'warning');
       textarea?.focus();
       return;
     }
     store.emit('ai:summarize-request', { text, autoRun: true });
-    showToast('已发送便签内容至 AI 提取待办', 'info', { duration: 2000 });
+    showToast('已发送闪念内容至 AI 提取待办', 'info', { duration: 2000 });
   });
 
-  // Drag sticky directly into Center Note
+  // Drag card content directly into Center Note
   if (dragPill) {
     dragPill.addEventListener('dragstart', (e) => {
       const text = String(sticky.text || '').trim();
       if (!text) {
         e.preventDefault();
-        showToast('空便签无法拖入笔记，请先写点内容', 'warning');
+        showToast('空闪念卡无法拖入笔记，请先写点内容', 'warning');
         return;
       }
       setDragPayload(e, {
         type: 'sticky',
-        label: '灵感便签',
+        label: '闪念卡',
         markdown: text,
       });
       card.classList.add('is-dragging');
@@ -399,7 +509,7 @@ function renderStickies() {
   if (!layer || !dock) return;
 
   const activeFocusId =
-    document.activeElement?.closest?.('.sticky-card')?.dataset?.stickyId || null;
+    document.activeElement?.closest?.('.spark-card')?.dataset?.stickyId || null;
 
   layer.innerHTML = '';
 
@@ -407,82 +517,82 @@ function renderStickies() {
   const minimizedCount = stickies.filter((s) => s.minimized).length;
 
   for (const sticky of visibleStickies) {
+    const accent = migrateAccent(sticky.accent);
+    const meta = SPARK_TAG_META[accent] || SPARK_TAG_META.blue;
+
     const card = document.createElement('section');
-    card.className = `sticky-card sticky-${sticky.color}`;
+    card.className = `spark-card accent-${accent}`;
     card.dataset.stickyId = sticky.id;
+    card.style.width = `${clampWidth(sticky.w)}px`;
+    card.style.height = `${clampHeight(sticky.h)}px`;
     card.style.transform = `translate3d(${sticky.x}px, ${sticky.y}px, 0)`;
     card.style.zIndex = String(++zCounter);
-    card.setAttribute('aria-label', '浮动灵感便签');
-
-    const colorDotsHtml = STICKY_COLORS.map(
-      (c) => `
-        <button
-          type="button"
-          class="sticky-color-dot dot-${c} ${sticky.color === c ? 'is-active' : ''}"
-          data-sticky-color="${c}"
-          title="${STICKY_COLOR_LABELS[c]}"
-          aria-label="切换为${STICKY_COLOR_LABELS[c]}"
-        ></button>
-      `
-    ).join('');
+    card.setAttribute('aria-label', '闪念卡');
 
     card.innerHTML = `
-      <header class="sticky-header" title="按住拖动便签位置">
-        <div class="sticky-colors">${colorDotsHtml}</div>
-        <div class="sticky-win-actions">
-          <button type="button" class="sticky-icon-btn" data-sticky-action="minimize" title="最小化到左下角" aria-label="最小化便签">—</button>
-          <button type="button" class="sticky-icon-btn" data-sticky-action="delete" title="关闭删除便签" aria-label="删除便签">✕</button>
+      <header class="spark-header" title="按住拖动闪念卡位置">
+        <div class="spark-title-group">
+          <span class="spark-grip" aria-hidden="true">⋮⋮</span>
+          <span class="spark-title">闪念卡</span>
+        </div>
+        <div class="spark-win-actions">
+          <button type="button" class="spark-icon-btn" data-spark-action="minimize" title="最小化到左下角" aria-label="最小化闪念卡">—</button>
+          <button type="button" class="spark-icon-btn spark-close-btn" data-spark-action="delete" title="关闭并移除" aria-label="关闭闪念卡">✕</button>
         </div>
       </header>
-      <textarea class="sticky-textarea" placeholder="随手记下灵感、待办或引用，可拖入笔记…">${escapeHtml(sticky.text)}</textarea>
-      <footer class="sticky-footer">
-        <button type="button" class="sticky-action-pill" data-sticky-action="drag-to-note" draggable="true" title="按住拖入中间 Markdown 笔记">
-          ⠿ 拖入笔记
-        </button>
-        <button type="button" class="sticky-action-pill" data-sticky-action="ai-todo" title="让 AI 提炼为结构化待办">
-          ✨ AI 待办
-        </button>
+      <textarea class="spark-textarea" placeholder="随手记下闪念、要点或待办，可拖入笔记…">${escapeHtml(sticky.text)}</textarea>
+      <footer class="spark-footer">
+        <button type="button" class="spark-tag-pill" data-spark-action="cycle-tag" title="点击切换标签属性">${escapeHtml(meta.badge)}</button>
+        <div class="spark-footer-actions">
+          <button type="button" class="spark-action-pill" data-spark-action="drag-to-note" draggable="true" title="按住拖入中间 Markdown 笔记">⠿ 拖入笔记</button>
+          <button type="button" class="spark-action-pill" data-spark-action="ai-todo" title="让 AI 提炼为结构化待办">✨ 待办</button>
+        </div>
       </footer>
+      <span class="spark-resize-handle" title="按住拖动调节卡片大小" aria-hidden="true"></span>
     `;
 
     bindCardInteractions(card, sticky);
     layer.appendChild(card);
 
     if (activeFocusId && activeFocusId === sticky.id) {
-      const ta = card.querySelector('.sticky-textarea');
+      const ta = card.querySelector('.spark-textarea');
       ta?.focus();
     }
   }
 
   if (minimizedCount > 0) {
     dock.classList.remove('hidden');
-    dock.innerHTML = `📌 便签 (${minimizedCount})`;
+    dock.innerHTML = `📌 闪念卡 (${minimizedCount})`;
   } else {
     dock.classList.add('hidden');
   }
 }
 
 /**
- * Spawn a new floating frosted-glass sticky note at (x, y) and persist in localStorage.
- * @param {{ x?: number, y?: number, text?: string, color?: 'yellow'|'blue'|'green'|'pink' }} [opts={}]
- * @returns {object} created sticky object
+ * Spawn a new floating Spark Card at (x, y) and persist in localStorage.
+ * @param {{ x?: number, y?: number, text?: string, accent?: 'blue'|'amber'|'green'|'slate', color?: string }} [opts={}]
+ * @returns {object} created spark card object
  */
-export function spawnStickyNote({ x, y, text = '', color } = {}) {
+export function spawnStickyNote({ x, y, text = '', accent, color } = {}) {
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
   const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
   const offset = (stickies.length % 5) * 22;
-  const targetX = clampPosX(Number.isFinite(Number(x)) ? Number(x) : Math.round(vw * 0.56 + offset));
-  const targetY = clampPosY(Number.isFinite(Number(y)) ? Number(y) : Math.round(vh * 0.22 + offset));
-  const pickedColor = STICKY_COLORS.includes(color)
-    ? color
-    : STICKY_COLORS[stickies.length % STICKY_COLORS.length];
+  const w = DEFAULT_W;
+  const h = DEFAULT_H;
+  const targetX = clampPosX(Number.isFinite(Number(x)) ? Number(x) : Math.round(vw * 0.56 + offset), w);
+  const targetY = clampPosY(Number.isFinite(Number(y)) ? Number(y) : Math.round(vh * 0.22 + offset), h);
+  const pickedAccent = accent || color
+    ? migrateAccent(accent || color)
+    : SPARK_ACCENTS[stickies.length % SPARK_ACCENTS.length];
 
   const sticky = {
-    id: `sticky_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: `spark_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     text: String(text || ''),
     x: targetX,
     y: targetY,
-    color: pickedColor,
+    w,
+    h,
+    accent: pickedAccent,
     minimized: false,
   };
 
@@ -491,7 +601,7 @@ export function spawnStickyNote({ x, y, text = '', color } = {}) {
   renderStickies();
 
   window.requestAnimationFrame(() => {
-    const ta = layerEl?.querySelector(`.sticky-card[data-sticky-id="${CSS.escape(sticky.id)}"] .sticky-textarea`);
+    const ta = layerEl?.querySelector(`.spark-card[data-sticky-id="${CSS.escape(sticky.id)}"] .spark-textarea`);
     ta?.focus();
   });
 
@@ -507,12 +617,8 @@ function handleContextMenuAction(action) {
     spawnStickyNote({ x: spawnX, y: spawnY });
   } else if (action === 'insert-url') {
     openUrlCapsuleSheet();
-  } else if (action === 'ai-summarize') {
-    store.emit('ai:summarize-request', {
-      text: store.state.activeDocumentText || '',
-      file_path: store.state.activeFile?.path || null,
-      autoRun: true,
-    });
+  } else if (action === 'ai-polish') {
+    store.emit('center:polish-doc');
   } else if (action === 'toggle-mindmap') {
     store.emit('center:toggle-mindmap');
   } else if (action === 'semantic-search') {
@@ -521,7 +627,7 @@ function handleContextMenuAction(action) {
 }
 
 /**
- * Initialize floating stickies & global Apple frosted right-click context menu.
+ * Initialize floating Spark Cards & center-panel-scoped Apple frosted right-click context menu.
  */
 export function initStickies() {
   if (initialized || typeof document === 'undefined') return;
@@ -533,23 +639,32 @@ export function initStickies() {
   const menu = ensureContextMenu();
   renderStickies();
 
-  // Context menu action delegation
   menu?.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-ctx-action]');
     if (!btn) return;
     handleContextMenuAction(btn.dataset.ctxAction);
   });
 
-  // Global right-click listener
+  // Strictly scoped right-click context menu ONLY inside #center-panel
   document.addEventListener('contextmenu', (e) => {
-    // Allow Mind Map canvas & nodes to handle their own Innovation D context menu
-    if (e.target.closest('#mindmap-canvas, .mindmap-stage, .mindmap-node')) {
+    const target = e.target;
+    if (!(target instanceof Element)) {
+      hideContextMenu();
+      return;
+    }
+
+    // Must be inside #center-panel and NOT in left/right/top/mindmap/spark-card
+    if (!target.closest('#center-panel')) {
+      hideContextMenu();
+      return;
+    }
+    if (target.closest('#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .spark-card')) {
       hideContextMenu();
       return;
     }
 
     // Keep native copy/paste menu inside inputs/textareas when text is selected
-    const inputEl = e.target.closest('input, textarea');
+    const inputEl = target.closest('input, textarea');
     if (inputEl) {
       const selLen = Math.abs((inputEl.selectionEnd || 0) - (inputEl.selectionStart || 0));
       if (selLen > 0) {
@@ -562,7 +677,6 @@ export function initStickies() {
     showContextMenu(e.clientX, e.clientY);
   });
 
-  // Dismiss context menu on outside click, scroll, or ESC
   document.addEventListener('pointerdown', (e) => {
     if (menuEl && !menuEl.classList.contains('hidden') && !e.target.closest('#context-menu')) {
       hideContextMenu();
@@ -571,7 +685,6 @@ export function initStickies() {
 
   window.addEventListener('blur', hideContextMenu);
 
-  // Global Alt+N shortcut to spawn a sticky note immediately
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       hideContextMenu();
@@ -584,7 +697,6 @@ export function initStickies() {
     }
   });
 
-  // EventBus listener for sticky spawning
   store.on('sticky:spawn', (opts) => {
     spawnStickyNote(opts || {});
   });

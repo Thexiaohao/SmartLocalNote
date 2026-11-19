@@ -17,6 +17,7 @@ const {
   closeSheet,
   applyTheme,
   copyInternal,
+  resetUiLayout,
 } = storeMod;
 
 let initialized = false;
@@ -991,7 +992,61 @@ function buildQuickCommands() {
       sub: '命令 · AI 预设 / 自动保存 / 默认笔记目录 / 手机端入口',
       keywords: 'shezhi settings lan url autosave dir',
     },
+    {
+      type: 'cmd',
+      id: 'cmd-reset-layout',
+      icon: 'rotate-ccw',
+      label: '恢复默认三栏宽度与模块尺寸',
+      sub: '命令 · 一键重置左右栏宽度与模块高度/排序',
+      keywords: 'huifu moren buju reset layout width height 恢复 默认 布局',
+    },
+    {
+      type: 'cmd',
+      id: 'cmd-shortcuts-cheatsheet',
+      icon: 'zap',
+      label: '查看全部快捷键速查表',
+      sub: '命令 · 全局编辑、搜索、闪念卡与右键菜单指南',
+      keywords: 'kuaijiejian shortcuts cheatsheet help 快捷键 速查',
+    },
   ];
+}
+
+function openShortcutsCheatsheetSheet() {
+  const shortcuts = [
+    { key: 'Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z)', desc: '撤回 / 重做（含拖入、格式化、缩放、脑图改字）' },
+    { key: 'Ctrl+S', desc: '原位保存（自动生成 .bak 快照）' },
+    { key: 'Ctrl+F', desc: '当前文档内查找与替换' },
+    { key: 'Ctrl+B / Ctrl+I / Ctrl+/', desc: '加粗 / 斜体 / 引用块' },
+    { key: 'Ctrl+K', desc: 'Spotlight 全局与 AI 语义描述检索' },
+    { key: 'Ctrl+N', desc: '新建笔记' },
+    { key: 'Alt+N', desc: '在当前位置召唤悬浮闪念卡' },
+    { key: '右键中间文档', desc: '召唤闪念卡 / 插入网址 / AI 润色 / 脑图' },
+    { key: '右键左侧文件', desc: '重命名 / 隐私锁 / 系统打开 / 移出列表' },
+  ];
+
+  openSheet({
+    title: '⌨️ 全部快捷键与交互速查表',
+    bodyHtml: `
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        ${shortcuts
+          .map(
+            (item) => `
+            <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;">
+              <kbd class="kbd-hint" style="font-size:11.5px;padding:3px 8px;flex-shrink:0;">${escapeHtml(item.key)}</kbd>
+              <span style="font-size:12.5px;color:var(--text-primary);text-align:right;line-height:1.45;">${escapeHtml(item.desc)}</span>
+            </div>
+          `
+          )
+          .join('')}
+      </div>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-primary" id="shortcuts-close-btn">知道了</button>
+    `,
+    onMount(card) {
+      card.querySelector('#shortcuts-close-btn')?.addEventListener('click', closeSheet);
+    },
+  });
 }
 
 function getFileIconByExt(extOrPath) {
@@ -1396,6 +1451,15 @@ async function executeSpotlightItem(item) {
       }
       case 'cmd-open-settings':
         openSettingsSheet();
+        break;
+      case 'cmd-reset-layout':
+        if (typeof resetUiLayout === 'function') {
+          resetUiLayout();
+        }
+        showToast('已恢复默认三栏宽度与模块尺寸', 'success');
+        break;
+      case 'cmd-shortcuts-cheatsheet':
+        openShortcutsCheatsheetSheet();
         break;
       default:
         break;
@@ -1878,6 +1942,11 @@ async function openSettingsSheet() {
           <label for="cfg-whitelist-dirs" style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">Whitelist Dirs（每行一个路径）</label>
           <textarea id="cfg-whitelist-dirs" class="apple-textarea" rows="3" placeholder="/path/to/study-docs">${escapeHtml(whitelistText)}</textarea>
         </div>
+
+        <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;flex-wrap:wrap;">
+          <div style="font-size:12px;color:var(--text-secondary);">将左右侧栏宽度、模块显隐排序与卡片高度恢复为初始状态</div>
+          <button type="button" class="pill-btn pill-btn-sm" id="cfg-reset-layout">↺ 恢复默认三栏宽度与模块布局</button>
+        </div>
       </div>
     `,
     footerHtml: `
@@ -2003,6 +2072,13 @@ async function openSettingsSheet() {
         } finally {
           openNotesDirBtn.disabled = false;
         }
+      });
+
+      card.querySelector('#cfg-reset-layout')?.addEventListener('click', () => {
+        if (typeof resetUiLayout === 'function') {
+          resetUiLayout();
+        }
+        showToast('已恢复默认三栏宽度与模块尺寸', 'success');
       });
 
       card.querySelector('#cfg-cancel')?.addEventListener('click', closeSheet);

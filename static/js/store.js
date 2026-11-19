@@ -12,7 +12,8 @@ const PANE_WIDTHS_KEY = 'sln_pane_widths';
 const UI_LAYOUT_KEY = 'sln_ui_layout';
 const RECENT_FILES_KEY = 'sln_recent_files';
 const AUTO_SAVE_KEY = 'sln_auto_save';
-const MAX_CONTEXT_FILES = 5;
+const LEFT_SORT_KEY = 'sln_left_sort';
+const MAX_CONTEXT_FILES = 20;
 const MAX_TOASTS = 3;
 const MAX_RECENT_FILES = 8;
 
@@ -42,6 +43,7 @@ const DEFAULT_UI_LAYOUT = {
     { id: 'ai_templates', title: 'AI 常用指令模板', visible: false },
   ],
   scratchpadText: '',
+  moduleHeights: {},
 };
 
 const listeners = new Map();
@@ -53,6 +55,7 @@ function cloneDefaultUiLayout() {
     rightSummaryModules: DEFAULT_UI_LAYOUT.rightSummaryModules.map((m) => ({ ...m })),
     rightToolModules: DEFAULT_UI_LAYOUT.rightToolModules.map((m) => ({ ...m })),
     scratchpadText: DEFAULT_UI_LAYOUT.scratchpadText,
+    moduleHeights: {},
   };
 }
 
@@ -87,6 +90,19 @@ function mergeModuleList(savedList, defaultList) {
   return result;
 }
 
+function normalizeModuleHeights(rawHeights) {
+  const result = {};
+  if (!rawHeights || typeof rawHeights !== 'object') return result;
+  for (const [key, val] of Object.entries(rawHeights)) {
+    if (!key) continue;
+    const num = Number(val);
+    if (Number.isFinite(num)) {
+      result[key] = clampNumber(num, 100, 640, 240);
+    }
+  }
+  return result;
+}
+
 function normalizeUiLayout(raw) {
   const def = cloneDefaultUiLayout();
   if (!raw || typeof raw !== 'object') return def;
@@ -105,6 +121,7 @@ function normalizeUiLayout(raw) {
     rightSummaryModules: mergeModuleList(raw.rightSummaryModules, def.rightSummaryModules),
     rightToolModules: mergeModuleList(raw.rightToolModules, def.rightToolModules),
     scratchpadText: typeof raw.scratchpadText === 'string' ? raw.scratchpadText : def.scratchpadText,
+    moduleHeights: normalizeModuleHeights(raw.moduleHeights),
   };
 }
 
@@ -130,6 +147,21 @@ function loadInitialAutoSaveOnSwitch() {
     // ignore storage errors
   }
   return false;
+}
+
+function loadInitialLeftSort() {
+  try {
+    const raw = localStorage.getItem(LEFT_SORT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const by = ['name', 'time', 'type', 'size'].includes(parsed?.by) ? parsed.by : 'name';
+      const dir = parsed?.dir === 'desc' ? 'desc' : 'asc';
+      return { by, dir };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { by: 'name', dir: 'asc' };
 }
 
 function clampNumber(val, min, max, fallback) {
@@ -206,6 +238,8 @@ export const store = {
     paneWidths: loadInitialPaneWidths(),
     recentFiles: loadInitialRecentFiles(),
     uiLayout: loadInitialUiLayout(),
+    leftFileSort: loadInitialLeftSort(),
+    leftFileFilter: '',
     activeDragPayload: null,
     systemInfo: null,
     config: {},
@@ -646,7 +680,7 @@ export function openSheet({ title = '', bodyHtml = '', footerHtml = '', onMount 
 }
 
 /**
- * Toggle a file path in selectedContextPaths (max 5).
+ * Toggle a file path in selectedContextPaths (max 20).
  * @param {string} path
  * @returns {boolean} whether path is now selected
  */
@@ -673,6 +707,28 @@ export function toggleContextPath(path) {
   store.state.selectedContextPaths = list;
   store.emit('context:changed', list);
   return selected;
+}
+
+/**
+ * Update and persist left file sort preferences, then emit 'left:sort-changed'.
+ * @param {{ by?: 'name'|'time'|'type'|'size', dir?: 'asc'|'desc' }} [patch={}]
+ */
+export function setLeftFileSort(patch = {}) {
+  const cur = store.state.leftFileSort || { by: 'name', dir: 'asc' };
+  const rawBy = patch?.by ?? cur.by;
+  const by = ['name', 'time', 'type', 'size'].includes(rawBy) ? rawBy : 'name';
+  const rawDir = patch?.dir ?? cur.dir;
+  const dir = rawDir === 'desc' ? 'desc' : 'asc';
+  const next = { by, dir };
+
+  store.state.leftFileSort = next;
+  try {
+    localStorage.setItem(LEFT_SORT_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('left:sort-changed', next);
+  return next;
 }
 
 /**
@@ -759,6 +815,23 @@ export function applyPaneWidths(leftW, rightW) {
 }
 
 /**
+ * Set and persist a per-module scroll body height (clamped 100..640px) and emit 'ui:layout-changed'.
+ * @param {string} moduleId
+ * @param {number} px
+ */
+export function setModuleHeight(moduleId, px) {
+  const id = String(moduleId || '').trim();
+  if (!id) return store.state.uiLayout;
+  const clamped = clampNumber(px, 100, 640, 240);
+  const current = store.state.uiLayout || cloneDefaultUiLayout();
+  const nextHeights = {
+    ...(current.moduleHeights || {}),
+    [id]: clamped,
+  };
+  return updateUiLayout({ moduleHeights: nextHeights });
+}
+
+/**
  * Merge partial UI layout changes, persist to localStorage, and emit 'ui:layout-changed'.
  * @param {object} partial
  */
@@ -776,16 +849,20 @@ export function updateUiLayout(partial) {
 }
 
 /**
- * Reset UI layout to defaults, persist to localStorage, and emit 'ui:layout-changed'.
+ * Reset UI layout, module heights, pane widths, and left file sort to defaults,
+ * persist to localStorage, and emit 'ui:layout-changed'.
  */
 export function resetUiLayout() {
   const next = cloneDefaultUiLayout();
+  next.moduleHeights = {};
   store.state.uiLayout = next;
   try {
     localStorage.setItem(UI_LAYOUT_KEY, JSON.stringify(next));
   } catch {
     // ignore storage errors
   }
+  applyPaneWidths(260, 360);
+  setLeftFileSort({ by: 'name', dir: 'asc' });
   store.emit('ui:layout-changed', next);
   return next;
 }
@@ -1010,6 +1087,37 @@ function sanitizeDomTree(root) {
       }
       continue;
     }
+    if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE') {
+      const allowedMediaAttrs = new Set([
+        'src',
+        'type',
+        'preload',
+        'controls',
+        'muted',
+        'playsinline',
+        'poster',
+        'class',
+      ]);
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        const val = attr.value.trim();
+        if (name.startsWith('on') || !allowedMediaAttrs.has(name)) {
+          el.removeAttribute(attr.name);
+          continue;
+        }
+        if (URL_ATTRS.has(name)) {
+          const lowerVal = val.replace(/\s+/g, '').toLowerCase();
+          if (
+            lowerVal.startsWith('javascript:') ||
+            lowerVal.startsWith('vbscript:') ||
+            lowerVal.startsWith('data:text/html')
+          ) {
+            el.removeAttribute(attr.name);
+          }
+        }
+      }
+      continue;
+    }
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
       const val = attr.value.trim();
@@ -1035,25 +1143,32 @@ function getFileBaseNameLower(pathOrName) {
   return String(pathOrName || '').split(/[\\/]/).pop().trim().toLowerCase();
 }
 
+function findWorkspaceFileItem(fileRef) {
+  const items = store.state.files?.items;
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const target = String(fileRef || '').trim();
+  if (!target) return null;
+  const targetLower = target.toLowerCase();
+  const targetNorm = target.replace(/\\/g, '/').toLowerCase();
+  const targetBase = getFileBaseNameLower(target);
+
+  return (
+    items.find((item) => {
+      const itemPath = String(item?.path || '').replace(/\\/g, '/').toLowerCase();
+      const itemName = String(item?.name || '').toLowerCase();
+      return itemPath === targetNorm || itemName === targetLower;
+    }) ||
+    items.find((item) => getFileBaseNameLower(item?.path || item?.name || '') === targetBase) ||
+    null
+  );
+}
+
 function isFileMountedInStore(fileRef) {
   const items = store.state.files?.items;
   if (!Array.isArray(items) || items.length === 0) return true;
   const target = String(fileRef || '').trim();
   if (!target) return true;
-  const targetLower = target.toLowerCase();
-  const targetNorm = target.replace(/\\/g, '/').toLowerCase();
-  const targetBase = getFileBaseNameLower(target);
-
-  return items.some((item) => {
-    const itemPath = String(item?.path || '').replace(/\\/g, '/').toLowerCase();
-    const itemName = String(item?.name || '').toLowerCase();
-    const itemBase = getFileBaseNameLower(item?.path || item?.name || '');
-    return (
-      itemPath === targetNorm ||
-      itemName === targetLower ||
-      itemBase === targetBase
-    );
-  });
+  return Boolean(findWorkspaceFileItem(target));
 }
 
 function markBrokenIfMissing(btn, fileRef) {
@@ -1062,6 +1177,84 @@ function markBrokenIfMissing(btn, fileRef) {
     btn.classList.add('is-broken');
     btn.title = '文件未找到或已移动，点击尝试自动寻回';
   }
+}
+
+function parseMediaTimeToSeconds(timeStr) {
+  const raw = String(timeStr || '').trim();
+  if (!raw) return 0;
+  if (/^\d+(?:\.\d+)?$/.test(raw)) {
+    return Math.max(0, Number(raw));
+  }
+  const parts = raw.split(':').map((p) => Number(p));
+  if (parts.some((n) => !Number.isFinite(n) || n < 0)) return 0;
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  return 0;
+}
+
+function buildImageEmbedCard(file, pathStr, widthPx, fullMatch) {
+  const card = document.createElement('div');
+  card.className = 'media-embed-card';
+  card.dataset.mediaKind = 'image';
+  card.dataset.mediaFile = file;
+  card.dataset.mediaPath = pathStr;
+  card.dataset.mediaRaw = fullMatch;
+  card.style.width = widthPx ? `${widthPx}px` : '100%';
+  card.style.maxWidth = '100%';
+
+  const streamUrl = `/api/files/raw-stream?path=${encodeURIComponent(pathStr)}`;
+  card.innerHTML = `
+    <img class="media-embed-img" src="${escapeHtml(streamUrl)}" alt="${escapeHtml(file)}" loading="lazy" />
+    <div class="media-embed-toolbar">
+      <span class="media-embed-label" title="${escapeHtml(file)}">${escapeHtml(file)}</span>
+      <div class="media-embed-actions">
+        <button type="button" class="media-size-pill" data-media-action="resize" data-media-pct="50">50%</button>
+        <button type="button" class="media-size-pill" data-media-action="resize" data-media-pct="75">75%</button>
+        <button type="button" class="media-size-pill" data-media-action="resize" data-media-pct="100">100%</button>
+        <button type="button" class="media-size-pill" data-media-action="open-external" title="独立打开查看">${icon('external-link', 11)} 独立打开</button>
+      </div>
+      <span class="media-resize-handle" title="按住拖动调节大小"></span>
+    </div>
+  `;
+  return card;
+}
+
+function buildVideoEmbedCard(file, pathStr, timeStr, widthPx, fullMatch) {
+  const card = document.createElement('div');
+  card.className = 'media-embed-card is-video';
+  card.dataset.mediaKind = 'video';
+  card.dataset.mediaFile = file;
+  card.dataset.mediaPath = pathStr;
+  card.dataset.mediaTime = timeStr || '';
+  card.dataset.mediaRaw = fullMatch;
+  card.style.width = widthPx ? `${widthPx}px` : '460px';
+  card.style.maxWidth = '100%';
+
+  const seekSec = parseMediaTimeToSeconds(timeStr);
+  const streamUrl = `/api/files/raw-stream?path=${encodeURIComponent(pathStr)}#t=${seekSec || 0.5}`;
+  const timeBadge = timeStr ? `<span class="media-time-pill">${escapeHtml(timeStr)}</span>` : '';
+
+  card.innerHTML = `
+    <div class="video-poster-box">
+      <video class="media-embed-video" preload="metadata" muted playsinline src="${escapeHtml(streamUrl)}"></video>
+      <button type="button" class="video-play-badge" data-media-action="play-inline" title="点击播放视频">▶</button>
+    </div>
+    <div class="media-embed-toolbar">
+      <span class="media-embed-label" title="${escapeHtml(file)}">${escapeHtml(file)}${timeBadge}</span>
+      <div class="media-embed-actions">
+        <button type="button" class="media-size-pill" data-media-action="resize" data-media-pct="50">50%</button>
+        <button type="button" class="media-size-pill" data-media-action="resize" data-media-pct="75">75%</button>
+        <button type="button" class="media-size-pill" data-media-action="resize" data-media-pct="100">100%</button>
+        <button type="button" class="media-size-pill" data-media-action="open-external" title="在播放器中打开">${icon('external-link', 11)} 播放器</button>
+      </div>
+      <span class="media-resize-handle" title="按住拖动调节大小"></span>
+    </div>
+  `;
+  return card;
 }
 
 function createUrlPillNode(urlStr, labelStr = '') {
@@ -1086,7 +1279,7 @@ function createUrlPillNode(urlStr, labelStr = '') {
   return btn;
 }
 
-function buildAnchorPillNode(rawToken) {
+function buildAnchorPillNode(rawToken, fullMatch = '') {
   const token = String(rawToken || '').trim();
   if (!token) return null;
 
@@ -1118,8 +1311,17 @@ function buildAnchorPillNode(rawToken) {
     return createUrlPillNode(url, label);
   }
 
+  // Optional width suffix |w=NNN (for image & video portals)
+  let baseToken = token;
+  let widthPx = 0;
+  const widthSuffixMatch = token.match(/\|w=(\d+)\s*$/i);
+  if (widthSuffixMatch) {
+    widthPx = clampNumber(widthSuffixMatch[1], 120, 1200, 0);
+    baseToken = token.slice(0, widthSuffixMatch.index).trim();
+  }
+
   // 3. Archive member syntax [[file.zip!member]] or [[file.zip]]
-  const archiveOnlyOrBangMatch = token.match(/^([^#!]+?\.(?:zip|tar|tgz|gz))(?:!(.+))?$/i);
+  const archiveOnlyOrBangMatch = baseToken.match(/^([^#!]+?\.(?:zip|tar|tgz|gz))(?:!(.+))?$/i);
   if (archiveOnlyOrBangMatch) {
     const file = archiveOnlyOrBangMatch[1].trim();
     const member = (archiveOnlyOrBangMatch[2] || '').trim();
@@ -1134,12 +1336,29 @@ function buildAnchorPillNode(rawToken) {
     return btn;
   }
 
-  const hashIdx = token.indexOf('#');
-  const file = (hashIdx > 0 ? token.slice(0, hashIdx) : token).trim();
-  const fragment = (hashIdx > 0 ? token.slice(hashIdx + 1) : '').trim();
+  const hashIdx = baseToken.indexOf('#');
+  const file = (hashIdx > 0 ? baseToken.slice(0, hashIdx) : baseToken).trim();
+  const fragment = (hashIdx > 0 ? baseToken.slice(hashIdx + 1) : '').trim();
   if (!file) return null;
 
   const lowerFile = file.toLowerCase();
+
+  // 3.5 Inline Image Embed: [[photo.png]] or [[photo.png|w=420]]
+  if (/\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(lowerFile)) {
+    const found = findWorkspaceFileItem(file);
+    if (found?.path) {
+      return buildImageEmbedCard(file, found.path, widthPx, fullMatch || `[[${token}]]`);
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-doc is-broken';
+    btn.dataset.anchorType = 'file';
+    btn.dataset.anchorFile = file;
+    btn.dataset.anchorHeading = '';
+    btn.title = '文件未找到或已移动，点击尝试自动寻回';
+    btn.innerHTML = `${icon('file-text', 13)}<span>${escapeHtml(file)}</span>`;
+    return btn;
+  }
 
   // 4. PDF anchor: [[file.pdf#page=N]] or [[file.pdf]]
   if (lowerFile.endsWith('.pdf') || /^page=\d+$/i.test(fragment)) {
@@ -1189,8 +1408,26 @@ function buildAnchorPillNode(rawToken) {
     return btn;
   }
 
-  // 6. Media anchor: [[media.mp4#t=12:30]] / [[audio.mp3#t=95]] / [[video.webm]]
-  if (/\.(mp4|webm|mov|m4v|mkv|mp3|wav|m4a|ogg|flac|aac)$/i.test(lowerFile) || /^t=[\d:]+$/i.test(fragment)) {
+  // 6. Video Poster Embed & Audio/Media anchor
+  if (/\.(mp4|webm|mov)$/i.test(lowerFile)) {
+    const timeMatch = fragment.match(/^t=([\d:]+(?:\.\d+)?)$/i);
+    const timeStr = timeMatch ? timeMatch[1] : fragment.replace(/^t=/i, '');
+    const found = findWorkspaceFileItem(file);
+    if (found?.path) {
+      return buildVideoEmbedCard(file, found.path, timeStr || '', widthPx, fullMatch || `[[${token}]]`);
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'anchor-pill anchor-media is-broken';
+    btn.dataset.anchorType = 'media';
+    btn.dataset.anchorFile = file;
+    btn.dataset.anchorTime = timeStr || '';
+    btn.title = '文件未找到或已移动，点击尝试自动寻回';
+    btn.innerHTML = `${icon('play', 12)}<span>${escapeHtml(file)}${timeStr ? ` · ${escapeHtml(timeStr)}` : ''}</span>`;
+    return btn;
+  }
+
+  if (/\.(m4v|mkv|mp3|wav|m4a|ogg|flac|aac)$/i.test(lowerFile) || /^t=[\d:]+$/i.test(fragment)) {
     const timeMatch = fragment.match(/^t=([\d:]+(?:\.\d+)?)$/i);
     const timeStr = timeMatch ? timeMatch[1] : fragment.replace(/^t=/i, '');
     const btn = document.createElement('button');
@@ -1218,6 +1455,28 @@ function buildAnchorPillNode(rawToken) {
   }
 
   return null;
+}
+
+function transformMarkdownImagesInDom(root) {
+  const imgs = Array.from(root.querySelectorAll('img[src]'));
+  for (const img of imgs) {
+    if (img.closest('.media-embed-card, pre, code')) continue;
+    const rawSrc = (img.getAttribute('src') || '').trim();
+    if (!rawSrc || /^(https?:|data:|\/api\/)/i.test(rawSrc)) continue;
+    const decodedRef = (() => {
+      try {
+        return decodeURIComponent(rawSrc.split(/[?#]/)[0]);
+      } catch {
+        return rawSrc.split(/[?#]/)[0];
+      }
+    })();
+    const found = findWorkspaceFileItem(decodedRef);
+    if (found?.path) {
+      img.setAttribute('src', `/api/files/raw-stream?path=${encodeURIComponent(found.path)}`);
+      img.setAttribute('loading', 'lazy');
+      img.classList.add('md-inline-img');
+    }
+  }
 }
 
 function transformBareUrlsInDom(root) {
@@ -1260,7 +1519,7 @@ function transformAnchorsInDom(root) {
     const frag = document.createDocumentFragment();
 
     while ((match = anchorRegex.exec(text)) !== null) {
-      const pill = buildAnchorPillNode(match[1]);
+      const pill = buildAnchorPillNode(match[1], match[0]);
       if (!pill) continue;
       replaced = true;
       if (match.index > lastIdx) {
@@ -1319,7 +1578,7 @@ function transformCalloutsInDom(root) {
     body.className = 'md-callout-body';
     while (bq.firstChild) {
       const child = bq.firstChild;
-      if (child.nodeType === 1 && child.tagName === 'P' && !child.textContent.trim() && !child.querySelector('button, img, mark, code')) {
+      if (child.nodeType === 1 && child.tagName === 'P' && !child.textContent.trim() && !child.querySelector('button, img, video, mark, code')) {
         child.remove();
       } else {
         body.appendChild(child);
@@ -1444,7 +1703,8 @@ function annotateTopLevelBlockLines(root, mdText) {
 
 /**
  * Safely render Markdown to sanitized HTML and transform Universal Portal Capsules ([[...]]),
- * bare URLs, GitHub Alert callouts, safe <mark> highlights, and optional source line mappings.
+ * inline image & video poster embeds, bare URLs, GitHub Alert callouts, safe <mark> highlights,
+ * and optional source line mappings.
  * @param {string} mdText
  * @param {{ withLineMap?: boolean }} [opts={}]
  * @returns {string}
@@ -1470,6 +1730,7 @@ export function renderMarkdownSafe(mdText, opts = {}) {
   const tpl = document.createElement('template');
   tpl.innerHTML = parsedHtml;
   sanitizeDomTree(tpl.content);
+  transformMarkdownImagesInDom(tpl.content);
   transformCalloutsInDom(tpl.content);
   transformBareUrlsInDom(tpl.content);
   transformAnchorsInDom(tpl.content);

@@ -1,16 +1,22 @@
 /**
- * SmartLocalNote - Left Panel (Full Production: Stages 2, 3 & 4)
- * Sections:
- *  1. Top Toolbar: [+ 新建笔记] & [📥 导入] (Native Picker + Manual Local Path)
- *  2. Local Files: Grouped tree, RAG 5-file circular checkboxes, privacy lock toggles
- *  3. Local Apps & Workspaces: [📸 捕获现场] (Innovation 1), [+ 软件], App launch pills,
- *     Workspace cards with [🚀 联启] & [▶ 专注] duration picker
- *  4. Virtual Knowledge Tree: Top-level nodes quick preview & [管理知识树]
+ * SmartLocalNote - Left Panel (V4 Super-Upgrade)
+ * Features:
+ *  1. Sticky Pinned Top Header (.left-sticky-top) + In-Folder Instant Filter + Back-to-Top
+ *  2. Multi-Criteria File Sorting (name/mtime/ext/size + asc/desc) & Formatted Modified Time
+ *  3. 20-File Cross-Format RAG Selection Badges, Privacy Lock Toggles & Full-Format Import Copy
+ *  4. Dedicated Left-Panel Right-Click Context Menu (.left-context-menu) for Files & Apps
+ *  5. Per-Module Vertical Height Drag Resizer (.module-height-resizer) + 1-Click Reset Default
+ *  6. Modular Reordering, Workspaces / Capture Scene, Draggable File Anchors & App Portals,
+ *     Virtual Knowledge Tree, Quick Scratch, Recent Files & Mini Pomodoro
  *
  * Strictly decoupled via store EventBus. Zero direct DOM access to Center/Right panels.
  */
 
-import {
+import * as storeMod from './store.js';
+import { api } from './api_client.js';
+import { icon } from './icons.js';
+
+const {
   store,
   escapeHtml,
   toggleContextPath,
@@ -18,14 +24,16 @@ import {
   openSheet,
   closeSheet,
   updateUiLayout,
-  resetUiLayout,
   setDragPayload,
   clearDragPayload,
-} from './store.js';
-import { api } from './api_client.js';
-import { icon } from './icons.js';
+  copyInternal,
+} = storeMod;
 
-const MAX_CONTEXT_FILES = 5;
+const MAX_CONTEXT_FILES = Number(storeMod.MAX_CONTEXT_FILES) || 20;
+const LEFT_SORT_STORAGE_KEY = 'sln_left_file_sort';
+const MODULE_MIN_HEIGHT = 80;
+const MODULE_MAX_HEIGHT = 840;
+
 const FOCUS_DURATION_OPTIONS = [
   { label: '15秒演示', seconds: 15 },
   { label: '15分', seconds: 900 },
@@ -41,7 +49,7 @@ const QUICK_POMODORO_PRESETS = [
 ];
 
 const MODULE_DESCRIPTIONS = {
-  files: '本地文件树（支持联合问答勾选、隐私锁与拖拽锚点）',
+  files: '本地文件树（支持联合问答勾选、隐私锁、多维排序与拖拽锚点）',
   workspaces: '打包常用文件+本地软件，一键联启进入学习/办公模式',
   apps: '已注册本地软件快捷直达胶囊（支持拖入笔记生成直达胶囊）',
   tree: '虚拟知识树节点与绑定文件速览',
@@ -62,6 +70,92 @@ let containerRef = null;
 let isLoadingInitial = true;
 let dragModuleId = null;
 let quickPomodoroTask = '';
+let leftFilterQuery = '';
+let leftContextMenuEl = null;
+let isResizingModule = false;
+let globalMenuListenersBound = false;
+
+function getLeftFileSort() {
+  const raw = store.state.leftFileSort;
+  if (raw && typeof raw === 'object') {
+    const by = ['name', 'mtime', 'ext', 'size'].includes(raw.by) ? raw.by : 'name';
+    const dir = raw.dir === 'desc' ? 'desc' : 'asc';
+    return { by, dir };
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(LEFT_SORT_STORAGE_KEY) || 'null');
+    if (saved && typeof saved === 'object') {
+      const by = ['name', 'mtime', 'ext', 'size'].includes(saved.by) ? saved.by : 'name';
+      const dir = saved.dir === 'desc' ? 'desc' : 'asc';
+      return { by, dir };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { by: 'name', dir: 'asc' };
+}
+
+function persistLeftFileSort(patch) {
+  if (typeof storeMod.setLeftFileSort === 'function') {
+    return storeMod.setLeftFileSort(patch);
+  }
+  const next = { ...getLeftFileSort(), ...(patch || {}) };
+  if (!['name', 'mtime', 'ext', 'size'].includes(next.by)) next.by = 'name';
+  next.dir = next.dir === 'desc' ? 'desc' : 'asc';
+  store.state.leftFileSort = next;
+  try {
+    localStorage.setItem(LEFT_SORT_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('files:sort-changed', next);
+  return next;
+}
+
+function getModuleHeight(modId) {
+  const heights = store.state.uiLayout?.moduleHeights;
+  if (heights && typeof heights === 'object') {
+    const val = Number(heights[modId]);
+    if (Number.isFinite(val) && val >= MODULE_MIN_HEIGHT) {
+      return Math.min(MODULE_MAX_HEIGHT, Math.round(val));
+    }
+  }
+  return null;
+}
+
+function persistModuleHeight(modId, px) {
+  if (typeof storeMod.setModuleHeight === 'function') {
+    return storeMod.setModuleHeight(modId, px);
+  }
+  const cur = store.state.uiLayout || {};
+  const nextHeights = { ...(cur.moduleHeights || {}) };
+  if (px === null || px === undefined || !Number.isFinite(Number(px)) || Number(px) <= 0) {
+    delete nextHeights[modId];
+  } else {
+    nextHeights[modId] = Math.max(MODULE_MIN_HEIGHT, Math.min(MODULE_MAX_HEIGHT, Math.round(Number(px))));
+  }
+  store.state.uiLayout = { ...cur, moduleHeights: nextHeights };
+  try {
+    localStorage.setItem('sln_ui_layout', JSON.stringify(store.state.uiLayout));
+  } catch {
+    // ignore storage errors
+  }
+  return store.state.uiLayout;
+}
+
+function resetAllLayout() {
+  if (typeof storeMod.resetUiLayout === 'function') {
+    storeMod.resetUiLayout();
+  }
+  if (store.state.uiLayout && typeof store.state.uiLayout === 'object') {
+    store.state.uiLayout.moduleHeights = {};
+  }
+  if (typeof storeMod.applyPaneWidths === 'function') {
+    storeMod.applyPaneWidths(260, 360);
+  }
+  renderLeftPanel(containerRef);
+  showToast('已一键恢复默认三栏宽度与模块尺寸', 'success');
+}
 
 function getBasename(filePath) {
   const parts = String(filePath || '').split(/[\\/]/);
@@ -158,6 +252,97 @@ function buildFileAnchorMarkdown(itemOrPath) {
   return `[[${name}]]`;
 }
 
+function parseMtimeMs(raw) {
+  if (raw === null || raw === undefined || raw === '') return 0;
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return raw > 1e12 ? raw : raw * 1000;
+  }
+  const str = String(raw).trim();
+  if (!str) return 0;
+  const num = Number(str);
+  if (Number.isFinite(num) && num > 0) {
+    return num > 1e12 ? num : num * 1000;
+  }
+  const parsed = Date.parse(str);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatMtime(raw) {
+  const ms = parseMtimeMs(raw);
+  if (!ms) return '';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '';
+
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startYesterday = startToday - 86400000;
+
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+
+  if (
+    ms >= startToday &&
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return `今天 ${hh}:${min}`;
+  }
+  if (ms >= startYesterday && ms < startToday) {
+    return `昨天 ${hh}:${min}`;
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return `${mm}-${dd} ${hh}:${min}`;
+  }
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+function sortFileItems(items, sortCfg = getLeftFileSort()) {
+  const list = Array.isArray(items) ? [...items] : [];
+  const by = sortCfg?.by || 'name';
+  const mult = sortCfg?.dir === 'desc' ? -1 : 1;
+
+  list.sort((a, b) => {
+    const nameA = String(a?.name || getBasename(a?.path || ''));
+    const nameB = String(b?.name || getBasename(b?.path || ''));
+    let cmp = 0;
+
+    if (by === 'mtime') {
+      cmp = parseMtimeMs(a?.mtime) - parseMtimeMs(b?.mtime);
+    } else if (by === 'size') {
+      cmp = (Number(a?.size) || 0) - (Number(b?.size) || 0);
+    } else if (by === 'ext') {
+      const extA = getFileExt(a);
+      const extB = getFileExt(b);
+      cmp = extA.localeCompare(extB, 'zh-CN', { numeric: true, sensitivity: 'base' });
+    } else {
+      cmp = nameA.localeCompare(nameB, 'zh-CN', { numeric: true, sensitivity: 'base' });
+    }
+
+    if (cmp === 0 && by !== 'name') {
+      cmp = nameA.localeCompare(nameB, 'zh-CN', { numeric: true, sensitivity: 'base' });
+    }
+    return cmp * mult;
+  });
+
+  return list;
+}
+
+function filterFileItems(items, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return Array.isArray(items) ? items : [];
+  return (items || []).filter((item) => {
+    const name = String(item?.name || getBasename(item?.path || '')).toLowerCase();
+    const ext = getFileExt(item).toLowerCase();
+    const path = String(item?.path || '').toLowerCase();
+    const group = String(item?.group || '').toLowerCase();
+    return name.includes(q) || ext.includes(q) || path.includes(q) || group.includes(q);
+  });
+}
+
 function getLeftModules() {
   const mods = store.state.uiLayout?.leftModules;
   if (Array.isArray(mods) && mods.length > 0) {
@@ -178,7 +363,7 @@ function getLeftModules() {
   ];
 }
 
-function groupFiles(items) {
+function groupFiles(items, sortCfg = getLeftFileSort()) {
   const groups = new Map();
 
   for (const item of items) {
@@ -204,7 +389,10 @@ function groupFiles(items) {
     groups.get(key).items.push(item);
   }
 
-  return Array.from(groups.values());
+  return Array.from(groups.values()).map((grp) => ({
+    ...grp,
+    items: sortFileItems(grp.items, sortCfg),
+  }));
 }
 
 async function loadFiles() {
@@ -268,10 +456,9 @@ function syncContextCheckboxes(containerEl) {
   if (!containerEl) return;
   const selected = new Set(store.state.selectedContextPaths || []);
 
-  const badge = containerEl.querySelector('[data-role="ctx-count-badge"]');
-  if (badge) {
+  containerEl.querySelectorAll('[data-role="ctx-count-badge"]').forEach((badge) => {
     badge.textContent = `已勾 ${selected.size}/${MAX_CONTEXT_FILES}`;
-  }
+  });
 
   containerEl.querySelectorAll('.tree-file-item').forEach((row) => {
     const path = row.dataset.path || '';
@@ -298,15 +485,30 @@ function renderFilesSection(items, selectedSet, activePath) {
   if (items.length === 0) {
     return `
       <div class="empty-state" style="padding: 14px 8px;">
-        <p class="empty-desc">暂无本地文档，点击上方「新建笔记」或「导入」添加资料</p>
+        <p class="empty-desc">暂无本地文档，点击上方「+ 笔记」或「导入」添加资料</p>
       </div>
     `;
   }
 
-  const groups = groupFiles(items);
+  const trimmedQuery = leftFilterQuery.trim();
+  const visibleItems = filterFileItems(items, trimmedQuery);
+
+  if (trimmedQuery && visibleItems.length === 0) {
+    return `
+      <div class="empty-state" style="padding: 16px 8px;">
+        <p class="empty-desc">未找到匹配「${escapeHtml(trimmedQuery)}」的本地文件</p>
+        <button type="button" class="pill-btn pill-btn-sm" data-action="clear-filter">清空筛选</button>
+      </div>
+    `;
+  }
+
+  const sortCfg = getLeftFileSort();
+  const groups = groupFiles(visibleItems, sortCfg);
+  const forceExpand = Boolean(trimmedQuery);
+
   return groups
     .map((grp) => {
-      const isCollapsed = collapsedGroups.has(grp.key);
+      const isCollapsed = !forceExpand && collapsedGroups.has(grp.key);
       return `
         <div class="tree-group" data-group-key="${escapeHtml(grp.key)}">
           <div class="tree-folder-row" data-action="toggle-group" data-group-key="${escapeHtml(grp.key)}" role="button" tabindex="0" aria-expanded="${!isCollapsed}">
@@ -326,6 +528,7 @@ function renderFilesSection(items, selectedSet, activePath) {
                     const isChecked = selectedSet.has(path);
                     const isActive = Boolean(activePath) && activePath === path;
                     const isPriv = Boolean(item.is_private);
+                    const mtimeText = formatMtime(item.mtime);
                     return `
                       <div
                         class="tree-file-item ${isActive ? 'is-selected' : ''}"
@@ -348,7 +551,10 @@ function renderFilesSection(items, selectedSet, activePath) {
                         <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
                           ${icon(getFileIconName(ext), 15)}
                         </span>
-                        <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点）">${escapeHtml(name)}</span>
+                        <span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px;">
+                          <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点 · 右键更多操作）">${escapeHtml(name)}</span>
+                          ${mtimeText ? `<span class="file-meta-time" style="font-size:10.5px;color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(mtimeText)}</span>` : ''}
+                        </span>
                         <span class="file-ext-badge">${escapeHtml(ext)}</span>
                         <button
                           type="button"
@@ -388,7 +594,7 @@ function renderAppsSection(apps) {
             data-action="launch-app"
             data-app-id="${escapeHtml(app.id)}"
             data-app-name="${escapeHtml(app.name)}"
-            title="点击启动，或直接拖进中间笔记生成直达胶囊"
+            title="点击启动，拖进笔记生成直达胶囊，或右键查看更多操作"
           >
             ${icon('rocket', 12)}
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(app.name)}</span>
@@ -405,11 +611,13 @@ function renderWorkspacesSection(workspaces) {
   if (workspaces.length === 0) {
     return `${subtitleHtml}<p class="empty-desc" style="margin:4px 0;">暂无一键场景包，点击「捕获现场」一键打包当前桌面</p>`;
   }
-  return subtitleHtml + workspaces
-    .map((ws) => {
-      const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
-      const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
-      return `
+  return (
+    subtitleHtml +
+    workspaces
+      .map((ws) => {
+        const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
+        const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
+        return `
         <div class="workspace-card" data-workspace-id="${escapeHtml(ws.id)}">
           <div class="workspace-card-head">
             <span class="workspace-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span>
@@ -447,8 +655,9 @@ function renderWorkspacesSection(workspaces) {
           </div>
         </div>
       `;
-    })
-    .join('');
+      })
+      .join('')
+  );
 }
 
 function renderKnowledgeTreeSection(treeNodes, activePath) {
@@ -611,7 +820,7 @@ function getModuleQuickActionsHtml(modId, selectedCount, itemsCount) {
   if (modId === 'files') {
     return `
       <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数">已勾 ${selectedCount}/${MAX_CONTEXT_FILES}</span>
-      <span style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>
+      <span data-role="files-count-label" style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>
     `;
   }
   if (modId === 'workspaces') {
@@ -659,10 +868,67 @@ function renderModuleBodyHtml(modId, ctx) {
   }
 }
 
-function renderLeftPanel(containerEl) {
-  if (!containerEl) return;
-  const prevScrollTop = containerEl.querySelector('.panel-body')?.scrollTop || 0;
+function renderStickyTopHtml(selectedCount) {
+  const hasFilter = Boolean(leftFilterQuery);
+  return `
+    <div class="left-sticky-top" style="flex-shrink:0;position:sticky;top:0;z-index:5;background:var(--bg-glass);backdrop-filter:var(--blur-glass);-webkit-backdrop-filter:var(--blur-glass);border-bottom:1px solid var(--border-hairline);">
+      <div class="panel-header" style="border-bottom:none;padding:10px 12px 6px;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;">
+        <span class="panel-title">资料与工作区</span>
+        <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数">已勾 ${selectedCount}/${MAX_CONTEXT_FILES}</span>
+      </div>
+      <div class="left-toolbar" style="padding:2px 12px 8px;border-bottom:none;display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="new-note">
+          ${icon('plus', 13)} 笔记
+        </button>
+        <button type="button" class="pill-btn pill-btn-sm" data-action="import-open">
+          ${icon('download', 13)} 导入
+        </button>
+        <button type="button" class="pill-btn pill-btn-sm" data-action="spawn-sticky-note" title="在屏幕中央召唤悬浮便签 (Alt+N)，也可随时在任意位置右键唤出">
+          📌 闪念
+        </button>
+        <button type="button" class="pill-btn pill-btn-sm" data-action="customize-modules" title="添加、隐藏或排序左侧工作区模块">
+          ${icon('settings', 13)} 模块
+        </button>
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="reset-layout" title="一键恢复默认三栏宽度与模块尺寸" aria-label="一键恢复默认布局" style="padding:0 8px;">
+          ↺
+        </button>
+      </div>
+      <div class="left-filter-wrap" style="display:flex;align-items:center;gap:5px;padding:0 12px 10px;">
+        <div style="position:relative;flex:1 1 auto;min-width:0;display:flex;align-items:center;">
+          <input
+            type="text"
+            class="apple-input left-filter-input"
+            data-role="left-filter-input"
+            value="${escapeHtml(leftFilterQuery)}"
+            placeholder="目录内搜索文件名 / 类型 / 路径…"
+            autocomplete="off"
+            spellcheck="false"
+            style="height:30px;padding:4px 26px 4px 10px;font-size:12px;border-radius:var(--radius-pill);"
+          />
+          <button
+            type="button"
+            class="left-filter-clear"
+            data-action="clear-filter"
+            title="清空搜索"
+            aria-label="清空搜索"
+            ${hasFilter ? '' : 'hidden'}
+            style="position:absolute;right:6px;width:18px;height:18px;border-radius:9999px;display:${hasFilter ? 'inline-flex' : 'none'};align-items:center;justify-content:center;font-size:11px;color:var(--text-tertiary);background:var(--bg-hover);"
+          >✕</button>
+        </div>
+        <button
+          type="button"
+          class="pill-btn pill-btn-sm"
+          data-action="scroll-top"
+          title="回到目录顶部"
+          aria-label="回到顶部"
+          style="height:30px;padding:0 9px;font-size:12px;flex-shrink:0;"
+        >↑</button>
+      </div>
+    </div>
+  `;
+}
 
+function buildModulesHtml() {
   const items = store.state.files?.items || [];
   const selectedSet = new Set(store.state.selectedContextPaths || []);
   const activePath = store.state.activeFile?.path || '';
@@ -672,92 +938,193 @@ function renderLeftPanel(containerEl) {
   const recentFiles = store.state.recentFiles || [];
   const leftModules = getLeftModules();
   const visibleModules = leftModules.filter((m) => m.visible !== false);
+  const sort = getLeftFileSort();
 
   const ctx = { items, selectedSet, activePath, apps, workspaces, treeNodes, recentFiles };
 
-  const modulesHtml =
-    visibleModules.length === 0
-      ? `
-        <div class="empty-state" style="padding:28px 12px;">
-          <p class="empty-title">左侧模块已全部隐藏</p>
-          <p class="empty-desc">点击上方「⚙ 模块」可重新勾选显示或恢复默认布局</p>
-          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="customize-modules">
-            ${icon('settings', 12)} 自定义左侧模块
-          </button>
-        </div>
-      `
-      : visibleModules
-          .map((mod) => {
-            const collapsed = Boolean(mod.collapsed);
-            return `
-              <section
-                class="module-block ${collapsed ? 'is-collapsed' : ''}"
-                data-module-id="${escapeHtml(mod.id)}"
+  if (visibleModules.length === 0) {
+    return `
+      <div class="empty-state" style="padding:28px 12px;">
+        <p class="empty-title">左侧模块已全部隐藏</p>
+        <p class="empty-desc">点击上方「⚙ 模块」可重新勾选显示或恢复默认布局</p>
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="customize-modules">
+          ${icon('settings', 12)} 自定义左侧模块
+        </button>
+      </div>
+    `;
+  }
+
+  return visibleModules
+    .map((mod) => {
+      const collapsed = Boolean(mod.collapsed);
+      const customH = getModuleHeight(mod.id);
+      const scrollStyle = customH
+        ? `height:${customH}px;max-height:${customH}px;overflow-y:auto;`
+        : '';
+
+      const sortBarHtml =
+        mod.id === 'files'
+          ? `
+            <div class="left-sort-bar" style="display:flex;align-items:center;gap:6px;width:100%;padding-top:4px;">
+              <select
+                class="apple-select"
+                data-action="sort-by"
+                aria-label="文件排序方式"
+                style="flex:1 1 auto;min-width:0;height:26px;padding:2px 8px;font-size:11.5px;border-radius:var(--radius-pill);"
               >
-                <div class="module-header">
-                  <div style="display:flex;align-items:center;gap:4px;min-width:0;flex:1;">
-                    <span
-                      class="module-drag-handle"
-                      draggable="true"
-                      data-drag-module="${escapeHtml(mod.id)}"
-                      title="拖拽调整模块顺序"
-                      aria-label="拖拽调整 ${escapeHtml(mod.title)} 顺序"
-                    >
-                      ⠿
-                    </span>
-                    <button
-                      type="button"
-                      data-action="toggle-module-collapse"
-                      data-module-id="${escapeHtml(mod.id)}"
-                      aria-expanded="${!collapsed}"
-                      style="display:inline-flex;align-items:center;gap:4px;min-width:0;flex:1;text-align:left;font-size:12px;font-weight:600;color:var(--text-primary);"
-                    >
-                      ${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}
-                      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(mod.title)}</span>
-                    </button>
-                  </div>
-                  <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
-                    ${getModuleQuickActionsHtml(mod.id, selectedSet.size, items.length)}
-                  </div>
-                </div>
-                <div class="module-content">
-                  ${renderModuleBodyHtml(mod.id, ctx)}
-                </div>
-              </section>
-            `;
-          })
-          .join('');
+                <option value="name" ${sort.by === 'name' ? 'selected' : ''}>按名称 (A-Z)</option>
+                <option value="mtime" ${sort.by === 'mtime' ? 'selected' : ''}>按修改时间</option>
+                <option value="ext" ${sort.by === 'ext' ? 'selected' : ''}>按文件类型</option>
+                <option value="size" ${sort.by === 'size' ? 'selected' : ''}>按文件大小</option>
+              </select>
+              <button
+                type="button"
+                class="pill-btn pill-btn-sm"
+                data-action="sort-dir"
+                data-sort-dir="${escapeHtml(sort.dir)}"
+                title="切换升序 / 降序"
+                style="height:26px;padding:0 9px;font-size:11.5px;flex-shrink:0;"
+              >${sort.dir === 'asc' ? '↑ 升序' : '↓ 降序'}</button>
+            </div>
+          `
+          : '';
 
-  containerEl.innerHTML = `
-    <div class="panel-header">
-      <span class="panel-title">资料与工作区</span>
-      <span class="file-ext-badge" data-role="ctx-count-badge" title="已勾选参与联合问答文件数">已勾 ${selectedSet.size}/${MAX_CONTEXT_FILES}</span>
-    </div>
+      return `
+        <section
+          class="module-block ${collapsed ? 'is-collapsed' : ''}"
+          data-module-id="${escapeHtml(mod.id)}"
+        >
+          <div class="module-header" style="${mod.id === 'files' ? 'flex-wrap:wrap;' : ''}">
+            <div style="display:flex;align-items:center;gap:4px;min-width:0;flex:1;">
+              <span
+                class="module-drag-handle"
+                draggable="true"
+                data-drag-module="${escapeHtml(mod.id)}"
+                title="拖拽调整模块顺序"
+                aria-label="拖拽调整 ${escapeHtml(mod.title)} 顺序"
+              >
+                ⠿
+              </span>
+              <button
+                type="button"
+                data-action="toggle-module-collapse"
+                data-module-id="${escapeHtml(mod.id)}"
+                aria-expanded="${!collapsed}"
+                style="display:inline-flex;align-items:center;gap:4px;min-width:0;flex:1;text-align:left;font-size:12px;font-weight:600;color:var(--text-primary);"
+              >
+                ${icon(collapsed ? 'chevron-right' : 'chevron-down', 12)}
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(mod.title)}</span>
+              </button>
+            </div>
+            <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+              ${getModuleQuickActionsHtml(mod.id, selectedSet.size, items.length)}
+            </div>
+            ${sortBarHtml}
+          </div>
+          <div class="module-content">
+            <div
+              class="module-scroll-body"
+              data-scroll-module="${escapeHtml(mod.id)}"
+              ${scrollStyle ? `style="${scrollStyle}"` : ''}
+            >
+              ${renderModuleBodyHtml(mod.id, ctx)}
+            </div>
+            ${
+              collapsed
+                ? ''
+                : `<div class="module-height-resizer" data-resize-module="${escapeHtml(mod.id)}" title="上下拖动调节模块高度（双击恢复自动）" role="separator" aria-orientation="horizontal" style="height:8px;cursor:row-resize;display:flex;align-items:center;justify-content:center;user-select:none;touch-action:none;"><span style="width:28px;height:3px;border-radius:9999px;background:var(--border-hairline);pointer-events:none;"></span></div>`
+            }
+          </div>
+        </section>
+      `;
+    })
+    .join('');
+}
 
-    <div class="left-toolbar" style="flex-shrink:0;">
-      <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="new-note">
-        ${icon('plus', 13)} 笔记
-      </button>
-      <button type="button" class="pill-btn pill-btn-sm" data-action="import-open">
-        ${icon('download', 13)} 导入
-      </button>
-      <button type="button" class="pill-btn pill-btn-sm" data-action="spawn-sticky-note" title="在屏幕中央召唤悬浮便签 (Alt+N)，也可随时在任意位置右键唤出">
-        📌 便签
-      </button>
-      <button type="button" class="pill-btn pill-btn-sm" data-action="customize-modules" title="添加、隐藏或排序左侧工作区模块">
-        ${icon('settings', 13)} 模块
-      </button>
-    </div>
+function updateFilterUiState(containerEl) {
+  if (!containerEl) return;
+  const clearBtn = containerEl.querySelector('[data-action="clear-filter"]');
+  const hasFilter = Boolean(leftFilterQuery);
+  if (clearBtn) {
+    clearBtn.hidden = !hasFilter;
+    clearBtn.style.display = hasFilter ? 'inline-flex' : 'none';
+  }
+}
 
-    <div class="panel-body">
-      ${modulesHtml}
-    </div>
-  `;
+function updateFilesSectionOnly(containerEl) {
+  if (!containerEl) return;
+  const filesListEl = containerEl.querySelector('.left-files-list');
+  if (!filesListEl) {
+    renderPanelBody(containerEl);
+    return;
+  }
 
+  const items = store.state.files?.items || [];
+  const selectedSet = new Set(store.state.selectedContextPaths || []);
+  const activePath = store.state.activeFile?.path || '';
+  filesListEl.innerHTML = renderFilesSection(items, selectedSet, activePath);
+
+  // If searching while files module is collapsed, temporarily reveal its content
+  const filesBlock = containerEl.querySelector('.module-block[data-module-id="files"]');
+  if (filesBlock && leftFilterQuery.trim() && filesBlock.classList.contains('is-collapsed')) {
+    filesBlock.classList.remove('is-collapsed');
+  }
+
+  const countLabel = containerEl.querySelector('[data-role="files-count-label"]');
+  if (countLabel) {
+    const filteredCount = leftFilterQuery.trim()
+      ? filterFileItems(items, leftFilterQuery).length
+      : items.length;
+    countLabel.textContent = leftFilterQuery.trim() ? `${filteredCount}/${items.length}` : `${items.length}`;
+  }
+
+  const sort = getLeftFileSort();
+  const sortSelect = containerEl.querySelector('[data-action="sort-by"]');
+  if (sortSelect && sortSelect.value !== sort.by) {
+    sortSelect.value = sort.by;
+  }
+  const sortDirBtn = containerEl.querySelector('[data-action="sort-dir"]');
+  if (sortDirBtn) {
+    sortDirBtn.dataset.sortDir = sort.dir;
+    sortDirBtn.textContent = sort.dir === 'asc' ? '↑ 升序' : '↓ 降序';
+  }
+}
+
+function renderPanelBody(containerEl) {
+  if (!containerEl) return;
   const bodyEl = containerEl.querySelector('.panel-body');
-  if (bodyEl && prevScrollTop > 0) {
+  if (!bodyEl) {
+    renderLeftPanel(containerEl);
+    return;
+  }
+  const prevScrollTop = bodyEl.scrollTop || 0;
+  bodyEl.innerHTML = buildModulesHtml();
+  if (prevScrollTop > 0) {
     bodyEl.scrollTop = prevScrollTop;
   }
+  syncContextCheckboxes(containerEl);
+  updateFilterUiState(containerEl);
+}
+
+function renderLeftPanel(containerEl) {
+  if (!containerEl) return;
+
+  // Preserve mounted .left-sticky-top so .left-filter-input never loses focus on data updates
+  const existingSticky = containerEl.querySelector('.left-sticky-top');
+  const existingBody = containerEl.querySelector('.panel-body');
+  if (existingSticky && existingBody) {
+    renderPanelBody(containerEl);
+    return;
+  }
+
+  const selectedCount = (store.state.selectedContextPaths || []).length;
+  containerEl.innerHTML = `
+    ${renderStickyTopHtml(selectedCount)}
+    <div class="panel-body">
+      ${buildModulesHtml()}
+    </div>
+  `;
+  updateFilterUiState(containerEl);
 }
 
 function openCustomizeModulesSheet() {
@@ -765,7 +1132,7 @@ function openCustomizeModulesSheet() {
     title: '自定义左侧模块',
     bodyHtml: `<div id="left-modules-manager" style="display:flex;flex-direction:column;gap:8px;"></div>`,
     footerHtml: `
-      <button type="button" class="pill-btn pill-btn-ghost" id="left-modules-reset">恢复默认布局</button>
+      <button type="button" class="pill-btn pill-btn-ghost" id="left-modules-reset">恢复默认尺寸与布局</button>
       <button type="button" class="pill-btn pill-btn-primary" id="left-modules-done">完成</button>
     `,
     onMount(card) {
@@ -853,9 +1220,8 @@ function openCustomizeModulesSheet() {
       });
 
       card.querySelector('#left-modules-reset')?.addEventListener('click', () => {
-        resetUiLayout();
+        resetAllLayout();
         renderManagerRows();
-        showToast('已恢复默认左侧模块布局', 'success');
       });
 
       card.querySelector('#left-modules-done')?.addEventListener('click', closeSheet);
@@ -974,7 +1340,7 @@ function openImportSheet() {
               ${icon('folder-open', 13)} 选择本地目录
             </button>
           </div>
-          <p id="pick-path-hint" style="margin:8px 0 0;font-size:12px;color:var(--text-secondary);">支持 .md / .txt / .pdf / .xlsx 原位预览与编辑</p>
+          <p id="pick-path-hint" style="margin:8px 0 0;font-size:12px;color:var(--text-secondary);line-height:1.5;">支持所有常见本地文件：Markdown / TXT / 代码 / Excel / PDF / ZIP·TAR 压缩包（免解压预览）/ 图片 / 音视频 / Word·PPT 速览，任何本地文件均可原位登记直达，零复制、不搬家。</p>
         </div>
 
         <div class="glass-card">
@@ -1076,6 +1442,108 @@ function openImportSheet() {
         if (e.key === 'Enter') {
           e.preventDefault();
           doManualSubmit();
+        }
+      });
+    },
+  });
+}
+
+function openRenameFileSheet(item) {
+  if (!item?.path) return;
+  const oldName = item.name || getBasename(item.path);
+
+  openSheet({
+    title: '重命名文件',
+    bodyHtml: `
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div style="font-size:12px;color:var(--text-tertiary);word-break:break-all;">原路径：${escapeHtml(item.path)}</div>
+        <label for="rename-file-input" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);">新文件名（含扩展名）</label>
+        <input id="rename-file-input" type="text" class="apple-input" value="${escapeHtml(oldName)}" autocomplete="off" />
+      </div>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-ghost" id="rename-cancel-btn">取消</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="rename-submit-btn">${icon('check', 14)} 确认重命名</button>
+    `,
+    onMount(card) {
+      const input = card.querySelector('#rename-file-input');
+      const submitBtn = card.querySelector('#rename-submit-btn');
+      card.querySelector('#rename-cancel-btn')?.addEventListener('click', closeSheet);
+
+      window.requestAnimationFrame(() => {
+        if (!input) return;
+        input.focus();
+        const dotIdx = oldName.lastIndexOf('.');
+        if (dotIdx > 0) {
+          input.setSelectionRange(0, dotIdx);
+        } else {
+          input.select();
+        }
+      });
+
+      const doRename = async () => {
+        const newName = input?.value?.trim();
+        if (!newName) {
+          showToast('请输入新文件名', 'warning');
+          input?.focus();
+          return;
+        }
+        if (newName === oldName) {
+          closeSheet();
+          return;
+        }
+
+        if (submitBtn) submitBtn.disabled = true;
+        try {
+          const res = await api.post('/api/files/rename', {
+            path: item.path,
+            new_name: newName,
+          });
+          const nextPath = res?.path || item.path;
+          const nextName = res?.name || newName;
+          const nextExt = res?.ext || item.ext;
+
+          if (Array.isArray(store.state.selectedContextPaths)) {
+            const idx = store.state.selectedContextPaths.indexOf(item.path);
+            if (idx >= 0) {
+              const nextCtx = [...store.state.selectedContextPaths];
+              nextCtx[idx] = nextPath;
+              store.state.selectedContextPaths = nextCtx;
+              store.emit('context:changed', nextCtx);
+            }
+          }
+
+          const wasActive = store.state.activeFile?.path === item.path;
+          await loadFiles();
+          emitWithGuard('files', store.state.files);
+          renderLeftPanel(containerRef);
+
+          if (wasActive) {
+            const updatedItem = findFileItemByPath(nextPath) || {
+              ...store.state.activeFile,
+              path: nextPath,
+              name: nextName,
+              ext: nextExt,
+            };
+            store.state.activeFile = updatedItem;
+            syncActiveFileHighlight(containerRef, updatedItem.path);
+            store.emit('file:open', updatedItem);
+          }
+
+          closeSheet();
+          showToast(`已重命名为：${nextName}`, 'success');
+        } catch (err) {
+          showToast(`重命名失败：${err.message}`, 'error');
+        } finally {
+          if (submitBtn) submitBtn.disabled = false;
+        }
+      };
+
+      submitBtn?.addEventListener('click', doRename);
+      input?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          doRename();
         }
       });
     },
@@ -1501,8 +1969,329 @@ function handleOpenTreeTools() {
   }
 }
 
+async function handleOpenExternal(path, revealFolder) {
+  if (!path) return;
+  try {
+    await api.post('/api/files/open-external', {
+      path,
+      reveal_folder: Boolean(revealFolder),
+    });
+    showToast(revealFolder ? '已打开所在文件夹' : '已调用系统默认程序打开', 'success');
+  } catch (err) {
+    showToast(`打开失败：${err.message}`, 'error');
+  }
+}
+
+async function handleRemoveFileFromWorkspace(item) {
+  if (!item?.path) return;
+  try {
+    await api.post('/api/files/remove', { path: item.path });
+    if (Array.isArray(store.state.selectedContextPaths)) {
+      const filtered = store.state.selectedContextPaths.filter((p) => p !== item.path);
+      if (filtered.length !== store.state.selectedContextPaths.length) {
+        store.state.selectedContextPaths = filtered;
+        store.emit('context:changed', filtered);
+      }
+    }
+    await loadFiles();
+    emitWithGuard('files', store.state.files);
+    renderLeftPanel(containerRef);
+    showToast(`已从工作台列表移除：${item.name || getBasename(item.path)}（原文件保留）`, 'info');
+  } catch (err) {
+    showToast(`移除失败：${err.message}`, 'error');
+  }
+}
+
+async function handleRemoveApp(appId, appName) {
+  if (!appId) return;
+  try {
+    await api.del(`/api/apps?app_id=${encodeURIComponent(appId)}`);
+    await loadApps();
+    emitWithGuard('apps', store.state.apps);
+    renderLeftPanel(containerRef);
+    showToast(`已从软件库移除：${appName || appId}`, 'info');
+  } catch (err) {
+    showToast(`移除软件失败：${err.message}`, 'error');
+  }
+}
+
+function hideLeftContextMenu() {
+  if (!leftContextMenuEl) return;
+  leftContextMenuEl.classList.remove('is-open');
+  leftContextMenuEl.remove();
+  leftContextMenuEl = null;
+}
+
+function ensureGlobalContextMenuDismissListeners() {
+  if (globalMenuListenersBound || typeof document === 'undefined') return;
+  globalMenuListenersBound = true;
+
+  document.addEventListener('pointerdown', (e) => {
+    if (leftContextMenuEl && !e.target.closest('.left-context-menu')) {
+      hideLeftContextMenu();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && leftContextMenuEl) {
+      hideLeftContextMenu();
+    }
+  });
+  window.addEventListener('scroll', hideLeftContextMenu, { capture: true, passive: true });
+  window.addEventListener('resize', hideLeftContextMenu, { passive: true });
+  window.addEventListener('blur', hideLeftContextMenu);
+}
+
+function showLeftContextMenu(clientX, clientY, headerLabel, items, onSelect) {
+  if (typeof document === 'undefined') return;
+  ensureGlobalContextMenuDismissListeners();
+  hideLeftContextMenu();
+
+  // Hide global stickies menu if currently open
+  const globalMenu = document.getElementById('context-menu');
+  if (globalMenu && !globalMenu.classList.contains('hidden')) {
+    globalMenu.classList.add('hidden');
+    globalMenu.classList.remove('is-open');
+    globalMenu.setAttribute('aria-hidden', 'true');
+  }
+
+  const menu = document.createElement('div');
+  menu.className = 'context-menu left-context-menu';
+  menu.setAttribute('role', 'menu');
+  menu.style.zIndex = '96';
+
+  menu.innerHTML = `
+    ${headerLabel ? `<div class="context-menu-label">${escapeHtml(headerLabel)}</div>` : ''}
+    ${items
+      .map((entry) => {
+        if (entry.sep) {
+          return `<div class="context-menu-sep" role="separator"></div>`;
+        }
+        return `
+          <button
+            type="button"
+            class="context-menu-item"
+            data-lctx-id="${escapeHtml(entry.id)}"
+            role="menuitem"
+            style="${entry.danger ? 'color:var(--danger);' : ''}"
+          >
+            <span class="ctx-item-left">
+              <span>${escapeHtml(entry.icon)}</span>
+              <span>${escapeHtml(entry.label)}</span>
+            </span>
+          </button>
+        `;
+      })
+      .join('')}
+  `;
+
+  document.body.appendChild(menu);
+  leftContextMenuEl = menu;
+
+  const rect = menu.getBoundingClientRect();
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 800;
+  const left = Math.max(8, Math.min(clientX, vw - rect.width - 8));
+  const top = Math.max(8, Math.min(clientY, vh - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  window.requestAnimationFrame(() => {
+    menu.classList.add('is-open');
+  });
+
+  menu.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-lctx-id]');
+    if (!btn) return;
+    const id = btn.dataset.lctxId;
+    hideLeftContextMenu();
+    onSelect?.(id);
+  });
+}
+
+function openFileContextMenu(clientX, clientY, rowEl) {
+  const path = rowEl?.dataset?.path || '';
+  if (!path) return;
+  const name = rowEl.dataset.name || getBasename(path);
+  const ext = rowEl.dataset.ext || getFileExt({ path, name });
+  const item = findFileItemByPath(path) || { path, name, ext, is_private: false };
+  const isInContext = (store.state.selectedContextPaths || []).includes(path);
+  const isPrivate = Boolean(item.is_private);
+
+  const menuItems = [
+    { id: 'open', icon: '📖', label: '打开文件' },
+    { id: 'rename', icon: '✏', label: '重命名' },
+    { id: 'copy-anchor', icon: '📌', label: '复制直达胶囊' },
+    { id: 'toggle-context', icon: '☑', label: isInContext ? '移出联合问答' : '加入联合问答' },
+    { id: 'toggle-privacy', icon: '🔒', label: isPrivate ? '关闭隐私锁' : '开启隐私锁' },
+    { sep: true },
+    { id: 'open-external', icon: '🚀', label: '用系统默认程序打开' },
+    { id: 'reveal-folder', icon: '📂', label: '打开所在文件夹' },
+    { sep: true },
+    { id: 'remove', icon: '🗑', label: '从工作台列表移除（不删原文件）', danger: true },
+  ];
+
+  showLeftContextMenu(clientX, clientY, item.name || name, menuItems, (actionId) => {
+    switch (actionId) {
+      case 'open':
+        handleOpenFilePath(item.path);
+        break;
+      case 'rename':
+        openRenameFileSheet(item);
+        break;
+      case 'copy-anchor': {
+        const md = buildFileAnchorMarkdown(item);
+        copyInternal?.(md, `已复制直达胶囊：${md}`);
+        break;
+      }
+      case 'toggle-context':
+        toggleContextPath(item.path);
+        break;
+      case 'toggle-privacy':
+        handleTogglePrivacy(item.path);
+        break;
+      case 'open-external':
+        handleOpenExternal(item.path, false);
+        break;
+      case 'reveal-folder':
+        handleOpenExternal(item.path, true);
+        break;
+      case 'remove':
+        handleRemoveFileFromWorkspace(item);
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+function openAppContextMenu(clientX, clientY, pillEl) {
+  const appId = pillEl?.dataset?.appId || '';
+  if (!appId) return;
+  const appName = pillEl.dataset.appName || pillEl.textContent?.trim() || appId;
+
+  const menuItems = [
+    { id: 'launch', icon: '🚀', label: '立即启动' },
+    { id: 'copy-app-anchor', icon: '📌', label: '复制软件胶囊' },
+    { sep: true },
+    { id: 'delete-app', icon: '🗑', label: '从软件库移除', danger: true },
+  ];
+
+  showLeftContextMenu(clientX, clientY, appName, menuItems, (actionId) => {
+    switch (actionId) {
+      case 'launch':
+        handleLaunchApp(appId, appName);
+        break;
+      case 'copy-app-anchor': {
+        const md = `[[app:${appName}]]`;
+        copyInternal?.(md, `已复制软件胶囊：${md}`);
+        break;
+      }
+      case 'delete-app':
+        handleRemoveApp(appId, appName);
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+function bindModuleHeightResizers(containerEl) {
+  let activeDrag = null;
+
+  const stopResize = (e) => {
+    if (!activeDrag) return;
+    const { resizer, modId, currentH } = activeDrag;
+    activeDrag = null;
+    resizer.classList.remove('is-dragging');
+    document.body.style.cursor = '';
+    if (e?.pointerId != null) {
+      try {
+        resizer.releasePointerCapture?.(e.pointerId);
+      } catch {
+        // ignore
+      }
+    }
+    isResizingModule = true;
+    try {
+      persistModuleHeight(modId, currentH);
+    } finally {
+      isResizingModule = false;
+    }
+  };
+
+  containerEl.addEventListener('pointerdown', (e) => {
+    const resizer = e.target.closest('.module-height-resizer[data-resize-module]');
+    if (!resizer) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+    const modId = resizer.dataset.resizeModule;
+    const block = resizer.closest('.module-block');
+    const scrollBody = block?.querySelector('.module-scroll-body');
+    if (!modId || !scrollBody) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const rect = scrollBody.getBoundingClientRect();
+    const startH = Math.max(MODULE_MIN_HEIGHT, Math.round(rect.height || 160));
+    activeDrag = {
+      resizer,
+      modId,
+      scrollBody,
+      startY: e.clientY,
+      startH,
+      currentH: startH,
+    };
+
+    resizer.classList.add('is-dragging');
+    document.body.style.cursor = 'row-resize';
+    try {
+      resizer.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!activeDrag) return;
+    const dy = e.clientY - activeDrag.startY;
+    const nextH = Math.max(MODULE_MIN_HEIGHT, Math.min(MODULE_MAX_HEIGHT, Math.round(activeDrag.startH + dy)));
+    activeDrag.currentH = nextH;
+    activeDrag.scrollBody.style.height = `${nextH}px`;
+    activeDrag.scrollBody.style.maxHeight = `${nextH}px`;
+    activeDrag.scrollBody.style.overflowY = 'auto';
+  });
+
+  window.addEventListener('pointerup', stopResize);
+  window.addEventListener('pointercancel', stopResize);
+
+  containerEl.addEventListener('dblclick', (e) => {
+    const resizer = e.target.closest('.module-height-resizer[data-resize-module]');
+    if (!resizer) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const modId = resizer.dataset.resizeModule;
+    const block = resizer.closest('.module-block');
+    const scrollBody = block?.querySelector('.module-scroll-body');
+    if (scrollBody) {
+      scrollBody.style.height = '';
+      scrollBody.style.maxHeight = '';
+      scrollBody.style.overflowY = '';
+    }
+    if (modId) {
+      isResizingModule = true;
+      try {
+        persistModuleHeight(modId, null);
+      } finally {
+        isResizingModule = false;
+      }
+      showToast('已恢复模块自动高度', 'info', { duration: 1600 });
+    }
+  });
+}
+
 /**
- * Initialize Left Panel (Stages 2, 3, 4 & V2 Modular Workspace).
+ * Initialize Left Panel (V4 Super-Upgrade).
  * @param {HTMLElement} containerEl
  */
 export function initLeftTree(containerEl) {
@@ -1510,22 +2299,25 @@ export function initLeftTree(containerEl) {
   containerRef = containerEl;
 
   renderLeftPanel(containerEl);
+  bindModuleHeightResizers(containerEl);
 
   // Sync checkboxes & active highlight cleanly without full re-render flicker
   store.on('context:changed', () => syncContextCheckboxes(containerEl));
   store.on('file:open', (file) => syncActiveFileHighlight(containerEl, file?.path));
   store.on('capture:open', () => openCaptureSceneSheet());
+  store.on('files:sort-changed', () => updateFilesSectionOnly(containerEl));
   store.on('ui:layout-changed', () => {
+    if (isResizingModule) return;
     const activeEl = document.activeElement;
     if (activeEl && containerEl.contains(activeEl) && activeEl.matches('[data-role="quick-scratch-input"]')) {
       return;
     }
-    renderLeftPanel(containerEl);
+    renderPanelBody(containerEl);
   });
   store.on('recent:changed', () => {
     const hasRecentMod = getLeftModules().some((m) => m.id === 'recent_files' && m.visible !== false);
     if (hasRecentMod) {
-      renderLeftPanel(containerEl);
+      renderPanelBody(containerEl);
     }
   });
 
@@ -1533,27 +2325,50 @@ export function initLeftTree(containerEl) {
   store.on('files:updated', async () => {
     if (mutating.files) return;
     await loadFiles();
-    renderLeftPanel(containerEl);
+    renderPanelBody(containerEl);
   });
   store.on('apps:updated', async () => {
     if (mutating.apps) return;
     await loadApps();
-    renderLeftPanel(containerEl);
+    renderPanelBody(containerEl);
   });
   store.on('workspaces:updated', async () => {
     if (mutating.workspaces) return;
     await loadWorkspaces();
-    renderLeftPanel(containerEl);
+    renderPanelBody(containerEl);
   });
   store.on('tree:updated', async () => {
     if (mutating.tree) return;
     await loadTree();
-    renderLeftPanel(containerEl);
+    renderPanelBody(containerEl);
   });
 
-  // Live input syncing for quick_scratch and pomodoro_mini
+  // Dedicated Left-Panel Right-Click Context Menu (#8)
+  containerEl.addEventListener('contextmenu', (e) => {
+    const fileRow = e.target.closest('.tree-file-item[data-path]');
+    if (fileRow) {
+      e.preventDefault();
+      e.stopPropagation();
+      openFileContextMenu(e.clientX, e.clientY, fileRow);
+      return;
+    }
+    const appPill = e.target.closest('.app-launcher-pill[data-app-id]');
+    if (appPill) {
+      e.preventDefault();
+      e.stopPropagation();
+      openAppContextMenu(e.clientX, e.clientY, appPill);
+    }
+  });
+
+  // Live input syncing for in-folder filter, quick_scratch, and pomodoro_mini
   containerEl.addEventListener('input', (e) => {
     const target = e.target;
+    if (target.matches('.left-filter-input')) {
+      leftFilterQuery = target.value;
+      updateFilterUiState(containerEl);
+      updateFilesSectionOnly(containerEl);
+      return;
+    }
     if (target.matches('[data-role="quick-scratch-input"]')) {
       updateUiLayout({ scratchpadText: target.value });
       return;
@@ -1696,6 +2511,41 @@ export function initLeftTree(containerEl) {
     if (!actionEl) return;
     const action = actionEl.dataset.action;
 
+    if (action === 'sort-by') {
+      return;
+    }
+
+    if (action === 'sort-dir') {
+      const cur = getLeftFileSort();
+      const nextDir = cur.dir === 'asc' ? 'desc' : 'asc';
+      persistLeftFileSort({ dir: nextDir });
+      updateFilesSectionOnly(containerEl);
+      return;
+    }
+
+    if (action === 'clear-filter') {
+      leftFilterQuery = '';
+      const filterInput = containerEl.querySelector('.left-filter-input');
+      if (filterInput) {
+        filterInput.value = '';
+        filterInput.focus();
+      }
+      updateFilterUiState(containerEl);
+      updateFilesSectionOnly(containerEl);
+      return;
+    }
+
+    if (action === 'scroll-top') {
+      const bodyEl = containerEl.querySelector('.panel-body');
+      bodyEl?.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    if (action === 'reset-layout') {
+      resetAllLayout();
+      return;
+    }
+
     if (action === 'customize-modules') {
       openCustomizeModulesSheet();
       return;
@@ -1756,7 +2606,7 @@ export function initLeftTree(containerEl) {
       if (key) {
         if (collapsedGroups.has(key)) collapsedGroups.delete(key);
         else collapsedGroups.add(key);
-        renderLeftPanel(containerEl);
+        updateFilesSectionOnly(containerEl);
       }
       return;
     }
@@ -1813,8 +2663,15 @@ export function initLeftTree(containerEl) {
     }
   });
 
-  // Handle RAG context checkbox toggle
+  // Handle RAG context checkbox toggle & sort-by select change
   containerEl.addEventListener('change', (e) => {
+    const sortSelect = e.target.closest('[data-action="sort-by"]');
+    if (sortSelect) {
+      persistLeftFileSort({ by: sortSelect.value });
+      updateFilesSectionOnly(containerEl);
+      return;
+    }
+
     const cb = e.target.closest('.file-check');
     if (!cb) return;
     const path = cb.dataset.path;
@@ -1834,6 +2691,6 @@ export function initLeftTree(containerEl) {
 
   // Initial backend hydration
   loadAllData().then(() => {
-    renderLeftPanel(containerEl);
+    renderPanelBody(containerEl);
   });
 }

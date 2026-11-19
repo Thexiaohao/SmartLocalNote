@@ -87,6 +87,10 @@ function bindTopBarControls() {
 
   store.on('theme:changed', updateThemeButtonIcon);
   store.on('layout:changed', syncLayoutClasses);
+  store.on('ui:layout-changed', () => {
+    const widths = store.state.paneWidths || { left: 260, right: 360 };
+    applyPaneWidths(widths.left ?? 260, widths.right ?? 360);
+  });
   store.on('file:open', (fileInfo) => {
     if (fileInfo) {
       recordRecentFile(fileInfo);
@@ -97,6 +101,84 @@ function bindTopBarControls() {
     } else if (store.state.tabletDrawerOpen) {
       store.setState({ tabletDrawerOpen: false });
       syncLayoutClasses();
+    }
+  });
+}
+
+function openQuickNewNoteSheet() {
+  openSheet({
+    title: '新建本地笔记 (Ctrl+N)',
+    bodyHtml: `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div>
+          <label for="global-new-note-title" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">笔记标题</label>
+          <input id="global-new-note-title" type="text" class="apple-input" placeholder="例如：高数第三章错题复盘" autocomplete="off" />
+        </div>
+        <div>
+          <label for="global-new-note-content" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">初始正文（可选，支持 Markdown 与 [[锚点]]）</label>
+          <textarea id="global-new-note-content" class="apple-textarea" rows="4" placeholder="# 笔记标题&#10;&#10;- 记录想法或参考 [[讲义.pdf#page=1]]"></textarea>
+        </div>
+      </div>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-ghost" id="global-note-cancel">取消</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="global-note-submit">${icon('check', 14)} 创建并打开</button>
+    `,
+    onMount(card) {
+      const titleInput = card.querySelector('#global-new-note-title');
+      const contentInput = card.querySelector('#global-new-note-content');
+      const submitBtn = card.querySelector('#global-note-submit');
+
+      window.requestAnimationFrame(() => titleInput?.focus());
+      card.querySelector('#global-note-cancel')?.addEventListener('click', closeSheet);
+
+      const doCreate = async () => {
+        const title = titleInput?.value?.trim();
+        if (!title) {
+          showToast('请输入笔记标题', 'warning');
+          titleInput?.focus();
+          return;
+        }
+        const content = contentInput?.value ?? '';
+        if (submitBtn) submitBtn.disabled = true;
+        try {
+          const created = await api.post('/api/files/create-note', { title, content });
+          closeSheet();
+          store.emit('files:updated', created);
+          if (created?.path) {
+            store.emit('file:open', created);
+          }
+          showToast(`已创建笔记：${created?.name || `${title}.md`}`, 'success');
+        } catch (err) {
+          showToast(`创建笔记失败：${err?.message || '未知错误'}`, 'error');
+        } finally {
+          if (submitBtn) submitBtn.disabled = false;
+        }
+      };
+
+      submitBtn?.addEventListener('click', doCreate);
+      titleInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          doCreate();
+        }
+      });
+    },
+  });
+}
+
+function bindGlobalShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n') {
+      const activeEl = document.activeElement;
+      const sheetOverlay = document.getElementById('sheet-overlay');
+      const sheetOpen = Boolean(sheetOverlay && !sheetOverlay.hidden && !sheetOverlay.classList.contains('hidden'));
+      const inModalInput = Boolean(
+        sheetOpen && activeEl && sheetOverlay.contains(activeEl) && activeEl.matches('input, textarea, select')
+      );
+      if (inModalInput) return;
+      e.preventDefault();
+      openQuickNewNoteSheet();
     }
   });
 }
@@ -328,6 +410,7 @@ async function bootstrap() {
 
   // 3. Bind shell controls, pane resizers, drag cleanup & responsive state
   bindTopBarControls();
+  bindGlobalShortcuts();
   bindPaneResizers();
   bindMobileControls();
   window.addEventListener('dragend', () => clearDragPayload());

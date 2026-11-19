@@ -57,6 +57,15 @@ class RelocateBody(BaseModel):
     filename: str
 
 
+class RenameFileBody(BaseModel):
+    path: str
+    new_name: str
+
+
+class RemoveFileBody(BaseModel):
+    path: str
+
+
 @router.get("/list")
 def list_files() -> dict:
     return ok(doc_engine.list_workspace_files())
@@ -143,3 +152,13 @@ def relocate_file(body: RelocateBody) -> dict:
 @router.get("/backlinks")
 def get_backlinks(path: str = Query(...)) -> dict:
     return ok(search_engine.find_backlinks(path))
+
+
+@router.post("/rename")
+def rename_file(body: RenameFileBody) -> dict:
+    return ok(doc_engine.rename_file(body.path, body.new_name))
+
+
+@router.post("/remove")
+def remove_file(body: RemoveFileBody) -> dict:
+    return ok(doc_engine.remove_from_workspace(body.path))

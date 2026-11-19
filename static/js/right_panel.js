@@ -24,6 +24,9 @@ const {
   closeSheet,
   renderMarkdownSafe,
   copyInternal,
+  setModuleHeight,
+  resetUiLayout,
+  updateUiLayout,
 } = storeMod;
 
 const UI_LAYOUT_STORAGE_KEY = 'sln_ui_layout';
@@ -157,18 +160,94 @@ function normalizeModuleList(rawList, defaults) {
   return result;
 }
 
+const RIGHT_MODULE_MIN_HEIGHT = 100;
+const RIGHT_MODULE_MAX_HEIGHT = 640;
+
+function getModuleHeight(moduleKey) {
+  const raw = store.state.uiLayout?.moduleHeights?.[moduleKey];
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Math.min(RIGHT_MODULE_MAX_HEIGHT, Math.max(RIGHT_MODULE_MIN_HEIGHT, Math.round(num)));
+}
+
+function clearModuleHeight(moduleKey) {
+  const curLayout =
+    store.state.uiLayout && typeof store.state.uiLayout === 'object' ? store.state.uiLayout : {};
+  const nextHeights = { ...(curLayout.moduleHeights || {}) };
+  delete nextHeights[moduleKey];
+  if (typeof updateUiLayout === 'function') {
+    return updateUiLayout({ moduleHeights: nextHeights });
+  }
+  const nextLayout = { ...curLayout, moduleHeights: nextHeights };
+  store.state.uiLayout = nextLayout;
+  try {
+    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(nextLayout));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('ui:layout-changed', nextLayout);
+  return nextLayout;
+}
+
+function setModuleHeightSafe(moduleKey, px) {
+  if (px === null || px === undefined || px === '') {
+    return clearModuleHeight(moduleKey);
+  }
+  const nextPx = Math.min(RIGHT_MODULE_MAX_HEIGHT, Math.max(RIGHT_MODULE_MIN_HEIGHT, Math.round(Number(px))));
+  if (typeof setModuleHeight === 'function') {
+    return setModuleHeight(moduleKey, nextPx);
+  }
+  const curLayout =
+    store.state.uiLayout && typeof store.state.uiLayout === 'object' ? store.state.uiLayout : {};
+  const nextHeights = { ...(curLayout.moduleHeights || {}), [moduleKey]: nextPx };
+  const nextLayout = { ...curLayout, moduleHeights: nextHeights };
+  store.state.uiLayout = nextLayout;
+  try {
+    localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(nextLayout));
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('ui:layout-changed', nextLayout);
+  return nextLayout;
+}
+
+function renderModuleResizerHtml(id) {
+  return `<div class="module-height-resizer" data-resize-module="right_${escapeHtml(id)}" title="上下拖动调节卡片高度（双击恢复自动）" role="separator" aria-orientation="horizontal"></div>`;
+}
+
+function buildScrollBodyStyle(id) {
+  const savedH = getModuleHeight(`right_${id}`);
+  return savedH ? `height:${savedH}px;max-height:${savedH}px;` : '';
+}
+
 function getUiLayout() {
   const raw = store.state.uiLayout || {};
   return {
     rightTabsOrder: normalizeTabsOrder(raw.rightTabsOrder || DEFAULT_TABS_ORDER),
     rightSummaryModules: normalizeModuleList(raw.rightSummaryModules, DEFAULT_SUMMARY_MODULES),
     rightToolModules: normalizeModuleList(raw.rightToolModules, DEFAULT_TOOL_MODULES),
+    moduleHeights:
+      raw.moduleHeights && typeof raw.moduleHeights === 'object' ? { ...raw.moduleHeights } : {},
   };
 }
 
 function commitUiLayout(patch) {
+  const prevHeights =
+    store.state.uiLayout?.moduleHeights && typeof store.state.uiLayout.moduleHeights === 'object'
+      ? { ...store.state.uiLayout.moduleHeights }
+      : null;
   if (typeof storeMod.updateUiLayout === 'function') {
-    return storeMod.updateUiLayout(patch);
+    const res = storeMod.updateUiLayout(patch);
+    if (prevHeights && !res?.moduleHeights) {
+      res.moduleHeights = prevHeights;
+      store.state.uiLayout = res;
+      try {
+        localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(res));
+      } catch {
+        // ignore storage errors
+      }
+    }
+    return res;
   }
   const current = getUiLayout();
   const next = {
@@ -179,6 +258,7 @@ function commitUiLayout(patch) {
     rightToolModules: patch.rightToolModules
       ? normalizeModuleList(patch.rightToolModules, DEFAULT_TOOL_MODULES)
       : current.rightToolModules,
+    moduleHeights: patch.moduleHeights || current.moduleHeights || {},
   };
   store.state.uiLayout = next;
   try {
@@ -191,13 +271,19 @@ function commitUiLayout(patch) {
 }
 
 function resetUiLayoutState() {
-  if (typeof storeMod.resetUiLayout === 'function') {
-    return storeMod.resetUiLayout();
+  if (typeof resetUiLayout === 'function') {
+    return resetUiLayout();
+  }
+  if (typeof storeMod.applyPaneWidths === 'function') {
+    storeMod.applyPaneWidths(260, 360);
+  } else {
+    store.state.paneWidths = { left: 260, right: 360 };
   }
   const next = {
     rightTabsOrder: [...DEFAULT_TABS_ORDER],
     rightSummaryModules: DEFAULT_SUMMARY_MODULES.map((m) => ({ ...m })),
     rightToolModules: DEFAULT_TOOL_MODULES.map((m) => ({ ...m })),
+    moduleHeights: {},
   };
   store.state.uiLayout = next;
   try {
@@ -352,6 +438,7 @@ export function initRightPanel(containerEl) {
 
   let msgSeq = 1;
   let draggedToolModuleId = null;
+  let isResizingRightModule = false;
   const toolOpenStateById = new Map([
     ['quick_excel', true],
     ['knowledge_tree', true],
@@ -622,7 +709,7 @@ export function initRightPanel(containerEl) {
       bodyHtml: `<div id="right-customize-root" style="display:flex;flex-direction:column;gap:14px;"></div>`,
       footerHtml: `
         <button type="button" class="pill-btn" id="customize-reset-btn">
-          ${icon('rotate-ccw', 13)} 恢复默认
+          ↺ 恢复默认尺寸与布局
         </button>
         <button type="button" class="pill-btn pill-btn-primary" id="customize-done-btn">完成</button>
       `,
@@ -729,7 +816,7 @@ export function initRightPanel(containerEl) {
         card.querySelector('#customize-reset-btn')?.addEventListener('click', () => {
           resetUiLayoutState();
           renderCustomizeBody();
-          showToast('已恢复右侧默认模块布局', 'success');
+          showToast('已恢复默认三栏宽度与模块尺寸', 'success');
         });
 
         card.querySelector('#customize-done-btn')?.addEventListener('click', closeSheet);
@@ -1066,52 +1153,68 @@ export function initRightPanel(containerEl) {
       `;
     }
 
-    const summaryCardModuleHtml = `<div class="module-block" data-summary-module-id="summary_card">${resultHtml}</div>`;
-
-    const remindersHtml = `
-      <div class="module-block" data-summary-module-id="reminders">
-        <div class="section-heading" style="margin-top:14px;">
-          <span>定时提醒 (${pendingAndFired.length})</span>
-          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
-            ${icon('rotate-ccw', 11)} 刷新
-          </button>
+    const sumCardStyle = buildScrollBodyStyle('summary_card');
+    const summaryCardModuleHtml = `
+      <div class="module-block" data-module-id="summary_card" data-summary-module-id="summary_card" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
+        <div class="module-scroll-body" data-scroll-module="right_summary_card" style="${sumCardStyle}min-height:0;">
+          ${resultHtml}
         </div>
-        ${
-          pendingAndFired.length
-            ? pendingAndFired
-                .map((rem) => {
-                  const isFired = rem.status === 'fired';
-                  return `
-                    <div class="glass-card" style="padding:9px 11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                      <div style="min-width:0;flex:1 1 auto;">
-                        <div style="display:flex;align-items:center;gap:6px;">
-                          <span style="width:7px;height:7px;border-radius:9999px;flex-shrink:0;background:${isFired ? 'var(--warning)' : 'var(--success)'};"></span>
-                          <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(rem.title)}</span>
-                        </div>
-                        <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;padding-left:13px;">
-                          ${isFired ? '已触发' : '待触发'} · ${escapeHtml(formatTriggerTime(rem.trigger_at))}
-                        </div>
-                      </div>
-                      <button type="button" class="icon-pill" data-action="delete-reminder" data-reminder-id="${escapeHtml(rem.id)}" title="取消/删除提醒" aria-label="删除提醒" style="width:26px;height:26px;">
-                        ${icon('x', 12)}
-                      </button>
-                    </div>
-                  `;
-                })
-                .join('')
-            : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
-        }
+        ${renderModuleResizerHtml('summary_card')}
       </div>
     `;
 
-    const aiTemplatesSummaryHtml = `
-      <div class="glass-card module-block" data-summary-module-id="ai_templates" style="margin-top:10px;padding:10px 12px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
-          <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-primary);">
-            ${icon('zap', 13)} AI 常用指令模板
-          </span>
+    const remStyle = buildScrollBodyStyle('reminders');
+    const remindersHtml = `
+      <div class="module-block" data-module-id="reminders" data-summary-module-id="reminders" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
+        <div class="module-scroll-body" data-scroll-module="right_reminders" style="${remStyle}min-height:0;">
+          <div class="section-heading" style="margin-top:14px;">
+            <span>定时提醒 (${pendingAndFired.length})</span>
+            <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
+              ${icon('rotate-ccw', 11)} 刷新
+            </button>
+          </div>
+          ${
+            pendingAndFired.length
+              ? pendingAndFired
+                  .map((rem) => {
+                    const isFired = rem.status === 'fired';
+                    return `
+                      <div class="glass-card" style="padding:9px 11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                        <div style="min-width:0;flex:1 1 auto;">
+                          <div style="display:flex;align-items:center;gap:6px;">
+                            <span style="width:7px;height:7px;border-radius:9999px;flex-shrink:0;background:${isFired ? 'var(--warning)' : 'var(--success)'};"></span>
+                            <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(rem.title)}</span>
+                          </div>
+                          <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;padding-left:13px;">
+                            ${isFired ? '已触发' : '待触发'} · ${escapeHtml(formatTriggerTime(rem.trigger_at))}
+                          </div>
+                        </div>
+                        <button type="button" class="icon-pill" data-action="delete-reminder" data-reminder-id="${escapeHtml(rem.id)}" title="取消/删除提醒" aria-label="删除提醒" style="width:26px;height:26px;">
+                          ${icon('x', 12)}
+                        </button>
+                      </div>
+                    `;
+                  })
+                  .join('')
+              : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
+          }
         </div>
-        ${renderAiTemplatesCardContentHtml()}
+        ${renderModuleResizerHtml('reminders')}
+      </div>
+    `;
+
+    const tplSumStyle = buildScrollBodyStyle('ai_templates_summary');
+    const aiTemplatesSummaryHtml = `
+      <div class="glass-card module-block" data-module-id="ai_templates_summary" data-summary-module-id="ai_templates" style="margin-top:10px;padding:10px 12px 4px;">
+        <div class="module-scroll-body" data-scroll-module="right_ai_templates_summary" style="${tplSumStyle}min-height:0;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
+            <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-primary);">
+              ${icon('zap', 13)} AI 常用指令模板
+            </span>
+          </div>
+          ${renderAiTemplatesCardContentHtml()}
+        </div>
+        ${renderModuleResizerHtml('ai_templates_summary')}
       </div>
     `;
 
@@ -1322,7 +1425,7 @@ export function initRightPanel(containerEl) {
   function renderContextPillsHtml() {
     const paths = store.state.selectedContextPaths || [];
     if (!paths.length) {
-      return `<div style="font-size:11.5px;color:var(--text-tertiary);">在左侧勾选文件（最多5份）即可跨格式联合问答</div>`;
+      return `<div style="font-size:11.5px;color:var(--text-tertiary);">在左侧勾选文件（最多 20 份）即可跨格式联合问答</div>`;
     }
     return paths
       .map((p) => {
@@ -1415,7 +1518,7 @@ export function initRightPanel(containerEl) {
         <div class="empty-state" style="padding:26px 14px;">
           <div style="color:var(--accent);">${icon('sparkles', 24)}</div>
           <p class="empty-title">跨格式联合问答（零向量库）</p>
-          <p class="empty-desc">在左侧勾选最多 5 份 PDF / Excel / Markdown / TXT，直接融合提问并生成可点击的页码与单元格锚点。</p>
+          <p class="empty-desc">在左侧勾选最多 20 份 PDF / Excel / Markdown / TXT，直接融合提问并生成可点击的页码与单元格锚点。</p>
           <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:8px;">
             <button type="button" class="pill-btn pill-btn-sm" data-action="chat-quick-prompt" data-prompt="请综合我勾选的资料，提炼核心要点与对应页码/单元格位置。">综合提炼要点</button>
             <button type="button" class="pill-btn pill-btn-sm" data-action="chat-quick-prompt" data-prompt="请把这些内容整理成一份学习任务进度清单。">整理进度清单</button>
@@ -1499,7 +1602,7 @@ export function initRightPanel(containerEl) {
             </button>
           </div>
           <span data-role="chat-ctx-count" style="font-size:11px;color:var(--text-tertiary);">
-            ${(store.state.selectedContextPaths || []).length}/5 文件
+            ${(store.state.selectedContextPaths || []).length}/20 文件
           </span>
         </div>
       </div>
@@ -1602,7 +1705,7 @@ export function initRightPanel(containerEl) {
     const activeFile = store.state.activeFile;
     if (activeFile?.path) {
       const selected = store.state.selectedContextPaths || [];
-      if (!selected.includes(activeFile.path) && selected.length < 5) {
+      if (!selected.includes(activeFile.path) && selected.length < 20) {
         toggleContextPath(activeFile.path);
       }
     }
@@ -2201,6 +2304,7 @@ export function initRightPanel(containerEl) {
     const workspaces = store.state.workspaces || [];
     const appsById = new Map(apps.map((a) => [String(a.id), a]));
 
+    const quickExcelScrollStyle = buildScrollBodyStyle('quick_excel');
     const card1Html = `
       <details class="tool-card module-block" data-module-id="quick_excel" draggable="true" ${toolOpenStateById.get('quick_excel') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
@@ -2210,7 +2314,7 @@ export function initRightPanel(containerEl) {
           </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${excelFiles.length} 份表格</span>
         </summary>
-        <div class="tool-card-body">
+        <div class="tool-card-body module-scroll-body" data-scroll-module="right_quick_excel" ${quickExcelScrollStyle ? `style="${quickExcelScrollStyle}"` : ''}>
           ${
             excelFiles.length
               ? `
@@ -2283,10 +2387,12 @@ export function initRightPanel(containerEl) {
               : `<div style="font-size:12px;color:var(--text-tertiary);">暂无 .xlsx 文件，请先在左侧导入本地 Excel 表格。</div>`
           }
         </div>
+        ${renderModuleResizerHtml('quick_excel')}
       </details>
     `;
 
     const treeIsTable = state.treeViewMode === 'table';
+    const treeScrollStyle = buildScrollBodyStyle('knowledge_tree');
     const card2Html = `
       <details class="tool-card module-block" data-module-id="knowledge_tree" draggable="true" ${toolOpenStateById.get('knowledge_tree') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
@@ -2296,7 +2402,7 @@ export function initRightPanel(containerEl) {
           </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${nodes.length} 节点</span>
         </summary>
-        <div class="tool-card-body">
+        <div class="tool-card-body module-scroll-body" data-scroll-module="right_knowledge_tree" ${treeScrollStyle ? `style="${treeScrollStyle}"` : ''}>
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
             <div class="segmented-pill" data-seg="tree-view" style="width:168px;">
               <div class="segmented-thumb" style="width: calc((100% - 6px) / 2); transform: translateX(${treeIsTable ? 100 : 0}%);"></div>
@@ -2430,9 +2536,11 @@ export function initRightPanel(containerEl) {
                 : `<div style="font-size:12px;color:var(--text-tertiary);">暂无知识树分类节点，点击「新建分类节点」开始整理。</div>`
           }
         </div>
+        ${renderModuleResizerHtml('knowledge_tree')}
       </details>
     `;
 
+    const appsWsScrollStyle = buildScrollBodyStyle('apps_workspaces');
     const card3Html = `
       <details class="tool-card module-block" data-module-id="apps_workspaces" draggable="true" ${toolOpenStateById.get('apps_workspaces') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
@@ -2442,7 +2550,7 @@ export function initRightPanel(containerEl) {
           </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${apps.length} 应用 · ${workspaces.length} 场景包</span>
         </summary>
-        <div class="tool-card-body">
+        <div class="tool-card-body module-scroll-body" data-scroll-module="right_apps_workspaces" ${appsWsScrollStyle ? `style="${appsWsScrollStyle}"` : ''}>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
             <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="open-capture">
               ${icon('camera', 13)} 捕获当前桌面现场
@@ -2509,9 +2617,11 @@ export function initRightPanel(containerEl) {
               : `<div style="font-size:12px;color:var(--text-tertiary);">暂无一键场景包，可点击上方「捕获当前桌面现场」一键创建。</div>`
           }
         </div>
+        ${renderModuleResizerHtml('apps_workspaces')}
       </details>
     `;
 
+    const aiTplScrollStyle = buildScrollBodyStyle('ai_templates');
     const card4Html = `
       <details class="tool-card module-block" data-module-id="ai_templates" draggable="true" ${toolOpenStateById.get('ai_templates') !== false ? 'open' : ''}>
         <summary class="tool-card-summary">
@@ -2521,9 +2631,10 @@ export function initRightPanel(containerEl) {
           </span>
           <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${AI_PROMPT_TEMPLATES.length} 模板</span>
         </summary>
-        <div class="tool-card-body">
+        <div class="tool-card-body module-scroll-body" data-scroll-module="right_ai_templates" ${aiTplScrollStyle ? `style="${aiTplScrollStyle}"` : ''}>
           ${renderAiTemplatesCardContentHtml()}
         </div>
+        ${renderModuleResizerHtml('ai_templates')}
       </details>
     `;
 
@@ -3438,6 +3549,7 @@ export function initRightPanel(containerEl) {
   });
 
   store.on('ui:layout-changed', () => {
+    if (isResizingRightModule) return;
     renderTabsHeader();
     syncModeHeader();
     renderSummaryMode();
@@ -3477,7 +3589,7 @@ export function initRightPanel(containerEl) {
     renderContextBarOnly();
     const countSpan = chatEl?.querySelector('[data-role="chat-ctx-count"]');
     if (countSpan) {
-      countSpan.textContent = `${(store.state.selectedContextPaths || []).length}/5 文件`;
+      countSpan.textContent = `${(store.state.selectedContextPaths || []).length}/20 文件`;
     }
     renderSummaryMode();
     renderToolsMode();
@@ -3510,12 +3622,111 @@ export function initRightPanel(containerEl) {
   store.on('reminders:updated', fetchReminders);
   store.on('sse:reminder:fired', fetchReminders);
 
+  function bindRightModuleHeightResizers() {
+    let activeDrag = null;
+
+    const stopResize = (e) => {
+      if (!activeDrag) return;
+      const { resizer, modId, currentH } = activeDrag;
+      activeDrag = null;
+      resizer.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      if (e?.pointerId != null) {
+        try {
+          resizer.releasePointerCapture?.(e.pointerId);
+        } catch {
+          // ignore
+        }
+      }
+      isResizingRightModule = true;
+      try {
+        setModuleHeightSafe(modId, currentH);
+      } finally {
+        isResizingRightModule = false;
+      }
+    };
+
+    containerEl.addEventListener('pointerdown', (e) => {
+      const resizer = e.target.closest('.module-height-resizer[data-resize-module]');
+      if (!resizer) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+      const modId = resizer.dataset.resizeModule;
+      const block = resizer.closest('.module-block');
+      const scrollBody = block?.querySelector('.module-scroll-body');
+      if (!modId || !scrollBody) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const rect = scrollBody.getBoundingClientRect();
+      const startH = Math.max(RIGHT_MODULE_MIN_HEIGHT, Math.round(rect.height || 180));
+      activeDrag = {
+        resizer,
+        modId,
+        scrollBody,
+        startY: e.clientY,
+        startH,
+        currentH: startH,
+      };
+
+      resizer.classList.add('is-dragging');
+      document.body.style.cursor = 'row-resize';
+      try {
+        resizer.setPointerCapture?.(e.pointerId);
+      } catch {
+        // ignore
+      }
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!activeDrag) return;
+      const dy = e.clientY - activeDrag.startY;
+      const nextH = Math.max(
+        RIGHT_MODULE_MIN_HEIGHT,
+        Math.min(RIGHT_MODULE_MAX_HEIGHT, Math.round(activeDrag.startH + dy))
+      );
+      activeDrag.currentH = nextH;
+      activeDrag.scrollBody.style.height = `${nextH}px`;
+      activeDrag.scrollBody.style.maxHeight = `${nextH}px`;
+      activeDrag.scrollBody.style.overflowY = 'auto';
+    });
+
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    containerEl.addEventListener('dblclick', (e) => {
+      const resizer = e.target.closest('.module-height-resizer[data-resize-module]');
+      if (!resizer) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const modId = resizer.dataset.resizeModule;
+      const block = resizer.closest('.module-block');
+      const scrollBody = block?.querySelector('.module-scroll-body');
+      if (scrollBody) {
+        scrollBody.style.height = '';
+        scrollBody.style.maxHeight = '';
+        scrollBody.style.overflowY = '';
+      }
+      if (modId) {
+        isResizingRightModule = true;
+        try {
+          setModuleHeightSafe(modId, null);
+        } finally {
+          isResizingRightModule = false;
+        }
+        showToast('已恢复模块自动高度', 'info', { duration: 1600 });
+      }
+    });
+  }
+
   // Initial Render + Lazy Initial Loads
   renderTabsHeader();
   syncModeHeader();
   renderSummaryMode();
   renderChatMode();
   renderToolsMode();
+  bindRightModuleHeightResizers();
 
   fetchReminders();
   fetchTree();

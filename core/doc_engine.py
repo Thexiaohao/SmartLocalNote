@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -22,7 +23,15 @@ import webbrowser
 import xml.etree.ElementTree as ET
 import zipfile
 
-from config import get_default_notes_dir, load_config
+from config import (
+    APPS_FILE,
+    DATA_DIR,
+    TREE_FILE,
+    atomic_write_json,
+    get_default_notes_dir,
+    load_config,
+    save_config,
+)
 from core import safe_io
 
 _INVALID_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -751,6 +760,182 @@ def relocate_missing_file(filename: str) -> dict[str, Any]:
         "path": str(found),
         "name": found.name,
         "ext": found.suffix.lower(),
+    }
+
+
+def _norm_path_for_compare(raw_path: Any) -> str | None:
+    s = str(raw_path or "").strip()
+    if not s:
+        return None
+    try:
+        return str(Path(s).expanduser().resolve())
+    except OSError:
+        return s
+
+
+def _update_renamed_references(old_str: str, new_str: str) -> None:
+    """Atomically update saved path references across files.json, config.json, apps.json, and knowledge_tree.json."""
+    # 1. files.json (files list)
+    idx = safe_io.load_files_index()
+    files_list = idx.get("files", [])
+    files_changed = False
+    updated_files: list[str] = []
+    for item in files_list:
+        if item == old_str or _norm_path_for_compare(item) == old_str:
+            updated_files.append(new_str)
+            files_changed = True
+        else:
+            updated_files.append(item)
+    if files_changed:
+        idx["files"] = updated_files
+        safe_io.save_files_index(idx)
+
+    # 2. config.json (private_files & default_progress_excel)
+    cfg = load_config()
+    cfg_changed = False
+    priv_list = cfg.get("private_files", [])
+    if isinstance(priv_list, list):
+        new_priv: list[str] = []
+        for p in priv_list:
+            if p == old_str or _norm_path_for_compare(p) == old_str:
+                new_priv.append(new_str)
+                cfg_changed = True
+            else:
+                new_priv.append(p)
+        if cfg_changed:
+            cfg["private_files"] = list(dict.fromkeys(new_priv))
+
+    prog_excel = cfg.get("default_progress_excel", "")
+    if prog_excel and (prog_excel == old_str or _norm_path_for_compare(prog_excel) == old_str):
+        cfg["default_progress_excel"] = new_str
+        cfg_changed = True
+
+    if cfg_changed:
+        save_config(cfg)
+
+    # 3. apps.json (workspaces[*].file_paths)
+    if APPS_FILE.exists():
+        try:
+            apps_data = json.loads(APPS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            apps_data = None
+        if isinstance(apps_data, dict) and isinstance(apps_data.get("workspaces"), list):
+            apps_changed = False
+            for ws in apps_data["workspaces"]:
+                if not isinstance(ws, dict) or not isinstance(ws.get("file_paths"), list):
+                    continue
+                new_fps: list[str] = []
+                ws_changed = False
+                for fp in ws["file_paths"]:
+                    if fp == old_str or _norm_path_for_compare(fp) == old_str:
+                        new_fps.append(new_str)
+                        ws_changed = True
+                    else:
+                        new_fps.append(fp)
+                if ws_changed:
+                    ws["file_paths"] = list(dict.fromkeys(new_fps))
+                    apps_changed = True
+            if apps_changed:
+                atomic_write_json(APPS_FILE, apps_data)
+
+    # 4. knowledge_tree.json (nodes[*].files[*].path)
+    if TREE_FILE.exists():
+        try:
+            tree_data = json.loads(TREE_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            tree_data = None
+        if isinstance(tree_data, dict) and isinstance(tree_data.get("nodes"), list):
+            tree_changed = False
+            for node in tree_data["nodes"]:
+                if not isinstance(node, dict) or not isinstance(node.get("files"), list):
+                    continue
+                for f_entry in node["files"]:
+                    if not isinstance(f_entry, dict):
+                        continue
+                    fp = f_entry.get("path")
+                    if fp and (fp == old_str or _norm_path_for_compare(fp) == old_str):
+                        f_entry["path"] = new_str
+                        tree_changed = True
+            if tree_changed:
+                atomic_write_json(TREE_FILE, tree_data)
+
+
+def rename_file(path_str: str, new_name: str) -> dict[str, Any]:
+    """Safely rename a workspace file in-place and atomically update all saved references."""
+    target = safe_io.resolve_safe_path(path_str, must_exist=True)
+
+    cleaned = str(new_name or "").strip()
+    if not cleaned:
+        raise ValueError("新文件名不能为空")
+    if "/" in cleaned or "\\" in cleaned or ".." in cleaned or "\x00" in cleaned or cleaned == ".":
+        raise ValueError("文件名包含非法字符（禁止 /、\\、.. 或空字节）")
+
+    if target.is_file() and "." not in cleaned and target.suffix:
+        cleaned = f"{cleaned}{target.suffix}"
+
+    new_target = (target.parent / cleaned).resolve()
+    if new_target.parent != target.parent:
+        raise PermissionError("安全拦截：禁止跨目录重命名")
+
+    if new_target == target:
+        return {
+            "old_path": str(target),
+            "path": str(target),
+            "name": target.name,
+            "ext": target.suffix.lower(),
+        }
+
+    if new_target.exists():
+        raise ValueError(f"目标文件名已存在：{new_target.name}")
+
+    old_str = str(target)
+    target.rename(new_target)
+    new_str = str(new_target)
+    _update_renamed_references(old_str, new_str)
+
+    return {
+        "old_path": old_str,
+        "path": new_str,
+        "name": new_target.name,
+        "ext": new_target.suffix.lower(),
+    }
+
+
+def remove_from_workspace(path_str: str) -> dict[str, Any]:
+    """Remove a file or mounted directory from workspace indexes without deleting anything on disk."""
+    if not path_str or not isinstance(path_str, str) or not path_str.strip():
+        raise ValueError("文件路径不能为空")
+    if "\x00" in path_str:
+        raise PermissionError("非法路径字符")
+
+    target = Path(path_str).expanduser().resolve()
+    target_s = str(target)
+
+    idx = safe_io.load_files_index()
+    orig_files = idx.get("files", [])
+    orig_dirs = idx.get("dirs", [])
+    new_files = [f for f in orig_files if f != target_s and _norm_path_for_compare(f) != target_s]
+    new_dirs = [d for d in orig_dirs if d != target_s and _norm_path_for_compare(d) != target_s]
+    was_explicit_dir = len(new_dirs) != len(orig_dirs)
+
+    if len(new_files) != len(orig_files) or was_explicit_dir:
+        safe_io.save_files_index({"files": new_files, "dirs": new_dirs})
+
+    if was_explicit_dir:
+        cfg = load_config()
+        notes_dir_s = str(get_default_notes_dir().resolve())
+        data_dir_s = str(DATA_DIR.resolve())
+        whitelist = cfg.get("whitelist_dirs", [])
+        if isinstance(whitelist, list) and target_s not in (notes_dir_s, data_dir_s):
+            new_wl = [w for w in whitelist if w != target_s and _norm_path_for_compare(w) != target_s]
+            if len(new_wl) != len(whitelist):
+                cfg["whitelist_dirs"] = new_wl
+                save_config(cfg)
+
+    return {
+        "removed_path": target_s,
+        "deleted_from_disk": False,
+        "message": "已从工作台列表移除，硬盘原文件未受影响",
     }
 
 
