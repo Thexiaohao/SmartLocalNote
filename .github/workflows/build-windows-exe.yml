@@ -65,6 +65,10 @@ jobs:
             }
             $homeRes = Invoke-WebRequest -Uri "http://127.0.0.1:18765/" -UseBasicParsing
             if ($homeRes.StatusCode -ne 200) { throw "Index returned $($homeRes.StatusCode)" }
+            $jsRes = Invoke-WebRequest -Uri "http://127.0.0.1:18765/static/js/app.js" -UseBasicParsing
+            $jsMime = [string]$jsRes.Headers["Content-Type"]
+            Write-Host "app.js Content-Type: $jsMime"
+            if ($jsMime -notmatch "javascript") { throw "FATAL: app.js returned wrong MIME '$jsMime' (would block ES6 modules in WebView2!)" }
             $filesRes = (Invoke-WebRequest -Uri "http://127.0.0.1:18765/api/files/list" -UseBasicParsing).Content | ConvertFrom-Json
             Write-Host "Smoke test PASSED! Auto-seeded files count: $($filesRes.data.items.Count)"
             if ($filesRes.data.items.Count -lt 3) { throw "Expected >=3 auto-seeded demo files" }

@@ -193,19 +193,29 @@ async function loadSystemInfo() {
 }
 
 async function bootstrap() {
+  window.__SLN_BOOTED__ = true;
   // 1. Apply saved theme immediately
   applyTheme(store.state.theme);
   updateThemeButtonIcon();
 
-  // 2. Mount panels cleanly
+  // 2. Mount panels cleanly with error isolation
   const leftEl = document.getElementById('left-panel');
   const centerEl = document.getElementById('center-panel');
   const rightEl = document.getElementById('right-panel');
 
-  initLeftTree(leftEl);
-  initCenterView(centerEl);
-  initRightPanel(rightEl);
-  initSpotlight();
+  const safeMount = (name, fn) => {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`[SmartLocalNote] Failed to mount ${name}:`, err);
+      showToast(`${name} 模块初始化异常：${err?.message || err}`, 'error', { duration: 6000 });
+    }
+  };
+
+  safeMount('left_tree', () => initLeftTree(leftEl));
+  safeMount('center_view', () => initCenterView(centerEl));
+  safeMount('right_panel', () => initRightPanel(rightEl));
+  safeMount('spotlight', () => initSpotlight());
 
   // 3. Bind shell controls & responsive state
   bindTopBarControls();

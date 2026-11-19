@@ -10,10 +10,22 @@
   <title>SmartLocalNote</title>
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23007AFF'/%3E%3Crect x='15' y='13' width='34' height='38' rx='6' fill='%23FFFFFF'/%3E%3Cpath d='M22 24h20M22 32h20M22 40h12' stroke='%23007AFF' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/css/tokens.css">
-  <link rel="stylesheet" href="/static/css/app.css">
-  <script src="/static/vendor/marked.min.js" defer></script>
-  <script type="module" src="/static/js/app.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css?v=2">
+  <link rel="stylesheet" href="/static/css/app.css?v=2">
+  <script src="/static/vendor/marked.min.js?v=2" defer></script>
+  <script type="module" src="/static/js/app.js?v=2"></script>
+  <script>
+    window.addEventListener('DOMContentLoaded', function () {
+      setTimeout(function () {
+        if (!window.__SLN_BOOTED__) {
+          var body = document.querySelector('#left-panel .panel-body');
+          if (body) {
+            body.innerHTML = '<div class="empty-state"><p class="empty-title">前端脚本未启动</p><p class="empty-desc">请点击刷新或用浏览器打开本页排查控制台日志。</p><button class="pill-btn pill-btn-primary pill-btn-sm" onclick="location.reload()">重新加载</button></div>';
+          }
+        }
+      }, 3500);
+    });
+  </script>
 </head>
 <body>
   <div id="app-shell"

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import asynccontextmanager
 import importlib
+import mimetypes
 import os
 import platform
 import socket
@@ -19,13 +20,22 @@ import traceback
 from typing import Any
 import webbrowser
 
+# Force standard web MIME types BEFORE FastAPI StaticFiles initializes
+# (Prevents Windows Registry HKCR\.js -> text/plain from blocking <script type="module"> in WebView2!)
+mimetypes.init()
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
 # Guard stdout/stderr in PyInstaller --noconsole/--windowed mode BEFORE importing uvicorn
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -95,6 +105,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _enforce_static_mime_types(request: Request, call_next):
+    """Guarantee correct Content-Type for ES6 JS modules & CSS regardless of Windows registry."""
+    response = await call_next(request)
+    path = request.url.path.lower()
+    if path.endswith((".js", ".mjs")):
+        response.headers["content-type"] = "application/javascript; charset=utf-8"
+        response.headers["cache-control"] = "no-store"
+    elif path.endswith(".css"):
+        response.headers["content-type"] = "text/css; charset=utf-8"
+    elif path.endswith(".svg"):
+        response.headers["content-type"] = "image/svg+xml"
+    return response
+
 
 register_exception_handlers(app)
 
