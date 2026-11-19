@@ -1,0 +1,98 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies & PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build single-file SmartLocalNote.exe
+        shell: pwsh
+        env:
+          SLN_BUILD_MODE: onefile
+        run: |
+          pyinstaller --clean --noconfirm --distpath dist-onefile --workpath build-onefile SmartLocalNote.spec
+          Get-Item dist-onefile\SmartLocalNote.exe | Select-Object Name, Length
+
+      - name: Build ultra-fast portable folder (onedir)
+        shell: pwsh
+        env:
+          SLN_BUILD_MODE: onedir
+        run: |
+          pyinstaller --clean --noconfirm --distpath dist-onedir --workpath build-onedir SmartLocalNote.spec
+          Compress-Archive -Path dist-onedir\SmartLocalNote\* -DestinationPath dist-onefile\SmartLocalNote-Portable-win64.zip -Force
+          Get-Item dist-onefile\SmartLocalNote-Portable-win64.zip | Select-Object Name, Length
+
+      - name: Smoke test compiled SmartLocalNote.exe on Windows
+        shell: pwsh
+        run: |
+          $testDir = Join-Path $env:RUNNER_TEMP "sln_smoke"
+          New-Item -ItemType Directory -Force -Path $testDir | Out-Null
+          Copy-Item dist-onefile\SmartLocalNote.exe $testDir\SmartLocalNote.exe
+          $proc = Start-Process -FilePath "$testDir\SmartLocalNote.exe" -ArgumentList "--web-only", "--port", "18765" -WorkingDirectory $testDir -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:18765/api/system/info" -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 300 }
+            }
+            if (-not $ready) {
+              if (Test-Path "$testDir\data\last_error.log") { Get-Content "$testDir\data\last_error.log" }
+              throw "SmartLocalNote.exe did not become ready on port 18765"
+            }
+            $homeRes = Invoke-WebRequest -Uri "http://127.0.0.1:18765/" -UseBasicParsing
+            if ($homeRes.StatusCode -ne 200) { throw "Index returned $($homeRes.StatusCode)" }
+            $filesRes = (Invoke-WebRequest -Uri "http://127.0.0.1:18765/api/files/list" -UseBasicParsing).Content | ConvertFrom-Json
+            Write-Host "Smoke test PASSED! Auto-seeded files count: $($filesRes.data.items.Count)"
+            if ($filesRes.data.items.Count -lt 3) { throw "Expected >=3 auto-seeded demo files" }
+          } finally {
+            if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+
+      - name: Upload Windows EXE artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartLocalNote-Windows-x64
+          path: |
+            dist-onefile/SmartLocalNote.exe
+            dist-onefile/SmartLocalNote-Portable-win64.zip
+
+      - name: Publish GitHub Release with direct .exe download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "latest-win64" }
+          $exists = gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag dist-onefile/SmartLocalNote.exe dist-onefile/SmartLocalNote-Portable-win64.zip --clobber
+          } else {
+            gh release create $tag `
+              dist-onefile/SmartLocalNote.exe `
+              dist-onefile/SmartLocalNote-Portable-win64.zip `
+              --title "SmartLocalNote Windows x64 ($tag)" `
+              --notes "双击 SmartLocalNote.exe 即可直接运行（免装 Python，首次启动自动释放高数演示样本并打开原生 WebView2 桌面窗体）。如需极速秒开可选 Portable 绿色便携包。"
+          }
