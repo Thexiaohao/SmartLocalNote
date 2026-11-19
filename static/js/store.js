@@ -15,10 +15,15 @@ const AUTO_SAVE_KEY = 'sln_auto_save';
 const LEFT_SORT_KEY = 'sln_left_file_sort';
 const LEGACY_LEFT_SORT_KEY = 'sln_left_sort';
 const DRAG_SHELF_KEY = 'sln_drag_shelf_v1';
+const PINNED_FILES_KEY = 'sln_pinned_files_v1';
+const CUSTOM_SORT_ENABLED_KEY = 'sln_custom_sort_enabled_v1';
+const CUSTOM_FILE_ORDER_KEY = 'sln_custom_file_order_v1';
+const LAYOUT_PRESETS_KEY = 'sln_layout_presets_v1';
 const MAX_CONTEXT_FILES = 20;
 const MAX_TOASTS = 3;
 const MAX_RECENT_FILES = 8;
 const MAX_SHELF_ITEMS = 30;
+const MAX_NAV_HISTORY = 60;
 
 export const DRAG_MIME = 'application/x-smartlocalnote-block';
 
@@ -256,6 +261,64 @@ function loadInitialRecentFiles() {
   return [];
 }
 
+function loadInitialStringArray(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => String(v || '').trim()).filter(Boolean);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return [];
+}
+
+function loadInitialBoolean(key, fallback = false) {
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved === 'true' || saved === '1') return true;
+    if (saved === 'false' || saved === '0') return false;
+  } catch {
+    // ignore storage errors
+  }
+  return fallback;
+}
+
+function normalizeLayoutMemory(raw) {
+  const defaultSnapshot =
+    raw && typeof raw.defaultSnapshot === 'object' && raw.defaultSnapshot !== null
+      ? raw.defaultSnapshot
+      : null;
+  const presets = Array.isArray(raw?.presets)
+    ? raw.presets
+        .filter((p) => p && typeof p === 'object' && p.id && p.name && p.snapshot && typeof p.snapshot === 'object')
+        .map((p) => ({
+          id: String(p.id),
+          name: String(p.name),
+          snapshot: p.snapshot,
+          savedAt: Number(p.savedAt) || Date.now(),
+        }))
+    : [];
+  return { defaultSnapshot, presets };
+}
+
+function loadInitialLayoutMemory() {
+  try {
+    const raw = localStorage.getItem(LAYOUT_PRESETS_KEY);
+    if (raw) {
+      return normalizeLayoutMemory(JSON.parse(raw));
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { defaultSnapshot: null, presets: [] };
+}
+
+let preZenCollapsedState = { leftCollapsed: false, rightCollapsed: false };
+
 export const store = {
   state: {
     theme: loadInitialTheme(),
@@ -267,6 +330,15 @@ export const store = {
     uiLayout: loadInitialUiLayout(),
     leftFileSort: loadInitialLeftSort(),
     leftFileFilter: '',
+    pinnedFiles: loadInitialStringArray(PINNED_FILES_KEY),
+    customSortEnabled: loadInitialBoolean(CUSTOM_SORT_ENABLED_KEY, false),
+    customFileOrder: loadInitialStringArray(CUSTOM_FILE_ORDER_KEY),
+    layoutMemory: loadInitialLayoutMemory(),
+    zenMode: false,
+    navHistory: [],
+    navIndex: -1,
+    bgAiTask: null,
+    splitDoc: null,
     shelfItems: loadInitialShelfItems(),
     activeDragPayload: null,
     systemInfo: null,
@@ -367,8 +439,120 @@ export const store = {
     return removeFromShelf(id);
   },
 
+  consumeShelfItem(id) {
+    return consumeShelfItem(id);
+  },
+
   clearShelf() {
     return clearShelf();
+  },
+
+  setDragPayload(event, payload) {
+    return setDragPayload(event, payload);
+  },
+
+  pushNavHistory(entry) {
+    return pushNavHistory(entry);
+  },
+
+  updateCurrentNavSnapshot(patch) {
+    return updateCurrentNavSnapshot(patch);
+  },
+
+  canNavBack() {
+    return canNavBack();
+  },
+
+  canNavForward() {
+    return canNavForward();
+  },
+
+  getNavBackLabel() {
+    return getNavBackLabel();
+  },
+
+  getNavForwardLabel() {
+    return getNavForwardLabel();
+  },
+
+  stepNavBack() {
+    return stepNavBack();
+  },
+
+  stepNavForward() {
+    return stepNavForward();
+  },
+
+  togglePinFile(path) {
+    return togglePinFile(path);
+  },
+
+  reorderPinnedFiles(srcPath, targetPath, position = 'before') {
+    return reorderPinnedFiles(srcPath, targetPath, position);
+  },
+
+  setCustomSortEnabled(enabled) {
+    return setCustomSortEnabled(enabled);
+  },
+
+  moveCustomFileOrder(srcPath, targetPath, position = 'before', visibleUnpinnedPaths = []) {
+    return moveCustomFileOrder(srcPath, targetPath, position, visibleUnpinnedPaths);
+  },
+
+  tidyCustomFileOrder() {
+    return tidyCustomFileOrder();
+  },
+
+  captureCurrentLayoutSnapshot() {
+    return captureCurrentLayoutSnapshot();
+  },
+
+  applyLayoutSnapshot(snapshot) {
+    return applyLayoutSnapshot(snapshot);
+  },
+
+  saveLayoutAsDefault() {
+    return saveLayoutAsDefault();
+  },
+
+  restoreDefaultLayout() {
+    return restoreDefaultLayout();
+  },
+
+  saveNamedLayoutPreset(name) {
+    return saveNamedLayoutPreset(name);
+  },
+
+  applyLayoutPreset(id) {
+    return applyLayoutPreset(id);
+  },
+
+  deleteLayoutPreset(id) {
+    return deleteLayoutPreset(id);
+  },
+
+  loadLayoutMemoryFromConfig(cfgUiLayout) {
+    return loadLayoutMemoryFromConfig(cfgUiLayout);
+  },
+
+  exportLayoutMemoryForConfig() {
+    return exportLayoutMemoryForConfig();
+  },
+
+  toggleZenMode(force) {
+    return toggleZenMode(force);
+  },
+
+  setBgAiTask(task) {
+    return setBgAiTask(task);
+  },
+
+  openSplitDoc(payload) {
+    return openSplitDoc(payload);
+  },
+
+  closeSplitDoc() {
+    return closeSplitDoc();
   },
 };
 
@@ -996,13 +1180,23 @@ export function recordRecentFile(fileInfo) {
 /**
  * Set drag payload in DataTransfer (DRAG_MIME + text/plain) and fallback state
  * so WebView2 never loses cross-panel drag data.
+ * Defaults dragMode to 'move' unless Ctrl is held ('copy') or explicitly overridden.
  * @param {DragEvent} event
  * @param {object | string} payload
  */
 export function setDragPayload(event, payload) {
-  const normalized = typeof payload === 'string'
+  const rawObj = typeof payload === 'string'
     ? { type: 'text', markdown: payload, text: payload }
     : { ...(payload || {}) };
+  const normalized = {
+    ...rawObj,
+    dragMode: rawObj.dragMode || (event?.ctrlKey ? 'copy' : 'move'),
+    sourceDocPath: rawObj.sourceDocPath ?? '',
+    sourceBlockStart: rawObj.sourceBlockStart ?? null,
+    sourceBlockEnd: rawObj.sourceBlockEnd ?? null,
+    sourceRawToken: rawObj.sourceRawToken ?? '',
+    sourceShelfId: rawObj.sourceShelfId ?? '',
+  };
   store.state.activeDragPayload = normalized;
 
   const plainText = String(
@@ -2078,4 +2272,546 @@ export function renderMarkdownSafe(mdText, opts = {}) {
     annotateTopLevelBlockLines(tpl.content, raw);
   }
   return tpl.innerHTML;
+}
+
+// ============================================================================
+// V6 State & Helpers: Shelf Consume, Nav History, Pin/Custom Sort,
+// Layout Memory & Presets, Zen Mode, Background AI Task, Dual-Pane Split
+// ============================================================================
+
+/**
+ * Consume (remove) an item from the Drag Staging Shelf after a move-drop.
+ * @param {string} id
+ */
+export function consumeShelfItem(id) {
+  return removeFromShelf(id);
+}
+
+function formatNavEntryLabel(entry) {
+  if (!entry) return '';
+  const name = entry.name || String(entry.path || '').split(/[\\/]/).pop() || '';
+  if (entry.heading) return `${name} · #${entry.heading}`;
+  if (entry.pdfPage) return `${name} · P.${entry.pdfPage}`;
+  if (entry.excelSheet) {
+    return `${name} · ${entry.excelSheet}${entry.excelCell ? `!${entry.excelCell}` : ''}`;
+  }
+  return name;
+}
+
+function isSameNavAnchor(a, b) {
+  if (!a || !b) return false;
+  return (
+    String(a.path || '') === String(b.path || '') &&
+    String(a.heading || '') === String(b.heading || '') &&
+    String(a.pdfPage ?? '') === String(b.pdfPage ?? '') &&
+    String(a.excelSheet || '') === String(b.excelSheet || '') &&
+    String(a.excelCell || '') === String(b.excelCell || '')
+  );
+}
+
+/**
+ * Push a navigation history entry, truncating forward stack and capping at 60 entries.
+ * Ignores duplicate consecutive entries on the same path and anchor.
+ * @param {{ path: string, name?: string, ext?: string, scrollTop?: number, heading?: string, pdfPage?: number|string|null, excelSheet?: string, excelCell?: string }} entry
+ */
+export function pushNavHistory(entry) {
+  const path = String(entry?.path || '').trim();
+  if (!path) return store.state.navHistory;
+
+  const baseName = path.split(/[\\/]/).pop() || path;
+  const normalized = {
+    path,
+    name: String(entry?.name || baseName),
+    ext: String(entry?.ext || (baseName.includes('.') ? `.${baseName.split('.').pop().toLowerCase()}` : '')),
+    scrollTop: Number.isFinite(Number(entry?.scrollTop)) ? Number(entry.scrollTop) : 0,
+    heading: String(entry?.heading || ''),
+    pdfPage: entry?.pdfPage ?? null,
+    excelSheet: String(entry?.excelSheet || ''),
+    excelCell: String(entry?.excelCell || ''),
+  };
+
+  const curIdx = store.state.navIndex;
+  const curEntry = curIdx >= 0 ? store.state.navHistory[curIdx] : null;
+  if (isSameNavAnchor(curEntry, normalized)) {
+    return store.state.navHistory;
+  }
+
+  let nextList = curIdx >= 0 ? store.state.navHistory.slice(0, curIdx + 1) : [];
+  nextList.push(normalized);
+  if (nextList.length > MAX_NAV_HISTORY) {
+    nextList = nextList.slice(nextList.length - MAX_NAV_HISTORY);
+  }
+
+  store.state.navHistory = nextList;
+  store.state.navIndex = nextList.length - 1;
+  store.emit('nav:changed', {
+    index: store.state.navIndex,
+    history: nextList,
+    current: normalized,
+  });
+  return normalized;
+}
+
+/**
+ * Update scrollTop / pdfPage / excelSheet / excelCell / heading on the active navHistory snapshot.
+ * @param {object} patch
+ */
+export function updateCurrentNavSnapshot(patch = {}) {
+  const idx = store.state.navIndex;
+  if (idx < 0 || idx >= store.state.navHistory.length) return null;
+  const cur = store.state.navHistory[idx];
+  const next = { ...cur };
+  if (patch.scrollTop !== undefined && Number.isFinite(Number(patch.scrollTop))) {
+    next.scrollTop = Number(patch.scrollTop);
+  }
+  if (patch.heading !== undefined) next.heading = String(patch.heading || '');
+  if (patch.pdfPage !== undefined) next.pdfPage = patch.pdfPage;
+  if (patch.excelSheet !== undefined) next.excelSheet = String(patch.excelSheet || '');
+  if (patch.excelCell !== undefined) next.excelCell = String(patch.excelCell || '');
+  store.state.navHistory[idx] = next;
+  return next;
+}
+
+export function canNavBack() {
+  return store.state.navIndex > 0;
+}
+
+export function canNavForward() {
+  return store.state.navIndex >= 0 && store.state.navIndex < store.state.navHistory.length - 1;
+}
+
+export function getNavBackLabel() {
+  if (!canNavBack()) return '';
+  return formatNavEntryLabel(store.state.navHistory[store.state.navIndex - 1]);
+}
+
+export function getNavForwardLabel() {
+  if (!canNavForward()) return '';
+  return formatNavEntryLabel(store.state.navHistory[store.state.navIndex + 1]);
+}
+
+export function stepNavBack() {
+  if (!canNavBack()) return null;
+  store.state.navIndex -= 1;
+  const target = store.state.navHistory[store.state.navIndex] || null;
+  store.emit('nav:changed', {
+    index: store.state.navIndex,
+    history: store.state.navHistory,
+    current: target,
+  });
+  return target;
+}
+
+export function stepNavForward() {
+  if (!canNavForward()) return null;
+  store.state.navIndex += 1;
+  const target = store.state.navHistory[store.state.navIndex] || null;
+  store.emit('nav:changed', {
+    index: store.state.navIndex,
+    history: store.state.navHistory,
+    current: target,
+  });
+  return target;
+}
+
+function persistStorageJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+/**
+ * Toggle pinned status of a file path (adding to top or removing).
+ * @param {string} path
+ * @returns {boolean} new pinned state
+ */
+export function togglePinFile(path) {
+  const target = String(path || '').trim();
+  if (!target) return false;
+
+  const list = [...(store.state.pinnedFiles || [])];
+  const idx = list.indexOf(target);
+  let pinned = false;
+  if (idx >= 0) {
+    list.splice(idx, 1);
+    pinned = false;
+  } else {
+    list.unshift(target);
+    pinned = true;
+  }
+
+  store.state.pinnedFiles = list;
+  persistStorageJson(PINNED_FILES_KEY, list);
+  store.emit('files:sort-changed', store.state.leftFileSort);
+  return pinned;
+}
+
+/**
+ * Reorder a pinned file relative to another pinned file.
+ * @param {string} srcPath
+ * @param {string} targetPath
+ * @param {'before'|'after'} [position='before']
+ */
+export function reorderPinnedFiles(srcPath, targetPath, position = 'before') {
+  const src = String(srcPath || '').trim();
+  const target = String(targetPath || '').trim();
+  if (!src || !target || src === target) return store.state.pinnedFiles;
+
+  const list = [...(store.state.pinnedFiles || [])];
+  const srcIdx = list.indexOf(src);
+  if (srcIdx < 0 || !list.includes(target)) return list;
+
+  list.splice(srcIdx, 1);
+  const targetIdx = list.indexOf(target);
+  if (targetIdx < 0) return store.state.pinnedFiles;
+  const insertIdx = position === 'after' ? targetIdx + 1 : targetIdx;
+  list.splice(insertIdx, 0, src);
+
+  store.state.pinnedFiles = list;
+  persistStorageJson(PINNED_FILES_KEY, list);
+  store.emit('files:sort-changed', store.state.leftFileSort);
+  return list;
+}
+
+/**
+ * Enable or disable hybrid custom drag-sort for unpinned files.
+ * @param {boolean} enabled
+ */
+export function setCustomSortEnabled(enabled) {
+  const next = Boolean(enabled);
+  store.state.customSortEnabled = next;
+  try {
+    localStorage.setItem(CUSTOM_SORT_ENABLED_KEY, next ? 'true' : 'false');
+  } catch {
+    // ignore storage errors
+  }
+  store.emit('files:sort-changed', store.state.leftFileSort);
+  return next;
+}
+
+/**
+ * Lock srcPath at the exact relative position around targetPath inside customFileOrder.
+ * If targetPath wasn't yet in customFileOrder, seeds preceding visibleUnpinnedPaths up to targetPath
+ * so moved files stay anchored while newly added files remain outside customFileOrder (default sort).
+ * @param {string} srcPath
+ * @param {string} targetPath
+ * @param {'before'|'after'} [position='before']
+ * @param {string[]} [visibleUnpinnedPaths=[]]
+ */
+export function moveCustomFileOrder(srcPath, targetPath, position = 'before', visibleUnpinnedPaths = []) {
+  const src = String(srcPath || '').trim();
+  const target = String(targetPath || '').trim();
+  if (!src || !target || src === target) return store.state.customFileOrder;
+
+  const order = [...(store.state.customFileOrder || [])].filter((p) => p && p !== src);
+
+  if (!order.includes(target)) {
+    const visible = Array.isArray(visibleUnpinnedPaths)
+      ? visibleUnpinnedPaths.map((p) => String(p || '').trim()).filter((p) => p && p !== src)
+      : [];
+    const targetVisIdx = visible.indexOf(target);
+    if (targetVisIdx >= 0) {
+      for (let i = 0; i <= targetVisIdx; i += 1) {
+        const p = visible[i];
+        if (!order.includes(p)) {
+          order.push(p);
+        }
+      }
+    } else {
+      order.push(target);
+    }
+  }
+
+  const targetIdx = order.indexOf(target);
+  const insertIdx = position === 'after' ? targetIdx + 1 : targetIdx;
+  order.splice(Math.max(0, insertIdx), 0, src);
+
+  store.state.customFileOrder = order;
+  persistStorageJson(CUSTOM_FILE_ORDER_KEY, order);
+  store.emit('files:sort-changed', store.state.leftFileSort);
+  return order;
+}
+
+/**
+ * Clear customFileOrder (while preserving pinnedFiles!) so all unpinned files revert to default sort.
+ */
+export function tidyCustomFileOrder() {
+  store.state.customFileOrder = [];
+  persistStorageJson(CUSTOM_FILE_ORDER_KEY, []);
+  store.emit('files:sort-changed', store.state.leftFileSort);
+  return [];
+}
+
+/**
+ * Capture a full serializable snapshot of the current workspace layout, sort, pin & typography state.
+ */
+export function captureCurrentLayoutSnapshot() {
+  return {
+    paneWidths: { ...(store.state.paneWidths || { left: 260, right: 360 }) },
+    leftCollapsed: Boolean(store.state.leftCollapsed),
+    rightCollapsed: Boolean(store.state.rightCollapsed),
+    uiLayout: JSON.parse(JSON.stringify(store.state.uiLayout || cloneDefaultUiLayout())),
+    leftFileSort: { ...(store.state.leftFileSort || { by: 'name', dir: 'asc' }) },
+    pinnedFiles: [...(store.state.pinnedFiles || [])],
+    customSortEnabled: Boolean(store.state.customSortEnabled),
+    customFileOrder: [...(store.state.customFileOrder || [])],
+    theme: store.state.theme || 'light',
+    docFontSize: store.state.docFontSize ?? 15,
+    docFontFamily: store.state.docFontFamily || 'sans',
+  };
+}
+
+/**
+ * Apply a captured layout snapshot cleanly, updating CSS vars, localStorage, and EventBus listeners.
+ * @param {object} snapshot
+ */
+export function applyLayoutSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+
+  if (snapshot.paneWidths && typeof snapshot.paneWidths === 'object') {
+    applyPaneWidths(snapshot.paneWidths.left, snapshot.paneWidths.right);
+  }
+
+  if (typeof snapshot.leftCollapsed === 'boolean') {
+    store.state.leftCollapsed = snapshot.leftCollapsed;
+  }
+  if (typeof snapshot.rightCollapsed === 'boolean') {
+    store.state.rightCollapsed = snapshot.rightCollapsed;
+  }
+
+  if (snapshot.uiLayout && typeof snapshot.uiLayout === 'object') {
+    const normalizedUi = normalizeUiLayout(snapshot.uiLayout);
+    store.state.uiLayout = normalizedUi;
+    persistStorageJson(UI_LAYOUT_KEY, normalizedUi);
+  }
+
+  if (snapshot.leftFileSort && typeof snapshot.leftFileSort === 'object') {
+    const nextSort = {
+      by: normalizeLeftSortBy(snapshot.leftFileSort.by),
+      dir: snapshot.leftFileSort.dir === 'desc' ? 'desc' : 'asc',
+    };
+    store.state.leftFileSort = nextSort;
+    persistStorageJson(LEFT_SORT_KEY, nextSort);
+  }
+
+  if (Array.isArray(snapshot.pinnedFiles)) {
+    const nextPinned = snapshot.pinnedFiles.map((p) => String(p || '').trim()).filter(Boolean);
+    store.state.pinnedFiles = nextPinned;
+    persistStorageJson(PINNED_FILES_KEY, nextPinned);
+  }
+
+  if (typeof snapshot.customSortEnabled === 'boolean') {
+    store.state.customSortEnabled = snapshot.customSortEnabled;
+    try {
+      localStorage.setItem(CUSTOM_SORT_ENABLED_KEY, snapshot.customSortEnabled ? 'true' : 'false');
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  if (Array.isArray(snapshot.customFileOrder)) {
+    const nextOrder = snapshot.customFileOrder.map((p) => String(p || '').trim()).filter(Boolean);
+    store.state.customFileOrder = nextOrder;
+    persistStorageJson(CUSTOM_FILE_ORDER_KEY, nextOrder);
+  }
+
+  if (snapshot.theme === 'light' || snapshot.theme === 'dark') {
+    applyTheme(snapshot.theme);
+  }
+
+  if (snapshot.docFontSize !== undefined || snapshot.docFontFamily !== undefined) {
+    applyDocTypography(snapshot.docFontSize, snapshot.docFontFamily);
+  }
+
+  store.emit('state:changed', {
+    keys: ['paneWidths', 'leftCollapsed', 'rightCollapsed', 'uiLayout', 'leftFileSort', 'pinnedFiles', 'customSortEnabled', 'customFileOrder'],
+    state: store.state,
+  });
+  store.emit('layout:changed', snapshot);
+  store.emit('layout:applied', snapshot);
+  store.emit('files:sort-changed', store.state.leftFileSort);
+  store.emit('ui:layout-changed', store.state.uiLayout);
+  return snapshot;
+}
+
+export function saveLayoutAsDefault() {
+  const snap = captureCurrentLayoutSnapshot();
+  const prev = store.state.layoutMemory || { defaultSnapshot: null, presets: [] };
+  const next = { ...prev, defaultSnapshot: snap };
+  store.state.layoutMemory = next;
+  persistStorageJson(LAYOUT_PRESETS_KEY, next);
+  store.emit('layout:memory-changed', next);
+  return snap;
+}
+
+export function restoreDefaultLayout() {
+  const defSnap = store.state.layoutMemory?.defaultSnapshot;
+  if (defSnap && typeof defSnap === 'object') {
+    return applyLayoutSnapshot(defSnap);
+  }
+  store.state.leftCollapsed = false;
+  store.state.rightCollapsed = false;
+  resetUiLayout();
+  const fallbackSnap = captureCurrentLayoutSnapshot();
+  store.emit('state:changed', { keys: ['leftCollapsed', 'rightCollapsed'], state: store.state });
+  store.emit('layout:changed', fallbackSnap);
+  store.emit('layout:applied', fallbackSnap);
+  return fallbackSnap;
+}
+
+export function saveNamedLayoutPreset(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+
+  const snap = captureCurrentLayoutSnapshot();
+  const prev = store.state.layoutMemory || { defaultSnapshot: null, presets: [] };
+  const presets = [...(prev.presets || [])];
+  const existingIdx = presets.findIndex((p) => p?.name === trimmed);
+  const preset = {
+    id: existingIdx >= 0
+      ? presets[existingIdx].id
+      : `preset_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    name: trimmed,
+    snapshot: snap,
+    savedAt: Date.now(),
+  };
+
+  if (existingIdx >= 0) {
+    presets[existingIdx] = preset;
+  } else {
+    presets.push(preset);
+  }
+
+  const next = { ...prev, presets };
+  store.state.layoutMemory = next;
+  persistStorageJson(LAYOUT_PRESETS_KEY, next);
+  store.emit('layout:memory-changed', next);
+  return preset;
+}
+
+export function applyLayoutPreset(id) {
+  const targetId = String(id || '').trim();
+  if (!targetId) return null;
+  const presets = store.state.layoutMemory?.presets || [];
+  const found = presets.find((p) => p?.id === targetId || p?.name === targetId);
+  if (!found || !found.snapshot) return null;
+  applyLayoutSnapshot(found.snapshot);
+  return found;
+}
+
+export function deleteLayoutPreset(id) {
+  const targetId = String(id || '').trim();
+  const prev = store.state.layoutMemory || { defaultSnapshot: null, presets: [] };
+  const nextPresets = (prev.presets || []).filter((p) => p?.id !== targetId);
+  const next = { ...prev, presets: nextPresets };
+  store.state.layoutMemory = next;
+  persistStorageJson(LAYOUT_PRESETS_KEY, next);
+  store.emit('layout:memory-changed', next);
+  return nextPresets;
+}
+
+export function loadLayoutMemoryFromConfig(cfgUiLayout) {
+  if (!cfgUiLayout || typeof cfgUiLayout !== 'object') {
+    return store.state.layoutMemory;
+  }
+  const remoteRaw = cfgUiLayout.layoutMemory && typeof cfgUiLayout.layoutMemory === 'object'
+    ? cfgUiLayout.layoutMemory
+    : cfgUiLayout;
+  const remote = normalizeLayoutMemory(remoteRaw);
+  const local = normalizeLayoutMemory(store.state.layoutMemory);
+
+  const mergedDefault = local.defaultSnapshot || remote.defaultSnapshot;
+  const mergedMap = new Map();
+  for (const p of remote.presets) mergedMap.set(p.id, p);
+  for (const p of local.presets) mergedMap.set(p.id, p);
+
+  const merged = {
+    defaultSnapshot: mergedDefault,
+    presets: Array.from(mergedMap.values()),
+  };
+  store.state.layoutMemory = merged;
+  persistStorageJson(LAYOUT_PRESETS_KEY, merged);
+  store.emit('layout:memory-changed', merged);
+  return merged;
+}
+
+export function exportLayoutMemoryForConfig() {
+  const mem = normalizeLayoutMemory(store.state.layoutMemory);
+  return JSON.parse(JSON.stringify(mem));
+}
+
+/**
+ * Toggle Zen Mode (collapses left/right sidebars, remembers prior collapse state, toggles body.is-zen-mode).
+ * @param {boolean} [force]
+ * @returns {boolean}
+ */
+export function toggleZenMode(force) {
+  const prev = Boolean(store.state.zenMode);
+  const next = typeof force === 'boolean' ? force : !prev;
+
+  if (next && !prev) {
+    preZenCollapsedState = {
+      leftCollapsed: Boolean(store.state.leftCollapsed),
+      rightCollapsed: Boolean(store.state.rightCollapsed),
+    };
+    store.state.leftCollapsed = true;
+    store.state.rightCollapsed = true;
+  } else if (!next && prev) {
+    store.state.leftCollapsed = Boolean(preZenCollapsedState.leftCollapsed);
+    store.state.rightCollapsed = Boolean(preZenCollapsedState.rightCollapsed);
+  }
+
+  store.state.zenMode = next;
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.toggle('is-zen-mode', next);
+  }
+  store.emit('state:changed', {
+    keys: ['zenMode', 'leftCollapsed', 'rightCollapsed'],
+    state: store.state,
+  });
+  store.emit('zen:changed', next);
+  return next;
+}
+
+/**
+ * Set or clear background non-blocking AI task state and emit 'ai:bg-task'.
+ * @param {null | { id: string, label: string, status: 'running'|'done'|'error', detail?: string, onOpen?: () => void }} task
+ */
+export function setBgAiTask(task) {
+  store.state.bgAiTask = task && typeof task === 'object' ? { ...task } : null;
+  store.emit('ai:bg-task', store.state.bgAiTask);
+  return store.state.bgAiTask;
+}
+
+/**
+ * Open a secondary document in Dual-Pane Split view.
+ * @param {{ path: string, name?: string, ext?: string, page?: number|string|null, sheet?: string, cell?: string, heading?: string }} payload
+ */
+export function openSplitDoc(payload) {
+  const path = String(payload?.path || '').trim();
+  if (!path) return null;
+  const baseName = path.split(/[\\/]/).pop() || path;
+  const next = {
+    path,
+    name: String(payload?.name || baseName),
+    ext: String(payload?.ext || (baseName.includes('.') ? `.${baseName.split('.').pop().toLowerCase()}` : '')),
+    page: payload?.page ?? null,
+    sheet: String(payload?.sheet || ''),
+    cell: String(payload?.cell || ''),
+    heading: String(payload?.heading || ''),
+  };
+  store.state.splitDoc = next;
+  store.emit('split:changed', next);
+  return next;
+}
+
+/**
+ * Close the Dual-Pane Split view.
+ */
+export function closeSplitDoc() {
+  store.state.splitDoc = null;
+  store.emit('split:changed', null);
+  return null;
 }

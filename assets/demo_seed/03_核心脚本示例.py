@@ -13,7 +13,7 @@ def summarize_tasks(config_path: str) -> dict:
     modules = data.get("supported_formats", [])
     return {
         "project": data.get("project", "SmartLocalNote"),
-        "version": data.get("version", "5.0.0"),
+        "version": data.get("version", "6.0.0"),
         "format_count": len(modules),
     }
 
@@ -26,4 +26,4 @@ def calc_completion_rate(done: int, total: int) -> float:
 
 
 if __name__ == "__main__":
-    print("SmartLocalNote V5 Source Code Preview OK ->", calc_completion_rate(8, 9))
+    print("SmartLocalNote V6 Source Code Preview OK ->", calc_completion_rate(12, 13))

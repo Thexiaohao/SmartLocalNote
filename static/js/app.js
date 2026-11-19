@@ -4,6 +4,7 @@
  * binds top bar & responsive mobile/tablet controls, and sets initial Dynamic Island state.
  */
 
+import * as storeMod from './store.js';
 import {
   store,
   applyTheme,
@@ -30,12 +31,16 @@ function syncLayoutClasses() {
   const leftCollapsed = Boolean(store.state.leftCollapsed);
   const rightCollapsed = Boolean(store.state.rightCollapsed);
   const drawerOpen = Boolean(store.state.tabletDrawerOpen);
+  const zenMode = Boolean(store.state.zenMode);
   const tab = store.state.mobileTab || 'doc';
 
   shell.dataset.leftCollapsed = String(leftCollapsed);
   shell.dataset.rightCollapsed = String(rightCollapsed);
   shell.dataset.drawerOpen = String(drawerOpen);
+  shell.dataset.zenMode = String(zenMode);
   shell.dataset.mobileTab = tab;
+  shell.classList.toggle('is-zen-mode', zenMode);
+  document.body?.classList.toggle('is-zen-mode', zenMode);
 
   // Sync mobile bottom nav pill active state
   document.querySelectorAll('#mobile-nav .mobile-nav-item[data-tab]').forEach((btn) => {
@@ -86,11 +91,36 @@ function bindTopBarControls() {
     updateThemeButtonIcon();
   });
 
+  const applyFullShellLayout = () => {
+    if (store.state.theme) {
+      applyTheme(store.state.theme);
+    }
+    applyDocTypography(store.state.docFontSize, store.state.docFontFamily);
+    const widths = store.state.paneWidths || { left: 260, right: 360 };
+    applyPaneWidths(widths.left ?? 260, widths.right ?? 360);
+    updateThemeButtonIcon();
+    syncLayoutClasses();
+  };
+
   store.on('theme:changed', updateThemeButtonIcon);
   store.on('layout:changed', syncLayoutClasses);
+  store.on('zen:changed', syncLayoutClasses);
+  store.on('layout:applied', applyFullShellLayout);
   store.on('ui:layout-changed', () => {
     const widths = store.state.paneWidths || { left: 260, right: 360 };
     applyPaneWidths(widths.left ?? 260, widths.right ?? 360);
+  });
+  store.on('layout:persist-backend', async () => {
+    try {
+      const uiLayout = typeof storeMod.exportLayoutMemoryForConfig === 'function'
+        ? storeMod.exportLayoutMemoryForConfig()
+        : store.state.uiLayout;
+      if (uiLayout && typeof uiLayout === 'object') {
+        await api.put('/api/system/config', { ui_layout: uiLayout });
+      }
+    } catch {
+      // ignore background persistence errors
+    }
   });
   store.on('file:opened', (fileInfo) => {
     if (fileInfo) {
@@ -170,6 +200,32 @@ function openQuickNewNoteSheet() {
 
 function bindGlobalShortcuts() {
   document.addEventListener('keydown', (e) => {
+    // Ctrl+\ or Cmd+\ -> Toggle Zen Mode (Innovation D)
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === '\\' || e.code === 'Backslash')) {
+      e.preventDefault();
+      if (typeof storeMod.toggleZenMode === 'function') {
+        storeMod.toggleZenMode();
+      } else {
+        const next = !Boolean(store.state.zenMode);
+        store.setState({ zenMode: next }, 'zen:changed');
+      }
+      return;
+    }
+
+    // Alt+ArrowLeft / Alt+ArrowRight -> History Back / Forward (Req #4)
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        store.emit('nav:go', -1);
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        store.emit('nav:go', 1);
+        return;
+      }
+    }
+
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n') {
       const activeEl = document.activeElement;
       const sheetOverlay = document.getElementById('sheet-overlay');
@@ -179,7 +235,22 @@ function bindGlobalShortcuts() {
       );
       if (inModalInput) return;
       e.preventDefault();
-      openQuickNewNoteSheet();
+      if (window.innerWidth >= 1024 && !store.state.leftCollapsed && !store.state.zenMode) {
+        store.emit('left:inline-new-note');
+      } else {
+        openQuickNewNoteSheet();
+      }
+    }
+  });
+
+  // Mouse side buttons (Back / Forward) -> History navigation (Req #4)
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 3) {
+      e.preventDefault();
+      store.emit('nav:go', -1);
+    } else if (e.button === 4) {
+      e.preventDefault();
+      store.emit('nav:go', 1);
     }
   });
 }
@@ -374,6 +445,15 @@ async function loadSystemInfo() {
         : store.state.docFontFamily;
       if ((!hasLocalSize && cfg.doc_font_size != null) || (!hasLocalFamily && cfg.doc_font_family != null)) {
         applyDocTypography(nextSize, nextFamily);
+      }
+      if (cfg.ui_layout && typeof cfg.ui_layout === 'object') {
+        if (typeof storeMod.loadLayoutMemoryFromConfig === 'function') {
+          storeMod.loadLayoutMemoryFromConfig(cfg.ui_layout);
+        }
+        const widths = store.state.paneWidths || { left: 260, right: 360 };
+        applyPaneWidths(widths.left ?? 260, widths.right ?? 360);
+        updateThemeButtonIcon();
+        syncLayoutClasses();
       }
     }
   } catch {

@@ -35,8 +35,26 @@ import {
   readDragPayload,
   clearDragPayload,
   findWorkspaceFileItem,
+  pushNavHistory,
+  updateCurrentNavSnapshot,
+  canNavBack,
+  canNavForward,
+  getNavBackLabel,
+  getNavForwardLabel,
+  stepNavBack,
+  stepNavForward,
+  setBgAiTask,
+  openSplitDoc,
+  closeSplitDoc,
+  consumeShelfItem,
+  addToShelf,
   DRAG_MIME,
 } from './store.js';
+import {
+  markdownToWysiwygBlockHtml,
+  wysiwygElementToMarkdown,
+  execWysiwygFormat,
+} from './md_wysiwyg.js';
 import { api } from './api_client.js';
 import { icon } from './icons.js';
 import { renderMindMap } from './mindmap.js';
@@ -355,6 +373,11 @@ function injectV4CenterStyles() {
     }
     :where(.lp-block-view) > :first-child { margin-top: 0; }
     :where(.lp-block-view) > :last-child { margin-bottom: 0; }
+    :where(.lp-block-wysiwyg[data-placeholder]:empty)::before {
+      content: attr(data-placeholder);
+      color: var(--text-tertiary);
+      pointer-events: none;
+    }
     .lp-block.is-editing .lp-block-editor {
       width: 100%;
       display: block;
@@ -452,6 +475,38 @@ function injectV4CenterStyles() {
       touch-action: none;
       user-select: none;
     }
+    :where(.center-split-pane-body .split-pdf-frame) {
+      width: 100%;
+      height: 100%;
+      min-height: 360px;
+      border: none;
+      border-radius: var(--radius-control);
+      background: var(--bg-subtle);
+    }
+    :where(.center-split-pane-body .split-media-stage) {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 240px;
+      padding: 12px;
+      background: var(--bg-subtle);
+      border-radius: var(--radius-control);
+    }
+    :where(.center-split-pane-body .split-media-stage img),
+    :where(.center-split-pane-body .split-media-stage video) {
+      max-width: 100%;
+      max-height: 70vh;
+      border-radius: 10px;
+    }
+    :where(.center-split-pane-body .split-code-pre) {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text-primary);
+    }
   `;
   document.head.appendChild(style);
 }
@@ -471,6 +526,7 @@ export function initCenterView(containerEl) {
     editingBlockIdx: null,
     editingBlockRange: null, // { startLine, endLine }
     editingDraftNewBlock: false,
+    editingDraftInsert: null, // { afterBlockIdx, startLine }
     justDroppedTarget: null, // { lineIdx, previewPrefix }
     loading: false,
     saving: false,
@@ -479,6 +535,7 @@ export function initCenterView(containerEl) {
     excelSeq: 0,
     archiveSeq: 0,
     backlinkSeq: 0,
+    splitSeq: 0,
     excelSearchTimer: null,
     companionOpen: false, // collapsible companion note for archive/image/office/generic
     backlinks: { count: 0, items: [] },
@@ -515,7 +572,7 @@ export function initCenterView(containerEl) {
       editingKey: null,
     },
     pdf: {
-      viewMode: 'hd', // 'hd' | 'iframe'
+      viewMode: 'iframe', // 'iframe' | 'hd'
       zoom: 1.6,
       currentPage: 1,
       totalPages: 1,
@@ -550,6 +607,104 @@ export function initCenterView(containerEl) {
   let dropTargetLineIdx = null;
   let activeFormatBar = null;
   let activeFormatContext = null; // { startIdx, endIdx, selectedText }
+  let internalClipboard = '';
+  const splitExtraMeta = new Map(); // path -> { member, time }
+
+  // =========================================================================
+  // Split-Pane Main Container & Back/Forward Navigation Helpers
+  // =========================================================================
+  function ensureSplitLayoutEl() {
+    let layout = containerEl.querySelector(':scope > .center-split-layout');
+    if (!layout) {
+      containerEl.innerHTML = '';
+      layout = document.createElement('div');
+      layout.className = 'center-split-layout';
+      containerEl.appendChild(layout);
+    } else {
+      Array.from(containerEl.children).forEach((child) => {
+        if (child !== layout && child.id !== 'center-drop-overlay' && child.id !== 'center-drop-insert-line') {
+          child.remove();
+        }
+      });
+    }
+    return layout;
+  }
+
+  function ensureMainPaneEl() {
+    const layout = ensureSplitLayoutEl();
+    let mainPane = layout.querySelector(':scope > [data-role="center-main-pane"]');
+    if (!mainPane) {
+      mainPane = document.createElement('div');
+      mainPane.className = 'center-split-main';
+      mainPane.dataset.role = 'center-main-pane';
+      mainPane.style.position = 'relative';
+      const splitPane = layout.querySelector(':scope > .center-split-pane');
+      if (splitPane) {
+        layout.insertBefore(mainPane, splitPane);
+      } else {
+        layout.appendChild(mainPane);
+      }
+    }
+    return mainPane;
+  }
+
+  function renderNavButtonsHtml() {
+    const canBack = typeof canNavBack === 'function' ? canNavBack() : false;
+    const canFwd = typeof canNavForward === 'function' ? canNavForward() : false;
+    const backLabel = typeof getNavBackLabel === 'function' ? getNavBackLabel() : '';
+    const fwdLabel = typeof getNavForwardLabel === 'function' ? getNavForwardLabel() : '';
+    const backTitle = backLabel ? `返回：${backLabel} (Alt+←)` : '返回上一文档 (Alt+←)';
+    const fwdTitle = fwdLabel ? `前进：${fwdLabel} (Alt+→)` : '前进下一文档 (Alt+→)';
+    return `
+      <div class="nav-history-group" role="group" aria-label="文档导航历史">
+        <button type="button" class="nav-history-btn ${canBack ? '' : 'is-disabled'}" data-action="nav-back" title="${escapeHtml(backTitle)}" aria-label="后退" ${canBack ? '' : 'disabled'}>
+          ${icon('arrow-left', 14)}
+        </button>
+        <button type="button" class="nav-history-btn ${canFwd ? '' : 'is-disabled'}" data-action="nav-forward" title="${escapeHtml(fwdTitle)}" aria-label="前进" ${canFwd ? '' : 'disabled'}>
+          ${icon('arrow-right', 14)}
+        </button>
+      </div>
+    `;
+  }
+
+  function syncNavButtonsUi() {
+    const canBack = typeof canNavBack === 'function' ? canNavBack() : false;
+    const canFwd = typeof canNavForward === 'function' ? canNavForward() : false;
+    const backLabel = typeof getNavBackLabel === 'function' ? getNavBackLabel() : '';
+    const fwdLabel = typeof getNavForwardLabel === 'function' ? getNavForwardLabel() : '';
+    const backBtn = containerEl.querySelector('[data-action="nav-back"]');
+    const fwdBtn = containerEl.querySelector('[data-action="nav-forward"]');
+    if (backBtn) {
+      backBtn.disabled = !canBack;
+      backBtn.classList.toggle('is-disabled', !canBack);
+      backBtn.title = backLabel ? `返回：${backLabel} (Alt+←)` : '返回上一文档 (Alt+←)';
+    }
+    if (fwdBtn) {
+      fwdBtn.disabled = !canFwd;
+      fwdBtn.classList.toggle('is-disabled', !canFwd);
+      fwdBtn.title = fwdLabel ? `前进：${fwdLabel} (Alt+→)` : '前进下一文档 (Alt+→)';
+    }
+  }
+
+  function getActiveMainScrollEl() {
+    const mainPane = ensureMainPaneEl();
+    return (
+      mainPane.querySelector('.md-scroll-area') ||
+      mainPane.querySelector('.md-editor:not([data-role])') ||
+      mainPane.querySelector('.excel-table-wrap') ||
+      mainPane.querySelector('.pdf-hd-viewer')
+    );
+  }
+
+  function captureCurrentNavSnapshot() {
+    if (!state.activeDoc || typeof updateCurrentNavSnapshot !== 'function') return;
+    const scrollEl = getActiveMainScrollEl();
+    updateCurrentNavSnapshot({
+      scrollTop: scrollEl ? scrollEl.scrollTop : 0,
+      pdfPage: state.activeDoc.type === 'pdf' ? state.pdf.currentPage : undefined,
+      excelSheet: state.activeDoc.type === 'excel' ? state.excel.currentSheet : undefined,
+    });
+  }
 
   // =========================================================================
   // Floating Selection Format Bar & Precision Drop Line Helpers
@@ -593,10 +748,11 @@ export function initCenterView(containerEl) {
   }
 
   function ensureDropOverlay() {
-    if (typeof window !== 'undefined' && window.getComputedStyle(containerEl).position === 'static') {
-      containerEl.style.position = 'relative';
+    const host = ensureMainPaneEl();
+    if (typeof window !== 'undefined' && window.getComputedStyle(host).position === 'static') {
+      host.style.position = 'relative';
     }
-    let overlay = containerEl.querySelector('#center-drop-overlay');
+    let overlay = host.querySelector('#center-drop-overlay');
     if (!overlay) {
       overlay = document.createElement('div');
       overlay.id = 'center-drop-overlay';
@@ -605,7 +761,7 @@ export function initCenterView(containerEl) {
         <div style="font-size:22px;line-height:1;">✨</div>
         <div>松开即可插入到当前笔记</div>
       `;
-      containerEl.appendChild(overlay);
+      host.appendChild(overlay);
     }
     return overlay;
   }
@@ -896,11 +1052,9 @@ export function initCenterView(containerEl) {
           </p>
         `,
         footerHtml: `
-          <div class="sheet-footer-split">
-            <button type="button" class="pill-btn pill-btn-primary" data-guard-act="save">💾 保存并退出</button>
-            <button type="button" class="pill-btn pill-btn-danger" data-guard-act="discard">放弃修改</button>
-            <button type="button" class="pill-btn" data-guard-act="cancel">取消</button>
-          </div>
+          <button type="button" class="pill-btn pill-btn-primary" data-guard-act="save">💾 保存并退出</button>
+          <button type="button" class="pill-btn pill-btn-danger" data-guard-act="discard">放弃修改</button>
+          <button type="button" class="pill-btn" data-guard-act="cancel">取消</button>
         `,
         onMount(card) {
           card.querySelector('[data-guard-act="cancel"]')?.addEventListener('click', () => {
@@ -937,9 +1091,10 @@ export function initCenterView(containerEl) {
     const items = store.state.files?.items || [];
     const quickDocs = items.slice(0, 4);
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span class="doc-title-pill">文档工作区</span>
         </div>
         <div class="center-toolbar-group">
@@ -998,9 +1153,10 @@ export function initCenterView(containerEl) {
   function renderLoading(label = '正在加载本地文档…') {
     hideFormatBar();
     removeDropInsertLine();
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span class="doc-title-pill">${escapeHtml(label)}</span>
         </div>
       </div>
@@ -1533,8 +1689,57 @@ export function initCenterView(containerEl) {
   }
 
   // =========================================================================
-  // Rendering: Markdown / TXT Mode (3-mode: 实时阅览 | 纯源码 | 🧠 脑图)
+  // Rendering: Markdown / TXT Mode (3-mode: 实时编辑 | 纯源码 | 🧠 脑图)
   // =========================================================================
+  function showMdMindMapResultSheet(targetDoc, outline) {
+    if (!outline) return;
+    openSheet({
+      title: `AI 提炼脑图大纲 · ${targetDoc.name}`,
+      bodyHtml: `
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <p style="margin:0;font-size:12.5px;color:var(--text-secondary);">以下为 AI 生成的结构化 Markdown 大纲，可预览并应用到当前文档：</p>
+          <div class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
+            ${renderMarkdownSafe(outline, { withLineMap: false })}
+          </div>
+        </div>
+      `,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="ai-mm-cancel">取消</button>
+        <button type="button" class="pill-btn" id="ai-mm-copy">${icon('copy', 13)} 复制大纲</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="ai-mm-apply">${icon('check', 13)} 应用到当前脑图</button>
+      `,
+      onMount(card) {
+        card.querySelector('#ai-mm-cancel')?.addEventListener('click', closeSheet);
+        card.querySelector('#ai-mm-copy')?.addEventListener('click', () => {
+          copyInternal(outline, '已复制 AI 脑图大纲');
+        });
+        card.querySelector('#ai-mm-apply')?.addEventListener('click', async () => {
+          if (state.activeDoc && isSamePath(state.activeDoc.path, targetDoc.path)) {
+            pushUndoSnapshot(state.activeDoc.content, { immediate: true });
+            state.activeDoc.content = outline;
+            state.dirty = true;
+            state.editingBlockIdx = null;
+            state.editingBlockRange = null;
+            state.editingDraftInsert = null;
+            store.state.activeDocumentText = outline;
+            closeSheet();
+            renderMarkdownMode();
+            showToast('已应用 AI 脑图大纲（Ctrl+S 保存）', 'success');
+          } else {
+            try {
+              await api.put('/api/files/write', { path: targetDoc.path, content: outline });
+              closeSheet();
+              await openFile(targetDoc.path, { skipUnsavedGuard: true, forceReload: true, mode: 'mindmap' });
+              showToast(`已写入 ${targetDoc.name} 脑图大纲`, 'success');
+            } catch (err) {
+              showToast(getErrorMsg(err, '写入脑图大纲失败'), 'error');
+            }
+          }
+        });
+      },
+    });
+  }
+
   function mountMindMapStage() {
     const doc = state.activeDoc;
     const stageEl = containerEl.querySelector('[data-role="mindmap-stage"]');
@@ -1564,131 +1769,153 @@ export function initCenterView(containerEl) {
         });
       },
       async onAiGenerate() {
-        const res = await api.post('/api/ai/mindmap', {
-          text: doc.content || '',
-          file_path: doc.path,
-        });
-        const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
-        if (!outline) {
-          showToast('AI 未返回有效脑图大纲', 'warning');
+        const snapDoc = { path: doc.path, name: doc.name, content: doc.content || '' };
+        const taskId = `mm_${Date.now()}`;
+        setBgAiTask({ id: taskId, label: `AI 正在提炼 ${snapDoc.name} 脑图…`, status: 'running' });
+        showToast('AI 已在后台运行，可继续浏览编辑', 'info', { duration: 2200 });
+        try {
+          const res = await api.post('/api/ai/mindmap', {
+            text: snapDoc.content,
+            file_path: snapDoc.path,
+          });
+          const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
+          if (!outline) {
+            setBgAiTask({ id: taskId, label: 'AI 未返回有效脑图大纲', status: 'error' });
+            showToast('AI 未返回有效脑图大纲', 'warning');
+            return null;
+          }
+          setBgAiTask({
+            id: taskId,
+            label: `AI 脑图已完成 · ${snapDoc.name}`,
+            status: 'done',
+            onOpen: () => showMdMindMapResultSheet(snapDoc, outline),
+          });
+          showToast(`AI 脑图已生成 · ${snapDoc.name}`, 'success', {
+            duration: 4200,
+            actionLabel: '查看脑图',
+            onAction: () => showMdMindMapResultSheet(snapDoc, outline),
+          });
+          return outline;
+        } catch (err) {
+          setBgAiTask({ id: taskId, label: 'AI 脑图生成失败', status: 'error' });
+          showToast(getErrorMsg(err, 'AI 脑图生成失败'), 'error');
           return null;
         }
-        openSheet({
-          title: `AI 提炼脑图大纲 · ${doc.name}`,
-          bodyHtml: `
-            <div style="display:flex;flex-direction:column;gap:10px;">
-              <p style="margin:0;font-size:12.5px;color:var(--text-secondary);">以下为 AI 生成的结构化 Markdown 大纲，可预览并应用到当前文档：</p>
-              <div class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
-                ${renderMarkdownSafe(outline, { withLineMap: false })}
-              </div>
-            </div>
-          `,
-          footerHtml: `
-            <button type="button" class="pill-btn" id="ai-mm-cancel">取消</button>
-            <button type="button" class="pill-btn" id="ai-mm-copy">${icon('copy', 13)} 复制大纲</button>
-            <button type="button" class="pill-btn pill-btn-primary" id="ai-mm-apply">${icon('check', 13)} 应用到当前脑图</button>
-          `,
-          onMount(card) {
-            card.querySelector('#ai-mm-cancel')?.addEventListener('click', closeSheet);
-            card.querySelector('#ai-mm-copy')?.addEventListener('click', () => {
-              copyInternal(outline, '已复制 AI 脑图大纲');
-            });
-            card.querySelector('#ai-mm-apply')?.addEventListener('click', () => {
-              pushUndoSnapshot(doc.content, { immediate: true });
-              doc.content = outline;
-              state.dirty = true;
-              state.editingBlockIdx = null;
-              state.editingBlockRange = null;
-              store.state.activeDocumentText = outline;
-              closeSheet();
-              renderMarkdownMode();
-              showToast('已应用 AI 脑图大纲（Ctrl+S 保存）', 'success');
-            });
-          },
-        });
-        return outline;
       },
     });
-  }
-
-  function syncBlockEditorHeight(ta) {
-    if (!ta) return;
-    ta.style.height = 'auto';
-    ta.style.height = `${Math.max(28, ta.scrollHeight)}px`;
   }
 
   function renderLiveBlocksHtml(doc) {
     const blocks = parseMarkdownBlocks(doc.content || '');
     const editingIdx = state.editingBlockIdx;
-    const draftNew = state.editingDraftNewBlock && editingIdx === blocks.length;
+    const draftInsert = state.editingDraftInsert;
+    const draftNew = state.editingDraftNewBlock && editingIdx === blocks.length && !draftInsert;
 
-    const blocksHtml = blocks
-      .map((blk, idx) => {
-        const isEditing = editingIdx === idx;
-        if (isEditing) {
-          state.editingBlockRange = { startLine: blk.startLine, endLine: blk.endLine };
-          return `
-            <div class="lp-block is-editing" data-block-idx="${idx}" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
-              <textarea class="lp-block-editor" data-block-idx="${idx}" spellcheck="false" rows="1">${escapeHtml(blk.raw)}</textarea>
-            </div>
-          `;
-        }
-        return `
+    const makeDraftHtml = (blockIdx, startLine, initialHtml = '<p><br></p>') => `
+      <div class="lp-block is-editing" data-block-idx="${blockIdx}" data-md-start="${startLine}" data-md-end="${startLine}" data-draft-block="1">
+        <div class="lp-block-view lp-block-wysiwyg" contenteditable="true" data-block-idx="${blockIdx}" data-placeholder="输入内容，或输入 / 呼出斜杠命令…" spellcheck="false">${initialHtml}</div>
+      </div>
+    `;
+
+    const parts = [];
+    if (draftInsert && draftInsert.afterBlockIdx === -1) {
+      parts.push(makeDraftHtml(-1, draftInsert.startLine, draftInsert.initialHtml || '<p><br></p>'));
+    }
+
+    blocks.forEach((blk, idx) => {
+      const isEditing = !draftInsert && editingIdx === idx;
+      if (isEditing) {
+        state.editingBlockRange = { startLine: blk.startLine, endLine: blk.endLine };
+        parts.push(`
+          <div class="lp-block is-editing" data-block-idx="${idx}" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
+            <div class="lp-block-view lp-block-wysiwyg" contenteditable="true" data-block-idx="${idx}" data-placeholder="输入内容，或输入 / 呼出斜杠命令…" spellcheck="false">${markdownToWysiwygBlockHtml(blk.raw)}</div>
+          </div>
+        `);
+      } else {
+        parts.push(`
           <div class="lp-block" data-block-idx="${idx}" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
             <div class="lp-block-view" data-md-start="${blk.startLine}" data-md-end="${blk.endLine}">
-              ${renderMarkdownSafe(blk.raw, { withLineMap: false })}
+              ${markdownToWysiwygBlockHtml(blk.raw)}
             </div>
           </div>
-        `;
-      })
-      .join('');
+        `);
+      }
+      if (draftInsert && draftInsert.afterBlockIdx === idx) {
+        const afterLine = blk.endLine + 1;
+        state.editingBlockRange = { startLine: afterLine, endLine: afterLine };
+        parts.push(makeDraftHtml(idx + 1, afterLine, draftInsert.initialHtml || '<p><br></p>'));
+      }
+    });
 
     let draftHtml = '';
     if (draftNew) {
       const totalLines = getMdLines().length;
       const startLine = Math.max(0, totalLines - 1);
       state.editingBlockRange = { startLine, endLine: startLine };
-      draftHtml = `
-        <div class="lp-block is-editing" data-block-idx="${blocks.length}" data-md-start="${startLine}" data-md-end="${startLine}" data-draft-block="1">
-          <textarea class="lp-block-editor" data-block-idx="${blocks.length}" spellcheck="false" rows="1" placeholder="输入内容，支持 # 标题、- 列表、[[文件名]] 胶囊…"></textarea>
-        </div>
-      `;
+      draftHtml = makeDraftHtml(blocks.length, startLine);
     }
 
     return `
       <div class="md-scroll-area">
         <div class="lp-container md-preview">
-          ${blocksHtml}
+          ${parts.join('')}
           ${draftHtml}
           <div class="lp-add-block-zone" data-action="lp-add-block" role="button" tabindex="0">
-            ${blocks.length === 0 && !draftNew ? '+ 点击此处开始书写笔记（支持 # 标题、代码块、[[文件锚点]]）…' : '+ 点击此处继续书写…'}
+            ${blocks.length === 0 && !draftNew && !draftInsert ? '+ 点击此处开始书写笔记（支持 / 斜杠命令、拖拽块、[[文件锚点]]）…' : '+ 点击此处继续书写…'}
           </div>
         </div>
       </div>
     `;
   }
 
-  function focusActiveBlockEditor(cursorMode = 'end') {
-    window.requestAnimationFrame(() => {
-      const ta = containerEl.querySelector('.lp-block-editor');
-      if (!ta) return;
-      syncBlockEditorHeight(ta);
-      ta.focus();
-      const len = ta.value.length;
-      if (cursorMode === 'start') {
-        ta.setSelectionRange(0, 0);
-      } else if (typeof cursorMode === 'number' && Number.isFinite(cursorMode)) {
-        const pos = Math.max(0, Math.min(len, cursorMode));
-        ta.setSelectionRange(pos, pos);
-      } else {
-        ta.setSelectionRange(len, len);
+  function placeCaretInsideWysiwyg(editorEl, cursorMode = 'end', clickPoint = null) {
+    if (!editorEl || typeof window === 'undefined') return;
+    const sel = window.getSelection();
+    if (!sel) return;
+
+    if (clickPoint && Number.isFinite(clickPoint.x) && Number.isFinite(clickPoint.y)) {
+      let range = null;
+      if (typeof document.caretRangeFromPoint === 'function') {
+        range = document.caretRangeFromPoint(clickPoint.x, clickPoint.y);
+      } else if (typeof document.caretPositionFromPoint === 'function') {
+        const pos = document.caretPositionFromPoint(clickPoint.x, clickPoint.y);
+        if (pos && pos.offsetNode) {
+          range = document.createRange();
+          range.setStart(pos.offsetNode, pos.offset);
+          range.collapse(true);
+        }
       }
+      if (range && editorEl.contains(range.startContainer)) {
+        const ceFalse = (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement)?.closest('[contenteditable="false"]');
+        if (!ceFalse || ceFalse === editorEl) {
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return;
+        }
+      }
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(editorEl);
+    range.collapse(cursorMode === 'start');
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function focusActiveBlockEditor(cursorMode = 'end', clickPoint = null) {
+    window.requestAnimationFrame(() => {
+      const editorEl = containerEl.querySelector('.lp-block-wysiwyg');
+      if (!editorEl) return;
+      editorEl.focus({ preventScroll: true });
+      placeCaretInsideWysiwyg(editorEl, cursorMode, clickPoint);
     });
   }
 
   function cleanupEmptyTrailingDraftIfNeeded() {
-    if (!state.editingDraftNewBlock || !state.activeDoc) return;
+    if (!state.editingDraftNewBlock && !state.editingDraftInsert) return;
     state.editingDraftNewBlock = false;
+    state.editingDraftInsert = null;
+    if (!state.activeDoc) return;
     const raw = String(state.activeDoc.content ?? '').replace(/\r\n/g, '\n');
     const blocks = parseMarkdownBlocks(raw);
     if (blocks.length === 0) {
@@ -1704,22 +1931,25 @@ export function initCenterView(containerEl) {
   }
 
   function commitActiveBlock({ reRender = true } = {}) {
-    if (state.editingBlockIdx === null && !state.editingDraftNewBlock) return false;
+    if (state.editingBlockIdx === null && !state.editingDraftNewBlock && !state.editingDraftInsert) {
+      return false;
+    }
+    closeSlashMenu();
     const doc = state.activeDoc;
-    const ta = containerEl.querySelector('.lp-block-editor');
-    if (doc && ta) {
-      const val = ta.value.replace(/\r\n/g, '\n');
-      if (state.editingDraftNewBlock && !val.trim()) {
+    const editorEl = containerEl.querySelector('.lp-block-wysiwyg');
+    if (doc && editorEl) {
+      const val = wysiwygElementToMarkdown(editorEl);
+      if ((state.editingDraftNewBlock || state.editingDraftInsert) && !val.trim()) {
         cleanupEmptyTrailingDraftIfNeeded();
       } else {
         state.editingDraftNewBlock = false;
+        state.editingDraftInsert = null;
         if (!val.trim() && state.editingBlockRange) {
-          // If an existing block was cleared completely, collapse surrounding redundant blank lines cleanly
           const { startLine, endLine } = state.editingBlockRange;
           const lines = getMdLines();
           let delStart = startLine;
           let delCount = endLine - startLine + 1;
-          if (delStart > 0 && lines[delStart - 1].trim() === '' && delStart + delCount < lines.length && lines[delStart + delCount].trim() === '') {
+          if (delStart > 0 && lines[delStart - 1]?.trim() === '' && delStart + delCount < lines.length && lines[delStart + delCount]?.trim() === '') {
             delCount += 1;
           }
           lines.splice(delStart, delCount);
@@ -1729,6 +1959,7 @@ export function initCenterView(containerEl) {
       }
     } else {
       state.editingDraftNewBlock = false;
+      state.editingDraftInsert = null;
     }
 
     state.editingBlockIdx = null;
@@ -1739,7 +1970,7 @@ export function initCenterView(containerEl) {
     return true;
   }
 
-  function activateBlockByStartLine(targetStartLine, cursorMode = 'end') {
+  function activateBlockByStartLine(targetStartLine, cursorMode = 'end', clickPoint = null) {
     const doc = state.activeDoc;
     if (!doc || state.mdMode !== 'live') return;
     const prevRangeStart = state.editingBlockRange?.startLine ?? Infinity;
@@ -1758,8 +1989,9 @@ export function initCenterView(containerEl) {
     if (idx === -1) return;
     state.editingBlockIdx = idx;
     state.editingDraftNewBlock = false;
+    state.editingDraftInsert = null;
     renderMarkdownMode();
-    focusActiveBlockEditor(cursorMode);
+    focusActiveBlockEditor(cursorMode, clickPoint);
   }
 
   function activateBlockByIndex(targetIdx, cursorMode = 'end') {
@@ -1773,8 +2005,20 @@ export function initCenterView(containerEl) {
     }
     state.editingBlockIdx = targetIdx;
     state.editingDraftNewBlock = false;
+    state.editingDraftInsert = null;
     renderMarkdownMode();
     focusActiveBlockEditor(cursorMode);
+  }
+
+  function insertDraftBlockAfter(afterBlockIdx, startLine, initialHtml = '<p><br></p>') {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.editingDraftNewBlock = false;
+    state.editingDraftInsert = { afterBlockIdx, startLine, initialHtml };
+    renderMarkdownMode();
+    focusActiveBlockEditor('start');
   }
 
   function appendNewBlockAndFocus() {
@@ -1791,9 +2035,34 @@ export function initCenterView(containerEl) {
     }
     state.editingBlockIdx = blocks.length;
     state.editingDraftNewBlock = true;
+    state.editingDraftInsert = null;
     store.state.activeDocumentText = doc.content;
     renderMarkdownMode();
     focusActiveBlockEditor('start');
+  }
+
+  function renderWysiwygFormatBarHtml() {
+    return `
+      <div class="wysiwyg-format-bar" data-role="wysiwyg-format-bar" role="toolbar" aria-label="文档格式工具栏">
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="h1" title="一级标题">${icon('heading-1', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="h2" title="二级标题">${icon('heading-2', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="h3" title="三级标题">${icon('heading-3', 14)}</button>
+        <span class="fmt-sep" aria-hidden="true"></span>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="bold" title="加粗 Ctrl+B">${icon('bold', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="italic" title="斜体 Ctrl+I">${icon('italic', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="strike" title="删除线 Ctrl+Shift+X">${icon('strikethrough', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="mark" title="荧光高亮">${icon('highlighter', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="code" title="行内代码 Ctrl+E">${icon('code', 14)}</button>
+        <span class="fmt-sep" aria-hidden="true"></span>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="quote" title="引用块 Ctrl+/">${icon('quote', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="ul" title="无序列表">${icon('list', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="todo" title="待办清单">${icon('list-checks', 14)}</button>
+        <span class="fmt-sep" aria-hidden="true"></span>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="cut" title="剪切 Ctrl+X">${icon('scissors', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="copy" title="复制 Ctrl+C">${icon('copy', 14)}</button>
+        <button type="button" class="fmt-icon-btn" data-fmt-bar="paste" title="粘贴 Ctrl+V">${icon('clipboard-paste', 14)}</button>
+      </div>
+    `;
   }
 
   function renderMarkdownMode() {
@@ -1815,15 +2084,17 @@ export function initCenterView(containerEl) {
     const segIdx = isMd ? (isLive ? 0 : isSource ? 1 : 2) : (isLive ? 0 : 1);
     const thumbWidth = isMd ? 'calc(33.333% - 3px)' : 'calc(50% - 3px)';
 
-    const prevScrollEl = containerEl.querySelector('.md-scroll-area') || containerEl.querySelector('.md-editor:not([data-role])');
+    const mainPane = ensureMainPaneEl();
+    const prevScrollEl = mainPane.querySelector('.md-scroll-area') || mainPane.querySelector('.md-editor:not([data-role])');
     const prevScrollTop = prevScrollEl ? prevScrollEl.scrollTop : 0;
 
     const canUndo = state.history.undoStack.length > 0 || state.history.typingBaseline !== null;
     const canRedo = state.history.redoStack.length > 0;
 
-    containerEl.innerHTML = `
+    mainPane.innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--accent); display:inline-flex; align-items:center;">${icon(docIconName(doc.type, doc.ext), 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           <span
@@ -1843,7 +2114,7 @@ export function initCenterView(containerEl) {
           <div class="segmented-pill" data-seg="md-mode" role="tablist" aria-label="文档模式切换">
             <div class="segmented-thumb" style="width:${thumbWidth}; transform:translateX(${segIdx * 100}%);"></div>
             <button type="button" class="segmented-btn ${isLive ? 'is-active' : ''}" data-md-mode="live" role="tab" aria-selected="${isLive}">
-              实时阅览
+              实时编辑
             </button>
             <button type="button" class="segmented-btn ${isSource ? 'is-active' : ''}" data-md-mode="source" role="tab" aria-selected="${isSource}">
               纯源码
@@ -1879,6 +2150,8 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
+      ${isLive || isSource ? renderWysiwygFormatBarHtml() : ''}
+
       ${renderFindBarHtml()}
 
       ${
@@ -1891,21 +2164,26 @@ export function initCenterView(containerEl) {
     `;
     ensureDropOverlay();
 
+    const fmtBar = mainPane.querySelector('[data-role="wysiwyg-format-bar"]');
+    if (fmtBar) {
+      fmtBar.addEventListener('mousedown', (ev) => {
+        if (ev.target.closest('[data-fmt-bar]')) {
+          ev.preventDefault();
+        }
+      });
+    }
+
     if (isMindmap) {
       mountMindMapStage();
     } else if (isLive) {
-      const nextScrollEl = containerEl.querySelector('.md-scroll-area');
+      const nextScrollEl = mainPane.querySelector('.md-scroll-area');
       if (nextScrollEl && prevScrollTop > 0) {
         nextScrollEl.scrollTop = prevScrollTop;
-      }
-      const activeTa = containerEl.querySelector('.lp-block-editor');
-      if (activeTa) {
-        syncBlockEditorHeight(activeTa);
       }
       if (state.justDroppedTarget) {
         const dropInfo = state.justDroppedTarget;
         state.justDroppedTarget = null;
-        const lpBlocks = Array.from(containerEl.querySelectorAll('.lp-container .lp-block'));
+        const lpBlocks = Array.from(mainPane.querySelectorAll('.lp-container .lp-block'));
         let targetBlk =
           (Number.isFinite(dropInfo.actualStartLine)
             ? lpBlocks.find((b) => Number(b.dataset.mdStart) === dropInfo.actualStartLine)
@@ -1927,7 +2205,7 @@ export function initCenterView(containerEl) {
         applyLiveFindHighlights({ scrollToActive: false });
       }
     } else if (isSource) {
-      const ta = containerEl.querySelector('.md-editor:not([data-role])');
+      const ta = mainPane.querySelector('.md-editor:not([data-role])');
       if (ta && prevScrollTop > 0) {
         ta.scrollTop = prevScrollTop;
       }
@@ -1947,105 +2225,121 @@ export function initCenterView(containerEl) {
   }
 
   // =========================================================================
-  // Pain Point #10: AI Polish Sheet
+  // Pain Point #10 & V6 Req #6: Non-Blocking Background AI Polish Sheet
   // =========================================================================
+  function showPolishResultSheet(targetDoc, origLength, polished) {
+    openSheet({
+      title: `AI 文章润色 · ${targetDoc.name}`,
+      bodyHtml: `
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <span style="font-size:12px;color:var(--text-secondary);">原文 ${origLength} 字 → 润色后 ${polished.length} 字</span>
+            <div class="segmented-pill" role="tablist">
+              <div class="segmented-thumb" data-role="polish-thumb" style="width:calc(50% - 3px);transform:translateX(0%);"></div>
+              <button type="button" class="segmented-btn is-active" data-polish-view="preview" style="height:24px;font-size:11.5px;">预览效果</button>
+              <button type="button" class="segmented-btn" data-polish-view="raw" style="height:24px;font-size:11.5px;">Markdown 源码</button>
+            </div>
+          </div>
+          <div data-role="polish-preview" class="glass-card md-preview" style="padding:12px 14px;max-height:48vh;overflow-y:auto;">
+            ${renderMarkdownSafe(polished, { withLineMap: false })}
+          </div>
+          <textarea data-role="polish-raw" class="apple-textarea" rows="12" style="display:none;font-family:var(--font-mono);font-size:12.5px;">${escapeHtml(polished)}</textarea>
+        </div>
+      `,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="polish-cancel">取消</button>
+        <button type="button" class="pill-btn" id="polish-copy">${icon('copy', 13)} 复制</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="polish-apply">${icon('check', 13)} 应用替换</button>
+      `,
+      onMount(card) {
+        const bodyEl = card.querySelector('.sheet-body');
+        const thumb = bodyEl?.querySelector('[data-role="polish-thumb"]');
+        const prevBox = bodyEl?.querySelector('[data-role="polish-preview"]');
+        const rawBox = bodyEl?.querySelector('[data-role="polish-raw"]');
+        bodyEl?.querySelectorAll('[data-polish-view]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const isRaw = btn.dataset.polishView === 'raw';
+            bodyEl.querySelectorAll('[data-polish-view]').forEach((b) => b.classList.toggle('is-active', b === btn));
+            if (thumb) thumb.style.transform = `translateX(${isRaw ? '100%' : '0%'})`;
+            if (prevBox) prevBox.style.display = isRaw ? 'none' : 'block';
+            if (rawBox) rawBox.style.display = isRaw ? 'block' : 'none';
+          });
+        });
+
+        card.querySelector('#polish-cancel')?.addEventListener('click', closeSheet);
+        card.querySelector('#polish-copy')?.addEventListener('click', () => {
+          const latest = rawBox?.value || polished;
+          copyInternal(latest, '已复制润色文本');
+        });
+        card.querySelector('#polish-apply')?.addEventListener('click', async () => {
+          const latest = rawBox?.value ?? polished;
+          if (state.activeDoc && isSamePath(state.activeDoc.path, targetDoc.path)) {
+            pushUndoSnapshot(state.activeDoc.content, { immediate: true });
+            state.activeDoc.content = latest;
+            state.dirty = true;
+            state.editingBlockIdx = null;
+            state.editingBlockRange = null;
+            state.editingDraftInsert = null;
+            store.state.activeDocumentText = latest;
+            closeSheet();
+            renderMarkdownMode();
+            showToast('已应用 AI 润色结果（Ctrl+S 保存）', 'success');
+          } else {
+            try {
+              await api.put('/api/files/write', { path: targetDoc.path, content: latest });
+              closeSheet();
+              await openFile(targetDoc.path, { skipUnsavedGuard: true, forceReload: true });
+              showToast(`已将润色结果写入 ${targetDoc.name}`, 'success');
+            } catch (err) {
+              showToast(getErrorMsg(err, '应用润色失败'), 'error');
+            }
+          }
+        });
+      },
+    });
+  }
+
   async function openAiPolishSheet() {
     const doc = state.activeDoc;
     if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    commitActiveBlock({ reRender: false });
     const rawText = String(doc.content || '').trim();
     if (!rawText) {
       showToast('当前文档内容为空，无需润色', 'warning');
       return;
     }
 
-    openSheet({
-      title: `AI 文章润色 · ${doc.name}`,
-      bodyHtml: `
-        <div class="empty-state" style="padding:28px 12px;">
-          <p class="empty-title">正在进行 AI 润色与结构优化…</p>
-          <p class="empty-desc">保持原意与锚点语法，优化表达流畅度与排版层级</p>
-        </div>
-      `,
-      footerHtml: `<button type="button" class="pill-btn" id="polish-close">取消</button>`,
-      async onMount(card) {
-        card.querySelector('#polish-close')?.addEventListener('click', closeSheet);
-        const bodyEl = card.querySelector('.sheet-body');
-        const footerEl = card.querySelector('.sheet-footer');
-        try {
-          const res = await api.post('/api/ai/polish', {
-            text: doc.content || '',
-            style: 'article',
-          });
-          const polished = String(res?.polished || res?.result || res?.text || res?.content || '').trim();
-          if (!polished) {
-            if (bodyEl) {
-              bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 未返回润色内容</p></div>`;
-            }
-            return;
-          }
-          if (bodyEl) {
-            bodyEl.innerHTML = `
-              <div style="display:flex;flex-direction:column;gap:10px;">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                  <span style="font-size:12px;color:var(--text-secondary);">原文 ${rawText.length} 字 → 润色后 ${polished.length} 字</span>
-                  <div class="segmented-pill" role="tablist">
-                    <div class="segmented-thumb" data-role="polish-thumb" style="width:calc(50% - 3px);transform:translateX(0%);"></div>
-                    <button type="button" class="segmented-btn is-active" data-polish-view="preview" style="height:24px;font-size:11.5px;">预览效果</button>
-                    <button type="button" class="segmented-btn" data-polish-view="raw" style="height:24px;font-size:11.5px;">Markdown 源码</button>
-                  </div>
-                </div>
-                <div data-role="polish-preview" class="glass-card md-preview" style="padding:12px 14px;max-height:48vh;overflow-y:auto;">
-                  ${renderMarkdownSafe(polished, { withLineMap: false })}
-                </div>
-                <textarea data-role="polish-raw" class="apple-textarea" rows="12" style="display:none;font-family:var(--font-mono);font-size:12.5px;">${escapeHtml(polished)}</textarea>
-              </div>
-            `;
+    const snapDoc = { path: doc.path, name: doc.name, content: doc.content || '' };
+    const taskId = `polish_${Date.now()}`;
+    setBgAiTask({ id: taskId, label: `AI 正在润色 ${snapDoc.name}…`, status: 'running' });
+    showToast('AI 已在后台运行，可继续浏览编辑', 'info', { duration: 2200 });
 
-            const thumb = bodyEl.querySelector('[data-role="polish-thumb"]');
-            const prevBox = bodyEl.querySelector('[data-role="polish-preview"]');
-            const rawBox = bodyEl.querySelector('[data-role="polish-raw"]');
-            bodyEl.querySelectorAll('[data-polish-view]').forEach((btn) => {
-              btn.addEventListener('click', () => {
-                const isRaw = btn.dataset.polishView === 'raw';
-                bodyEl.querySelectorAll('[data-polish-view]').forEach((b) => b.classList.toggle('is-active', b === btn));
-                if (thumb) thumb.style.transform = `translateX(${isRaw ? '100%' : '0%'})`;
-                if (prevBox) prevBox.style.display = isRaw ? 'none' : 'block';
-                if (rawBox) rawBox.style.display = isRaw ? 'block' : 'none';
-              });
-            });
-          }
-
-          if (footerEl) {
-            footerEl.innerHTML = `
-              <button type="button" class="pill-btn" id="polish-cancel">取消</button>
-              <button type="button" class="pill-btn" id="polish-copy">${icon('copy', 13)} 复制</button>
-              <button type="button" class="pill-btn pill-btn-primary" id="polish-apply">${icon('check', 13)} 应用替换</button>
-            `;
-            footerEl.querySelector('#polish-cancel')?.addEventListener('click', closeSheet);
-            footerEl.querySelector('#polish-copy')?.addEventListener('click', () => {
-              const latest = bodyEl?.querySelector('[data-role="polish-raw"]')?.value || polished;
-              copyInternal(latest, '已复制润色文本');
-            });
-            footerEl.querySelector('#polish-apply')?.addEventListener('click', () => {
-              const latest = bodyEl?.querySelector('[data-role="polish-raw"]')?.value ?? polished;
-              pushUndoSnapshot(doc.content, { immediate: true });
-              doc.content = latest;
-              state.dirty = true;
-              state.editingBlockIdx = null;
-              state.editingBlockRange = null;
-              store.state.activeDocumentText = latest;
-              closeSheet();
-              renderMarkdownMode();
-              showToast('已应用 AI 润色结果（Ctrl+S 保存）', 'success');
-            });
-          }
-        } catch (err) {
-          if (bodyEl) {
-            bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 润色失败</p><p class="empty-desc">${escapeHtml(getErrorMsg(err))}</p></div>`;
-          }
-        }
-      },
-    });
+    try {
+      const res = await api.post('/api/ai/polish', {
+        text: snapDoc.content,
+        style: 'article',
+      });
+      const polished = String(res?.polished || res?.result || res?.text || res?.content || '').trim();
+      if (!polished) {
+        setBgAiTask({ id: taskId, label: 'AI 未返回润色内容', status: 'error' });
+        showToast('AI 未返回润色内容', 'warning');
+        return;
+      }
+      setBgAiTask({
+        id: taskId,
+        label: `AI 润色已完成 · ${snapDoc.name}`,
+        status: 'done',
+        onOpen: () => showPolishResultSheet(snapDoc, rawText.length, polished),
+      });
+      showToast(`AI 润色已完成 · ${snapDoc.name}`, 'success', {
+        duration: 4200,
+        actionLabel: '查看结果',
+        onAction: () => showPolishResultSheet(snapDoc, rawText.length, polished),
+      });
+    } catch (err) {
+      setBgAiTask({ id: taskId, label: 'AI 润色失败', status: 'error' });
+      showToast(getErrorMsg(err, 'AI 润色失败'), 'error');
+    }
   }
 
   function triggerAiPolish() {
@@ -2581,9 +2875,10 @@ export function initCenterView(containerEl) {
     const ex = state.excel;
     const pendingCount = ex.pendingChanges.size;
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--success); display:inline-flex; align-items:center;">${icon('file-spreadsheet', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           ${
@@ -2817,11 +3112,9 @@ export function initCenterView(containerEl) {
         title: '切换工作表确认',
         bodyHtml: `<p style="margin:0; color:var(--text-secondary);">当前工作表「${escapeHtml(state.excel.currentSheet)}」有 <strong>${count}</strong> 项未保存修改，切换将丢失这些修改。</p>`,
         footerHtml: `
-          <div class="sheet-footer-split">
-            <button type="button" class="pill-btn pill-btn-primary" data-sheet-act="save">💾 保存并切换</button>
-            <button type="button" class="pill-btn pill-btn-danger" data-sheet-act="discard">丢弃并切换</button>
-            <button type="button" class="pill-btn" data-sheet-act="cancel">取消</button>
-          </div>
+          <button type="button" class="pill-btn pill-btn-primary" data-sheet-act="save">💾 保存并切换</button>
+          <button type="button" class="pill-btn pill-btn-danger" data-sheet-act="discard">丢弃并切换</button>
+          <button type="button" class="pill-btn" data-sheet-act="cancel">取消</button>
         `,
         onMount(card) {
           card.querySelector('[data-sheet-act="cancel"]')?.addEventListener('click', closeSheet);
@@ -3081,11 +3374,12 @@ export function initCenterView(containerEl) {
     removeDropInsertLine();
     const doc = state.activeDoc;
     const pdf = state.pdf;
-    const isHd = pdf.viewMode !== 'iframe';
+    const isIframe = pdf.viewMode !== 'hd';
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--danger); display:inline-flex; align-items:center;">${icon('file-pdf', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           ${
@@ -3112,12 +3406,12 @@ export function initCenterView(containerEl) {
             <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-jump-page">跳转</button>
           </div>
           <div class="segmented-pill" data-seg="pdf-view-mode" role="tablist" aria-label="PDF 渲染模式切换">
-            <div class="segmented-thumb" style="width:calc(50% - 3px); transform:translateX(${isHd ? '0%' : '100%'});"></div>
-            <button type="button" class="segmented-btn ${isHd ? 'is-active' : ''}" data-pdf-view="hd" role="tab" aria-selected="${isHd}" style="height:24px;padding:0 9px;font-size:11.5px;">
-              高清渲染
-            </button>
-            <button type="button" class="segmented-btn ${!isHd ? 'is-active' : ''}" data-pdf-view="iframe" role="tab" aria-selected="${!isHd}" style="height:24px;padding:0 9px;font-size:11.5px;">
+            <div class="segmented-thumb" style="width:calc(50% - 3px); transform:translateX(${isIframe ? '0%' : '100%'});"></div>
+            <button type="button" class="segmented-btn ${isIframe ? 'is-active' : ''}" data-pdf-view="iframe" role="tab" aria-selected="${isIframe}" style="height:24px;padding:0 9px;font-size:11.5px;">
               原生预览
+            </button>
+            <button type="button" class="segmented-btn ${!isIframe ? 'is-active' : ''}" data-pdf-view="hd" role="tab" aria-selected="${!isIframe}" style="height:24px;padding:0 9px;font-size:11.5px;">
+              高清兼容
             </button>
           </div>
         </div>
@@ -3155,64 +3449,78 @@ export function initCenterView(containerEl) {
     ensureDropOverlay();
   }
 
+  function showPdfMindMapResultSheet(targetDoc, outline) {
+    openSheet({
+      title: `AI 提炼脑图 · ${targetDoc.name}`,
+      bodyHtml: `<div data-role="pdf-mm-stage" style="height:52vh;min-height:280px;border:1px solid var(--border-hairline);border-radius:var(--radius-control);overflow:hidden;"></div>`,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="pdf-mm-cancel">关闭</button>
+        <button type="button" class="pill-btn" id="pdf-mm-copy">${icon('copy', 13)} 复制大纲</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="pdf-mm-insert">${icon('plus', 13)} 写入伴生笔记</button>
+      `,
+      onMount(card) {
+        const stage = card.querySelector('[data-role="pdf-mm-stage"]');
+        if (stage) {
+          renderMindMap(stage, {
+            markdown: outline,
+            docName: targetDoc.name,
+            onAnchorClick(a) {
+              if (a instanceof HTMLElement) handleAnchorClick(a);
+              else if (a && typeof a === 'object') store.emit('anchor:jump', a);
+            },
+            onFocusNode(title, seconds = 1500) {
+              store.emit('focus:start', { title: title || targetDoc.name, seconds });
+            },
+          });
+        }
+        card.querySelector('#pdf-mm-cancel')?.addEventListener('click', closeSheet);
+        card.querySelector('#pdf-mm-copy')?.addEventListener('click', () => copyInternal(outline, '已复制脑图大纲'));
+        card.querySelector('#pdf-mm-insert')?.addEventListener('click', () => {
+          closeSheet();
+          if (state.activeDoc && isSamePath(state.activeDoc.path, targetDoc.path)) {
+            insertTextIntoCompanionNote(`\n${outline}\n`, { toastMsg: '已将 AI 脑图大纲写入伴生笔记' });
+          } else {
+            copyInternal(outline, '已切换文档，已复制脑图大纲到剪贴板');
+          }
+        });
+      },
+    });
+  }
+
   async function openPdfMindMapSheet() {
     const doc = state.activeDoc;
     if (!doc || doc.type !== 'pdf') return;
-    openSheet({
-      title: `AI 提炼脑图 · ${doc.name}`,
-      bodyHtml: `<div class="empty-state" style="padding:28px 12px;"><p class="empty-title">正在提取 PDF 核心结构并生成思维导图…</p></div>`,
-      footerHtml: `<button type="button" class="pill-btn" id="pdf-mm-close">关闭</button>`,
-      async onMount(card) {
-        card.querySelector('#pdf-mm-close')?.addEventListener('click', closeSheet);
-        const bodyEl = card.querySelector('.sheet-body');
-        const footerEl = card.querySelector('.sheet-footer');
-        try {
-          const res = await api.post('/api/ai/mindmap', {
-            text: doc.companionContent || '',
-            file_path: doc.path,
-          });
-          const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
-          if (!outline) {
-            if (bodyEl) bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">未能提炼出脑图大纲</p></div>`;
-            return;
-          }
-          if (bodyEl) {
-            bodyEl.innerHTML = `<div data-role="pdf-mm-stage" style="height:52vh;min-height:280px;border:1px solid var(--border-hairline);border-radius:var(--radius-control);overflow:hidden;"></div>`;
-            const stage = bodyEl.querySelector('[data-role="pdf-mm-stage"]');
-            if (stage) {
-              renderMindMap(stage, {
-                markdown: outline,
-                docName: doc.name,
-                onAnchorClick(a) {
-                  if (a instanceof HTMLElement) handleAnchorClick(a);
-                  else if (a && typeof a === 'object') store.emit('anchor:jump', a);
-                },
-                onFocusNode(title, seconds = 1500) {
-                  store.emit('focus:start', { title: title || doc.name, seconds });
-                },
-              });
-            }
-          }
-          if (footerEl) {
-            footerEl.innerHTML = `
-              <button type="button" class="pill-btn" id="pdf-mm-cancel">关闭</button>
-              <button type="button" class="pill-btn" id="pdf-mm-copy">${icon('copy', 13)} 复制大纲</button>
-              <button type="button" class="pill-btn pill-btn-primary" id="pdf-mm-insert">${icon('plus', 13)} 写入伴生笔记</button>
-            `;
-            footerEl.querySelector('#pdf-mm-cancel')?.addEventListener('click', closeSheet);
-            footerEl.querySelector('#pdf-mm-copy')?.addEventListener('click', () => copyInternal(outline, '已复制脑图大纲'));
-            footerEl.querySelector('#pdf-mm-insert')?.addEventListener('click', () => {
-              closeSheet();
-              insertTextIntoCompanionNote(`\n${outline}\n`, { toastMsg: '已将 AI 脑图大纲写入伴生笔记' });
-            });
-          }
-        } catch (err) {
-          if (bodyEl) {
-            bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 脑图提炼失败</p><p class="empty-desc">${escapeHtml(getErrorMsg(err))}</p></div>`;
-          }
-        }
-      },
-    });
+    const snapDoc = { path: doc.path, name: doc.name, companionContent: doc.companionContent || '' };
+    const taskId = `pdf_mm_${Date.now()}`;
+    setBgAiTask({ id: taskId, label: `AI 正在提炼 ${snapDoc.name} 脑图…`, status: 'running' });
+    showToast('AI 已在后台运行，可继续浏览编辑', 'info', { duration: 2200 });
+
+    try {
+      const res = await api.post('/api/ai/mindmap', {
+        text: snapDoc.companionContent,
+        file_path: snapDoc.path,
+      });
+      const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
+      if (!outline) {
+        setBgAiTask({ id: taskId, label: '未能提炼出 PDF 脑图大纲', status: 'error' });
+        showToast('未能提炼出脑图大纲', 'warning');
+        return;
+      }
+      setBgAiTask({
+        id: taskId,
+        label: `AI 脑图已完成 · ${snapDoc.name}`,
+        status: 'done',
+        onOpen: () => showPdfMindMapResultSheet(snapDoc, outline),
+      });
+      showToast(`AI 脑图已生成 · ${snapDoc.name}`, 'success', {
+        duration: 4200,
+        actionLabel: '查看脑图',
+        onAction: () => showPdfMindMapResultSheet(snapDoc, outline),
+      });
+    } catch (err) {
+      setBgAiTask({ id: taskId, label: 'AI 脑图提炼失败', status: 'error' });
+      showToast(getErrorMsg(err, 'AI 脑图提炼失败'), 'error');
+    }
   }
 
   function openPdfAnnotateSheet() {
@@ -3386,9 +3694,10 @@ export function initCenterView(containerEl) {
     const doc = state.activeDoc;
     const ar = state.archive;
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--warning); display:inline-flex; align-items:center;">${icon('layers', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           <span class="file-ext-badge" style="text-transform:none;">${ar.fileCount} 项 · ${formatBytes(ar.totalSize)}</span>
@@ -3471,9 +3780,10 @@ export function initCenterView(containerEl) {
     const src = `/api/files/raw-stream?path=${encodeURIComponent(doc.path)}&_t=${imgState.cacheBust}`;
     const zoomPct = imgState.fit ? '适应' : `${Math.round(imgState.zoom * 100)}%`;
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--accent); display:inline-flex; align-items:center;">${icon('book-open', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           <span data-role="backlinks-slot">${renderBacklinksSlotHtml()}</span>
@@ -3566,9 +3876,10 @@ export function initCenterView(containerEl) {
     const isVideo = doc.type === 'video';
     const src = `/api/files/raw-stream?path=${encodeURIComponent(doc.path)}`;
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--accent); display:inline-flex; align-items:center;">${icon('play', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           <span data-role="backlinks-slot">${renderBacklinksSlotHtml()}</span>
@@ -3636,9 +3947,10 @@ export function initCenterView(containerEl) {
     const doc = state.activeDoc;
     const previewMd = doc.previewMarkdown || doc.content || '*暂无可预览文本内容，可点击上方按钮用 WPS / Office 打开*';
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--accent); display:inline-flex; align-items:center;">${icon('file-text', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           ${doc.size ? `<span class="file-ext-badge" style="text-transform:none;">${formatBytes(doc.size)}</span>` : ''}
@@ -3690,9 +4002,10 @@ export function initCenterView(containerEl) {
     removeDropInsertLine();
     const doc = state.activeDoc;
 
-    containerEl.innerHTML = `
+    ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
         <div class="center-toolbar-group">
+          ${renderNavButtonsHtml()}
           <span style="color:var(--text-secondary); display:inline-flex; align-items:center;">${icon('file-text', 16)}</span>
           <span class="doc-title-pill" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span>
           <span data-role="backlinks-slot">${renderBacklinksSlotHtml()}</span>
@@ -3852,8 +4165,19 @@ export function initCenterView(containerEl) {
     return true;
   }
 
-  function emitFileOpened(doc) {
+  function recordOpenedNavAndEmit(doc, opts = {}) {
     if (!doc) return;
+    if (!opts._fromNavHistory && !opts.forceReload && typeof pushNavHistory === 'function') {
+      pushNavHistory({
+        path: doc.path,
+        name: doc.name,
+        ext: doc.ext,
+        heading: opts.heading || '',
+        pdfPage: doc.type === 'pdf' ? state.pdf.currentPage : undefined,
+        excelSheet: doc.type === 'excel' ? state.excel.currentSheet : undefined,
+      });
+      syncNavButtonsUi();
+    }
     store.emit('file:opened', {
       path: doc.path,
       name: doc.name,
@@ -3862,9 +4186,35 @@ export function initCenterView(containerEl) {
     });
   }
 
+  async function navigateHistory(dir) {
+    captureCurrentNavSnapshot();
+    const entry = dir < 0
+      ? (typeof stepNavBack === 'function' ? stepNavBack() : null)
+      : (typeof stepNavForward === 'function' ? stepNavForward() : null);
+    if (!entry || !entry.path) return null;
+    const opened = await openFile(entry.path, {
+      _fromNavHistory: true,
+      heading: entry.heading || undefined,
+      initialPage: entry.pdfPage || undefined,
+      sheet: entry.excelSheet || undefined,
+    });
+    if (opened && Number.isFinite(entry.scrollTop) && entry.scrollTop > 0) {
+      window.requestAnimationFrame(() => {
+        const scrollEl = getActiveMainScrollEl();
+        if (scrollEl) scrollEl.scrollTop = entry.scrollTop;
+      });
+    }
+    syncNavButtonsUi();
+    return opened;
+  }
+
   async function openFile(pathStr, opts = {}) {
     const targetPath = String(pathStr || '').trim();
     if (!targetPath) return null;
+
+    if (!opts._fromNavHistory) {
+      captureCurrentNavSnapshot();
+    }
 
     // If re-invoking currently open file without forceReload, handle lightweight sub-navigation
     if (
@@ -3878,7 +4228,8 @@ export function initCenterView(containerEl) {
         const hasEditingBlock =
           state.editingBlockRange !== null ||
           state.editingBlockIdx !== null ||
-          state.editingDraftNewBlock;
+          state.editingDraftNewBlock ||
+          state.editingDraftInsert !== null;
         if (hasEditingBlock) {
           commitActiveBlock({ reRender: true });
         }
@@ -3908,6 +4259,19 @@ export function initCenterView(containerEl) {
         await previewArchiveMember(opts.member);
       } else if ((t === 'audio' || t === 'video') && opts.initialTime != null) {
         seekActiveMedia(opts.initialTime, opts.autoPlay !== false);
+      }
+      if (!opts._fromNavHistory && (opts.heading || opts.initialPage || opts.sheet)) {
+        if (typeof pushNavHistory === 'function') {
+          pushNavHistory({
+            path: state.activeDoc.path,
+            name: state.activeDoc.name,
+            ext: state.activeDoc.ext,
+            heading: opts.heading || '',
+            pdfPage: t === 'pdf' ? state.pdf.currentPage : undefined,
+            excelSheet: t === 'excel' ? state.excel.currentSheet : undefined,
+          });
+          syncNavButtonsUi();
+        }
       }
       ensureDocTabOnMobile();
       return state.activeDoc;
@@ -3971,6 +4335,7 @@ export function initCenterView(containerEl) {
       state.editingBlockIdx = null;
       state.editingBlockRange = null;
       state.editingDraftNewBlock = false;
+      state.editingDraftInsert = null;
       state.findBar.open = false;
       state.findBar.matches = [];
       state.findBar.activeIdx = -1;
@@ -3998,14 +4363,14 @@ export function initCenterView(containerEl) {
           window.requestAnimationFrame(() => scrollToMarkdownLine(opts.line));
         }
         ensureDocTabOnMobile();
-        emitFileOpened(state.activeDoc);
+        recordOpenedNavAndEmit(state.activeDoc, opts);
         return state.activeDoc;
       }
 
       if (type === 'pdf') {
         const total = Math.max(1, Number(data.page_count || 1));
         const initPage = opts.initialPage ? Math.min(Math.max(1, Number(opts.initialPage)), total) : 1;
-        const prevViewMode = state.pdf?.viewMode === 'iframe' ? 'iframe' : 'hd';
+        const prevViewMode = state.pdf?.viewMode === 'hd' ? 'hd' : 'iframe';
         const prevZoom = Number(state.pdf?.zoom) || 1.6;
         state.pdf = {
           viewMode: prevViewMode,
@@ -4021,7 +4386,7 @@ export function initCenterView(containerEl) {
         syncActiveFileStore();
         renderPdfMode();
         ensureDocTabOnMobile();
-        emitFileOpened(state.activeDoc);
+        recordOpenedNavAndEmit(state.activeDoc, opts);
         return state.activeDoc;
       }
 
@@ -4058,7 +4423,7 @@ export function initCenterView(containerEl) {
         renderExcelMode();
         await loadExcelRows();
         ensureDocTabOnMobile();
-        emitFileOpened(state.activeDoc);
+        recordOpenedNavAndEmit(state.activeDoc, opts);
         return state.activeDoc;
       }
 
@@ -4092,7 +4457,7 @@ export function initCenterView(containerEl) {
           await previewArchiveMember(opts.member);
         }
         ensureDocTabOnMobile();
-        emitFileOpened(state.activeDoc);
+        recordOpenedNavAndEmit(state.activeDoc, opts);
         return state.activeDoc;
       }
 
@@ -4105,7 +4470,7 @@ export function initCenterView(containerEl) {
         syncActiveFileStore();
         renderImageMode();
         ensureDocTabOnMobile();
-        emitFileOpened(state.activeDoc);
+        recordOpenedNavAndEmit(state.activeDoc, opts);
         return state.activeDoc;
       }
 
@@ -4117,7 +4482,7 @@ export function initCenterView(containerEl) {
         syncActiveFileStore();
         renderMediaMode();
         ensureDocTabOnMobile();
-        emitFileOpened(state.activeDoc);
+        recordOpenedNavAndEmit(state.activeDoc, opts);
         return state.activeDoc;
       }
 
@@ -4127,7 +4492,7 @@ export function initCenterView(containerEl) {
         window.requestAnimationFrame(() => scrollToMarkdownHeading(opts.heading));
       }
       ensureDocTabOnMobile();
-      emitFileOpened(state.activeDoc);
+      recordOpenedNavAndEmit(state.activeDoc, opts);
       return state.activeDoc;
     } catch (err) {
       if (seq !== state.openSeq) return null;
@@ -4566,7 +4931,7 @@ export function initCenterView(containerEl) {
     insertDroppedMarkdown({ markdown, label: payload.label || '内容块' });
   });
 
-  // V5 Drag Staging Shelf: insert single or batch items into current note
+  // V5/V6 Drag Staging Shelf: insert single or batch items into current note
   store.on('shelf:insert-current', (payload = {}) => {
     if (Array.isArray(payload?.items) && payload.items.length > 0) {
       const joined = payload.items
@@ -4583,6 +4948,32 @@ export function initCenterView(containerEl) {
     const markdown = String(payload?.markdown ?? payload?.text ?? payload?.content ?? '').trim();
     if (!markdown) return;
     insertDroppedMarkdown({ markdown, label: payload?.label || '暂存内容' });
+    if (payload?.sourceShelfId && payload?.dragMode !== 'copy' && typeof consumeShelfItem === 'function') {
+      consumeShelfItem(payload.sourceShelfId);
+    }
+  });
+
+  // V6: Cut source capsule/token when dragged out into Dynamic Island shelf
+  store.on('center:cut-source-token', (payload = {}) => {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    if (payload?.sourceDocPath && !isSamePath(payload.sourceDocPath, doc.path)) return;
+    const rawTok = String(payload?.sourceRawToken || '').trim();
+    if (!rawTok) return;
+    commitActiveBlock({ reRender: false });
+    const exactBlk = Number.isFinite(payload?.sourceBlockStart)
+      ? parseMarkdownBlocks(doc.content || '').find((b) => b.startLine === payload.sourceBlockStart)
+      : null;
+    replaceOrRemoveTokenInDoc(rawTok, '', exactBlk || null);
+  });
+
+  // V6: Navigation History listeners
+  store.on('nav:go', (payload) => {
+    const dir = payload === 'forward' || payload?.dir === 'forward' || Number(payload) > 0 ? 1 : -1;
+    navigateHistory(dir);
+  });
+  store.on('nav:changed', () => {
+    syncNavButtonsUi();
   });
 
   // Center Right-Click Menu: AI Polish
@@ -4882,8 +5273,9 @@ export function initCenterView(containerEl) {
     }
 
     if (state.mdMode === 'live') {
-      const lpContainer = containerEl.querySelector('.lp-container');
-      const scrollArea = containerEl.querySelector('.md-scroll-area');
+      const mainPane = ensureMainPaneEl();
+      const lpContainer = mainPane.querySelector('.lp-container');
+      const scrollArea = mainPane.querySelector('.md-scroll-area');
       if (!lpContainer) {
         removeDropInsertLine();
         return false;
@@ -4905,16 +5297,32 @@ export function initCenterView(containerEl) {
         for (let i = 0; i < blocks.length; i += 1) {
           const blk = blocks[i];
           const r = blk.getBoundingClientRect();
+          const blkEnd = Number.parseInt(blk.dataset.mdEnd ?? blk.dataset.mdStart, 10);
+          const endLine = Number.isFinite(blkEnd) ? blkEnd : 0;
+
+          if (i === 0 && e.clientY < r.top + r.height * 0.22) {
+            chosenY = r.top - 4;
+            targetLineIdx = 0;
+            matched = true;
+            break;
+          }
+
           const midY = (r.top + r.bottom) / 2;
-          const startIdx = Number.parseInt(blk.dataset.mdStart, 10);
-          if (e.clientY < midY) {
-            if (i === 0) {
-              chosenY = r.top - 4;
-            } else {
-              const prevR = blocks[i - 1].getBoundingClientRect();
-              chosenY = (prevR.bottom + r.top) / 2;
-            }
-            targetLineIdx = Number.isFinite(startIdx) ? startIdx : 0;
+          if (e.clientY < midY && i > 0) {
+            const prevBlk = blocks[i - 1];
+            const prevR = prevBlk.getBoundingClientRect();
+            const prevEnd = Number.parseInt(prevBlk.dataset.mdEnd ?? prevBlk.dataset.mdStart, 10);
+            chosenY = (prevR.bottom + r.top) / 2;
+            targetLineIdx = Number.isFinite(prevEnd) ? prevEnd + 1 : 0;
+            matched = true;
+            break;
+          }
+
+          const nextBlk = i + 1 < blocks.length ? blocks[i + 1] : null;
+          const nextTop = nextBlk ? nextBlk.getBoundingClientRect().top : r.bottom + 12;
+          if (e.clientY <= r.bottom || (nextBlk && e.clientY < (r.bottom + nextTop) / 2)) {
+            chosenY = nextBlk ? (r.bottom + nextTop) / 2 : r.bottom + 6;
+            targetLineIdx = endLine + 1;
             matched = true;
             break;
           }
@@ -4939,7 +5347,7 @@ export function initCenterView(containerEl) {
     }
 
     if (state.mdMode === 'source') {
-      const ta = containerEl.querySelector('.md-editor:not([data-role])');
+      const ta = ensureMainPaneEl().querySelector('.md-editor:not([data-role])');
       if (!ta) {
         removeDropInsertLine();
         return false;
@@ -4981,6 +5389,67 @@ export function initCenterView(containerEl) {
     return ta.value.slice(0, caret).split('\n').length - 1;
   }
 
+  function removeSourceTokenForMove(sourceText, rawToken, sourceBlockStart, targetInsertLine) {
+    const lines = String(sourceText ?? '').replace(/\r\n/g, '\n').split('\n');
+    let searchStart = 0;
+    let searchEnd = lines.length - 1;
+    if (Number.isFinite(sourceBlockStart)) {
+      const blk = parseMarkdownBlocks(sourceText).find((b) => b.startLine === sourceBlockStart);
+      if (blk) {
+        searchStart = blk.startLine;
+        searchEnd = blk.endLine;
+      }
+    }
+
+    let foundLine = -1;
+    for (let i = searchStart; i <= searchEnd && i < lines.length; i += 1) {
+      if (lines[i].includes(rawToken)) {
+        foundLine = i;
+        break;
+      }
+    }
+    if (foundLine < 0) {
+      foundLine = lines.findIndex((ln) => ln.includes(rawToken));
+    }
+    if (foundLine < 0) return null;
+
+    const lineStr = lines[foundLine];
+    const tokIdx = lineStr.indexOf(rawToken);
+    const cleanedLine = `${lineStr.slice(0, tokIdx)}${lineStr.slice(tokIdx + rawToken.length)}`
+      .replace(/[ \t]{2,}/g, ' ')
+      .trimEnd();
+
+    let nextTarget = targetInsertLine;
+    if (!cleanedLine.trim()) {
+      let delStart = foundLine;
+      let delCount = 1;
+      if (
+        delStart > 0 &&
+        lines[delStart - 1]?.trim() === '' &&
+        delStart + 1 < lines.length &&
+        lines[delStart + 1]?.trim() === ''
+      ) {
+        delCount += 1;
+      } else if (delStart === 0 && delStart + 1 < lines.length && lines[delStart + 1]?.trim() === '') {
+        delCount += 1;
+      }
+      lines.splice(delStart, delCount);
+      if (nextTarget > delStart) {
+        nextTarget -= Math.min(delCount, nextTarget - delStart);
+      }
+    } else {
+      lines[foundLine] = cleanedLine;
+    }
+
+    const rawRemaining = lines.join('\n');
+    const leadingBlankMatch = rawRemaining.match(/^\n+/);
+    const strippedLeading = leadingBlankMatch ? leadingBlankMatch[0].length : 0;
+    const remaining = rawRemaining.slice(strippedLeading);
+    const remLines = remaining ? remaining.split('\n') : [];
+    const adjustedTarget = Math.max(0, Math.min(remLines.length, nextTarget - strippedLeading));
+    return { remaining, adjustedTarget };
+  }
+
   function insertDroppedMarkdown(payload, { lineIdx = null, dropEvent = null } = {}) {
     const markdown = String(payload?.markdown ?? payload?.text ?? payload?.content ?? '').trim();
     if (!markdown) return;
@@ -4996,10 +5465,26 @@ export function initCenterView(containerEl) {
       commitActiveBlock({ reRender: false });
       pushUndoSnapshot(doc.content, { immediate: true });
 
+      const isSameDocMove = Boolean(
+        payload?.dragMode === 'move' &&
+        !(dropEvent?.ctrlKey || dropEvent?.metaKey) &&
+        payload?.sourceRawToken &&
+        payload?.sourceDocPath &&
+        isSamePath(payload.sourceDocPath, doc.path)
+      );
+
       if (state.mdMode === 'source') {
-        const ta = containerEl.querySelector('.md-editor:not([data-role])');
-        const targetLine = Number.isFinite(lineIdx) ? lineIdx : resolveSourceDropLine(ta, dropEvent);
-        const nextVal = insertMarkdownWithPadding(doc.content || '', targetLine, markdown);
+        const ta = ensureMainPaneEl().querySelector('.md-editor:not([data-role])');
+        let baseContent = doc.content || '';
+        let targetLine = Number.isFinite(lineIdx) ? lineIdx : resolveSourceDropLine(ta, dropEvent);
+        if (isSameDocMove) {
+          const moved = removeSourceTokenForMove(baseContent, payload.sourceRawToken, payload.sourceBlockStart, targetLine);
+          if (moved) {
+            baseContent = moved.remaining;
+            targetLine = moved.adjustedTarget;
+          }
+        }
+        const nextVal = insertMarkdownWithPadding(baseContent, targetLine, markdown);
         doc.content = nextVal;
         state.dirty = true;
         store.state.activeDocumentText = nextVal;
@@ -5008,27 +5493,38 @@ export function initCenterView(containerEl) {
           ta.focus();
         }
         updateMdDirtyIndicators();
-        showToast(`已精准拖入「${label}」（Ctrl+Z 可撤回）`, 'success');
+        showToast(isSameDocMove ? `已移动「${label}」（Ctrl+Z 可撤回）` : `已精准拖入「${label}」（Ctrl+Z 可撤回）`, 'success');
         return;
       }
 
-      const lines = getMdLines();
-      const targetLine = Number.isFinite(lineIdx) ? lineIdx : lines.length;
-      const clampedLine = Math.max(0, Math.min(lines.length, targetLine));
-      const beforeSlice = lines.slice(0, clampedLine).join('\n').replace(/\n+$/g, '');
+      let baseContent = doc.content || '';
+      const origLines = getMdLines();
+      let clampedLine = Math.max(0, Math.min(origLines.length, Number.isFinite(lineIdx) ? lineIdx : origLines.length));
+
+      if (isSameDocMove) {
+        const moved = removeSourceTokenForMove(baseContent, payload.sourceRawToken, payload.sourceBlockStart, clampedLine);
+        if (moved) {
+          baseContent = moved.remaining;
+          clampedLine = moved.adjustedTarget;
+        }
+      }
+
+      const baseLines = baseContent ? baseContent.replace(/\r\n/g, '\n').split('\n') : [];
+      const beforeSlice = baseLines.slice(0, clampedLine).join('\n').replace(/\n+$/g, '');
       const actualStartLine = beforeSlice.trim() ? beforeSlice.split('\n').length + 1 : 0;
       const firstLinePrefix = markdown.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 16);
-      doc.content = insertMarkdownWithPadding(doc.content || '', clampedLine, markdown);
+      doc.content = insertMarkdownWithPadding(baseContent, clampedLine, markdown);
       state.dirty = true;
       state.editingBlockIdx = null;
       state.editingBlockRange = null;
+      state.editingDraftInsert = null;
       state.justDroppedTarget = { lineIdx: clampedLine, actualStartLine, prefix: firstLinePrefix };
       store.state.activeDocumentText = doc.content;
       if (state.mdMode === 'mindmap') {
         state.mdMode = 'live';
       }
       renderMarkdownMode();
-      showToast(`已精准拖入「${label}」（Ctrl+Z 可撤回）`, 'success');
+      showToast(isSameDocMove ? `已移动「${label}」（Ctrl+Z 可撤回）` : `已精准拖入「${label}」（Ctrl+Z 可撤回）`, 'success');
       return;
     }
 
@@ -5050,6 +5546,7 @@ export function initCenterView(containerEl) {
   }
 
   containerEl.addEventListener('dragenter', (e) => {
+    if (e.target.closest('.center-split-pane')) return;
     if (!isAcceptableBlockDrag(e)) return;
     e.preventDefault();
     dragDepth += 1;
@@ -5059,10 +5556,11 @@ export function initCenterView(containerEl) {
   });
 
   containerEl.addEventListener('dragover', (e) => {
+    if (e.target.closest('.center-split-pane')) return;
     if (!isAcceptableBlockDrag(e)) return;
     e.preventDefault();
     if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = 'copy';
+      e.dataTransfer.dropEffect = e.ctrlKey || e.metaKey ? 'copy' : 'move';
     }
     if (updatePrecisionDropLine(e)) {
       showDropOverlay(false);
@@ -5074,7 +5572,14 @@ export function initCenterView(containerEl) {
   containerEl.addEventListener('dragleave', (e) => {
     if (!isAcceptableBlockDrag(e)) return;
     dragDepth = Math.max(0, dragDepth - 1);
-    if (dragDepth === 0 || !containerEl.contains(e.relatedTarget)) {
+    const mainRect = ensureMainPaneEl().getBoundingClientRect();
+    const isOutsideBounds =
+      e.clientX <= mainRect.left ||
+      e.clientX >= mainRect.right ||
+      e.clientY <= mainRect.top ||
+      e.clientY >= mainRect.bottom;
+    const relOutside = e.relatedTarget !== null && !ensureMainPaneEl().contains(e.relatedTarget);
+    if (dragDepth <= 0 && (isOutsideBounds || relOutside)) {
       dragDepth = 0;
       showDropOverlay(false);
       removeDropInsertLine();
@@ -5082,6 +5587,7 @@ export function initCenterView(containerEl) {
   });
 
   containerEl.addEventListener('drop', (e) => {
+    if (e.target.closest('.center-split-pane')) return;
     const acceptable = isAcceptableBlockDrag(e);
     const savedLineIdx = dropTargetLineIdx;
     dragDepth = 0;
@@ -5092,7 +5598,13 @@ export function initCenterView(containerEl) {
     const payload = readDragPayload(e);
     clearDragPayload();
     if (!payload || payload.type === 'module-reorder') return;
+    if (e.ctrlKey || e.metaKey) {
+      payload.dragMode = 'copy';
+    }
     insertDroppedMarkdown(payload, { lineIdx: savedLineIdx, dropEvent: e });
+    if (payload.sourceShelfId && !e.ctrlKey && !e.metaKey && typeof consumeShelfItem === 'function') {
+      consumeShelfItem(payload.sourceShelfId);
+    }
   });
 
   function buildRawTokenFromEl(el) {
@@ -5119,6 +5631,7 @@ export function initCenterView(containerEl) {
   }
 
   containerEl.addEventListener('dragstart', (e) => {
+    hideHoverPeekCard();
     if (e.target.closest('.media-resize-handle, .is-resizing')) {
       e.preventDefault();
       return;
@@ -5143,7 +5656,9 @@ export function initCenterView(containerEl) {
         label,
         markdown: rawToken,
         path: filePath,
+        dragMode: e.ctrlKey || e.metaKey ? 'copy' : 'move',
         sourceDocPath: state.activeDoc?.path || '',
+        sourceRawToken: rawToken,
         ...(Number.isFinite(sourceBlockStart) ? { sourceBlockStart } : {}),
       });
       store.emit('drag:active', true);
@@ -5174,16 +5689,66 @@ export function initCenterView(containerEl) {
   });
 
   // =========================================================================
-  // DOM Event Delegation on containerEl & Global Shortcuts / Window Blur
+  // DOM Event Delegation, WYSIWYG Sync, Format Toolbar & Slash Commands
   // =========================================================================
-  function syncBlockEditorInput(ta) {
+  function syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed = false } = {}) {
     const doc = state.activeDoc;
-    if (!doc || !ta) return;
-    const blockEl = ta.closest('.lp-block');
+    if (!doc || !editorEl) return;
+    const blockEl = editorEl.closest('.lp-block');
     if (!blockEl) return;
 
     const prevContent = String(doc.content ?? '');
-    pushUndoSnapshot(prevContent, { immediate: false });
+    if (!immediateUndoAlreadyPushed) {
+      pushUndoSnapshot(prevContent, { immediate: false });
+    }
+
+    const mdText = wysiwygElementToMarkdown(editorEl);
+    const isDraftInsert = Boolean(state.editingDraftInsert);
+
+    if (isDraftInsert) {
+      if (!mdText.trim()) {
+        return;
+      }
+      const insertAt = state.editingDraftInsert.startLine;
+      state.editingDraftInsert = null;
+      state.editingDraftNewBlock = false;
+      blockEl.removeAttribute('data-draft-block');
+
+      const nextDoc = insertMarkdownWithPadding(prevContent, insertAt, mdText);
+      const blocksAfter = parseMarkdownBlocks(nextDoc);
+      const insertedBlk =
+        blocksAfter.find((b) => b.startLine >= insertAt) ||
+        blocksAfter[blocksAfter.length - 1] ||
+        { startLine: insertAt, endLine: insertAt };
+      state.editingBlockIdx = blocksAfter.indexOf(insertedBlk);
+      state.editingBlockRange = { startLine: insertedBlk.startLine, endLine: insertedBlk.endLine };
+      blockEl.dataset.blockIdx = String(state.editingBlockIdx);
+      blockEl.dataset.mdStart = String(insertedBlk.startLine);
+      blockEl.dataset.mdEnd = String(insertedBlk.endLine);
+      editorEl.dataset.blockIdx = String(state.editingBlockIdx);
+
+      const oldLinesCount = prevContent.replace(/\r\n/g, '\n').split('\n').length;
+      const newLinesCount = nextDoc.replace(/\r\n/g, '\n').split('\n').length;
+      const delta = newLinesCount - oldLinesCount;
+      if (delta !== 0) {
+        let sib = blockEl.nextElementSibling;
+        while (sib) {
+          if (sib.classList.contains('lp-block') && sib.dataset.mdStart !== undefined) {
+            const s = Number.parseInt(sib.dataset.mdStart, 10);
+            const e = Number.parseInt(sib.dataset.mdEnd ?? sib.dataset.mdStart, 10);
+            if (Number.isFinite(s)) sib.dataset.mdStart = String(s + delta);
+            if (Number.isFinite(e)) sib.dataset.mdEnd = String(e + delta);
+          }
+          sib = sib.nextElementSibling;
+        }
+      }
+
+      doc.content = nextDoc;
+      state.dirty = true;
+      store.state.activeDocumentText = doc.content;
+      updateMdDirtyIndicators();
+      return;
+    }
 
     const range = state.editingBlockRange || {
       startLine: Number.parseInt(blockEl.dataset.mdStart, 10) || 0,
@@ -5191,7 +5756,7 @@ export function initCenterView(containerEl) {
     };
 
     const lines = prevContent.replace(/\r\n/g, '\n').split('\n');
-    const editedLines = ta.value.replace(/\r\n/g, '\n').split('\n');
+    const editedLines = mdText === '' ? [''] : mdText.split('\n');
     const oldCount = Math.max(1, range.endLine - range.startLine + 1);
     const delta = editedLines.length - oldCount;
 
@@ -5213,7 +5778,7 @@ export function initCenterView(containerEl) {
       }
     }
 
-    if (ta.value.trim()) {
+    if (mdText.trim()) {
       state.editingDraftNewBlock = false;
       blockEl.removeAttribute('data-draft-block');
     }
@@ -5221,16 +5786,86 @@ export function initCenterView(containerEl) {
     doc.content = lines.join('\n');
     state.dirty = true;
     store.state.activeDocumentText = doc.content;
-    syncBlockEditorHeight(ta);
     updateMdDirtyIndicators();
   }
 
-  function applyEditorInlineShortcut(ta, kind) {
+  function applySourceFormatAction(ta, kind) {
     const doc = state.activeDoc;
     if (!doc || !ta) return;
     const start = ta.selectionStart ?? 0;
     const end = ta.selectionEnd ?? start;
     const val = ta.value;
+
+    if (kind === 'copy') {
+      const slice = start < end ? val.slice(start, end) : (() => {
+        const ls = val.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+        const le = val.indexOf('\n', end);
+        return val.slice(ls, le === -1 ? val.length : le);
+      })();
+      if (slice) {
+        internalClipboard = slice;
+        copyInternal(slice, '已复制');
+      }
+      return;
+    }
+
+    if (kind === 'cut') {
+      pushUndoSnapshot(doc.content, { immediate: true });
+      let cStart = start;
+      let cEnd = end;
+      if (cStart === cEnd) {
+        cStart = val.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+        const le = val.indexOf('\n', end);
+        cEnd = le === -1 ? val.length : Math.min(val.length, le + 1);
+      }
+      const cutStr = val.slice(cStart, cEnd);
+      if (cutStr) {
+        internalClipboard = cutStr;
+        copyInternal(cutStr, '已剪切');
+        const nextVal = `${val.slice(0, cStart)}${val.slice(cEnd)}`;
+        ta.value = nextVal;
+        ta.setSelectionRange(cStart, cStart);
+        doc.content = nextVal;
+        state.dirty = true;
+        store.state.activeDocumentText = nextVal;
+        updateMdDirtyIndicators();
+      }
+      return;
+    }
+
+    if (kind === 'paste') {
+      navigator.clipboard?.readText?.().then((clip) => {
+        const txt = clip || internalClipboard;
+        if (!txt) {
+          showToast('剪贴板为空', 'info', { duration: 1500 });
+          return;
+        }
+        pushUndoSnapshot(doc.content, { immediate: true });
+        const curS = ta.selectionStart ?? start;
+        const curE = ta.selectionEnd ?? curS;
+        const nextVal = `${ta.value.slice(0, curS)}${txt}${ta.value.slice(curE)}`;
+        ta.value = nextVal;
+        ta.setSelectionRange(curS + txt.length, curS + txt.length);
+        doc.content = nextVal;
+        state.dirty = true;
+        store.state.activeDocumentText = nextVal;
+        updateMdDirtyIndicators();
+      }).catch(() => {
+        if (internalClipboard) {
+          pushUndoSnapshot(doc.content, { immediate: true });
+          const nextVal = `${val.slice(0, start)}${internalClipboard}${val.slice(end)}`;
+          ta.value = nextVal;
+          ta.setSelectionRange(start + internalClipboard.length, start + internalClipboard.length);
+          doc.content = nextVal;
+          state.dirty = true;
+          store.state.activeDocumentText = nextVal;
+          updateMdDirtyIndicators();
+        } else {
+          showToast('请使用 Ctrl+V 粘贴', 'info', { duration: 1600 });
+        }
+      });
+      return;
+    }
 
     pushUndoSnapshot(doc.content, { immediate: true });
 
@@ -5238,40 +5873,66 @@ export function initCenterView(containerEl) {
     let nextSelStart = start;
     let nextSelEnd = end;
 
-    if (kind === 'bold' || kind === 'italic') {
-      const marker = kind === 'bold' ? '**' : '*';
-      const mLen = marker.length;
+    const inlineWraps = {
+      bold: ['**', '**'],
+      italic: ['*', '*'],
+      strike: ['~~', '~~'],
+      mark: ['<mark>', '</mark>'],
+      code: ['`', '`'],
+    };
+
+    if (inlineWraps[kind]) {
+      const [pre, post] = inlineWraps[kind];
       const selected = val.slice(start, end);
-      const before = val.slice(Math.max(0, start - mLen), start);
-      const after = val.slice(end, end + mLen);
+      const before = val.slice(Math.max(0, start - pre.length), start);
+      const after = val.slice(end, end + post.length);
       const canUnwrap =
-        before === marker &&
-        after === marker &&
-        (kind === 'bold' || (val.slice(Math.max(0, start - 2), start) !== '**' && val.slice(end, end + 2) !== '**'));
+        before === pre &&
+        after === post &&
+        (kind !== 'italic' || (val.slice(Math.max(0, start - 2), start) !== '**' && val.slice(end, end + 2) !== '**'));
 
       if (canUnwrap) {
-        nextVal = `${val.slice(0, start - mLen)}${selected}${val.slice(end + mLen)}`;
-        nextSelStart = start - mLen;
-        nextSelEnd = end - mLen;
+        nextVal = `${val.slice(0, start - pre.length)}${selected}${val.slice(end + post.length)}`;
+        nextSelStart = start - pre.length;
+        nextSelEnd = end - pre.length;
       } else if (selected) {
-        nextVal = `${val.slice(0, start)}${marker}${selected}${marker}${val.slice(end)}`;
-        nextSelStart = start + mLen;
-        nextSelEnd = end + mLen;
+        nextVal = `${val.slice(0, start)}${pre}${selected}${post}${val.slice(end)}`;
+        nextSelStart = start + pre.length;
+        nextSelEnd = end + pre.length;
       } else {
-        nextVal = `${val.slice(0, start)}${marker}${marker}${val.slice(end)}`;
-        nextSelStart = start + mLen;
-        nextSelEnd = start + mLen;
+        nextVal = `${val.slice(0, start)}${pre}${post}${val.slice(end)}`;
+        nextSelStart = start + pre.length;
+        nextSelEnd = start + pre.length;
       }
-    } else if (kind === 'quote') {
+    } else if (kind === 'h1' || kind === 'h2' || kind === 'h3') {
+      const prefix = kind === 'h1' ? '# ' : kind === 'h2' ? '## ' : '### ';
       const lineStart = val.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
       const lineEndIdx = val.indexOf('\n', end);
       const lineEnd = lineEndIdx === -1 ? val.length : lineEndIdx;
-      const blockSlice = val.slice(lineStart, lineEnd);
-      const segs = blockSlice.split('\n');
-      const allQuoted = segs.every((ln) => /^\s*>/.test(ln));
-      const toggled = allQuoted
-        ? segs.map((ln) => ln.replace(/^\s*>\s?/, ''))
-        : segs.map((ln) => `> ${ln}`);
+      const lineStr = val.slice(lineStart, lineEnd);
+      const stripped = lineStr.replace(/^\s{0,3}#{1,6}\s+/, '');
+      const toggled = lineStr.startsWith(prefix) ? stripped : `${prefix}${stripped}`;
+      nextVal = `${val.slice(0, lineStart)}${toggled}${val.slice(lineEnd)}`;
+      nextSelStart = lineStart + toggled.length;
+      nextSelEnd = nextSelStart;
+    } else if (kind === 'quote' || kind === 'ul' || kind === 'todo') {
+      const lineStart = val.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+      const lineEndIdx = val.indexOf('\n', end);
+      const lineEnd = lineEndIdx === -1 ? val.length : lineEndIdx;
+      const segs = val.slice(lineStart, lineEnd).split('\n');
+      let toggled;
+      if (kind === 'quote') {
+        const allQ = segs.every((ln) => /^\s*>/.test(ln));
+        toggled = allQ ? segs.map((ln) => ln.replace(/^\s*>\s?/, '')) : segs.map((ln) => `> ${ln}`);
+      } else if (kind === 'ul') {
+        const allU = segs.every((ln) => /^\s*[-*+]\s+/.test(ln));
+        toggled = allU ? segs.map((ln) => ln.replace(/^\s*[-*+]\s+/, '')) : segs.map((ln) => `- ${ln}`);
+      } else {
+        const allT = segs.every((ln) => /^\s*[-*+]\s+\[[ xX]\]\s+/.test(ln));
+        toggled = allT
+          ? segs.map((ln) => ln.replace(/^\s*[-*+]\s+\[[ xX]\]\s+/, ''))
+          : segs.map((ln) => `- [ ] ${ln.replace(/^\s*[-*+]\s+/, '')}`);
+      }
       const joined = toggled.join('\n');
       nextVal = `${val.slice(0, lineStart)}${joined}${val.slice(lineEnd)}`;
       nextSelStart = lineStart;
@@ -5280,23 +5941,211 @@ export function initCenterView(containerEl) {
 
     ta.value = nextVal;
     ta.setSelectionRange(nextSelStart, nextSelEnd);
+    doc.content = nextVal;
+    state.dirty = true;
+    store.state.activeDocumentText = nextVal;
+    updateMdDirtyIndicators();
+  }
 
-    if (ta.classList.contains('lp-block-editor')) {
-      syncBlockEditorInput(ta);
-    } else {
-      doc.content = nextVal;
-      state.dirty = true;
-      store.state.activeDocumentText = nextVal;
-      updateMdDirtyIndicators();
+  function applyWysiwygBarAction(act) {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+
+    if (state.mdMode === 'source') {
+      const ta = ensureMainPaneEl().querySelector('.md-editor:not([data-role])');
+      if (ta) {
+        ta.focus();
+        applySourceFormatAction(ta, act);
+      }
+      return;
+    }
+
+    if (state.mdMode !== 'live') return;
+
+    let editorEl = containerEl.querySelector('.lp-block-wysiwyg');
+    if (!editorEl) {
+      // Check if user has a selection inside a non-editing block, else activate block 0 or create draft
+      const sel = window.getSelection();
+      const selNode = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startContainer : null;
+      const selEl = selNode?.nodeType === 1 ? selNode : selNode?.parentElement;
+      const targetBlk = selEl?.closest('.lp-block[data-block-idx]') || containerEl.querySelector('.lp-block[data-block-idx]');
+      if (targetBlk) {
+        const bIdx = Number.parseInt(targetBlk.dataset.blockIdx, 10);
+        if (Number.isFinite(bIdx)) {
+          state.editingBlockIdx = bIdx;
+          state.editingDraftNewBlock = false;
+          state.editingDraftInsert = null;
+          renderMarkdownMode();
+          editorEl = containerEl.querySelector('.lp-block-wysiwyg');
+          if (editorEl) {
+            editorEl.focus({ preventScroll: true });
+            placeCaretInsideWysiwyg(editorEl, 'end');
+          }
+        }
+      } else {
+        appendNewBlockAndFocus();
+        window.requestAnimationFrame(() => {
+          const ed = containerEl.querySelector('.lp-block-wysiwyg');
+          if (ed && act !== 'cut' && act !== 'copy' && act !== 'paste') {
+            execWysiwygFormat(act, ed);
+            syncWysiwygBlockInput(ed);
+          }
+        });
+        return;
+      }
+    }
+
+    if (!editorEl) return;
+
+    if (act === 'copy') {
+      const sel = window.getSelection();
+      const selStr = sel && !sel.isCollapsed ? sel.toString() : '';
+      const textToCopy = selStr || wysiwygElementToMarkdown(editorEl);
+      if (textToCopy) {
+        internalClipboard = textToCopy;
+        copyInternal(textToCopy, '已复制');
+      }
+      return;
+    }
+
+    if (act === 'cut') {
+      const sel = window.getSelection();
+      const hasRangeSel = Boolean(sel && !sel.isCollapsed && editorEl.contains(sel.getRangeAt(0).commonAncestorContainer));
+      if (hasRangeSel) {
+        const selStr = sel.toString();
+        internalClipboard = selStr;
+        copyInternal(selStr, '已剪切');
+        pushUndoSnapshot(doc.content, { immediate: true });
+        document.execCommand?.('delete', false, null);
+        syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed: true });
+      } else {
+        const blkMd = wysiwygElementToMarkdown(editorEl);
+        if (blkMd) {
+          internalClipboard = blkMd;
+          copyInternal(blkMd, '已剪切当前段落');
+        }
+        deleteActiveEmptyOrSelectedBlock(editorEl);
+      }
+      return;
+    }
+
+    if (act === 'paste') {
+      const insertClipText = (clipText) => {
+        if (!clipText) {
+          showToast('剪贴板为空', 'info', { duration: 1500 });
+          return;
+        }
+        pushUndoSnapshot(doc.content, { immediate: true });
+        editorEl.focus({ preventScroll: true });
+        if (typeof document.execCommand === 'function') {
+          document.execCommand('insertText', false, clipText);
+        } else {
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount > 0) {
+            const range = sel.getRangeAt(0);
+            range.deleteContents();
+            range.insertNode(document.createTextNode(clipText));
+            range.collapse(false);
+          }
+        }
+        syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed: true });
+      };
+
+      if (navigator.clipboard?.readText) {
+        navigator.clipboard.readText().then((clip) => {
+          insertClipText(clip || internalClipboard);
+        }).catch(() => {
+          if (internalClipboard) insertClipText(internalClipboard);
+          else showToast('请使用 Ctrl+V 粘贴', 'info', { duration: 1600 });
+        });
+      } else if (internalClipboard) {
+        insertClipText(internalClipboard);
+      } else {
+        showToast('请使用 Ctrl+V 粘贴', 'info', { duration: 1600 });
+      }
+      return;
+    }
+
+    pushUndoSnapshot(doc.content, { immediate: true });
+    const changed = execWysiwygFormat(act, editorEl);
+    if (changed) {
+      syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed: true });
     }
   }
+
+  function deleteActiveEmptyOrSelectedBlock(editorEl) {
+    const doc = state.activeDoc;
+    if (!doc) return;
+    const prevIdx = state.editingDraftInsert
+      ? state.editingDraftInsert.afterBlockIdx
+      : (Number.isFinite(state.editingBlockIdx) ? state.editingBlockIdx - 1 : -1);
+
+    if (state.editingDraftInsert || state.editingDraftNewBlock) {
+      cleanupEmptyTrailingDraftIfNeeded();
+      state.editingBlockIdx = null;
+      state.editingBlockRange = null;
+      if (prevIdx >= 0) {
+        activateBlockByIndex(prevIdx, 'end');
+      } else {
+        renderMarkdownMode();
+      }
+      return;
+    }
+
+    if (state.editingBlockRange) {
+      pushUndoSnapshot(doc.content, { immediate: true });
+      const { startLine, endLine } = state.editingBlockRange;
+      const lines = getMdLines();
+      let delStart = Math.max(0, startLine);
+      let delCount = Math.max(1, endLine - delStart + 1);
+      if (delStart > 0 && lines[delStart - 1]?.trim() === '' && delStart + delCount < lines.length && lines[delStart + delCount]?.trim() === '') {
+        delCount += 1;
+      } else if (delStart === 0 && delStart + delCount < lines.length && lines[delStart + delCount]?.trim() === '') {
+        delCount += 1;
+      }
+      lines.splice(delStart, delCount);
+      doc.content = lines.join('\n').replace(/^\n+/, '');
+      state.dirty = true;
+      store.state.activeDocumentText = doc.content;
+      state.editingBlockIdx = null;
+      state.editingBlockRange = null;
+      if (prevIdx >= 0) {
+        activateBlockByIndex(prevIdx, 'end');
+      } else {
+        renderMarkdownMode();
+      }
+    }
+  }
+
+  containerEl.addEventListener('paste', (e) => {
+    const editorEl = e.target.closest?.('.lp-block-wysiwyg');
+    if (!editorEl) return;
+    const plain = e.clipboardData?.getData('text/plain');
+    if (typeof plain === 'string') {
+      e.preventDefault();
+      if (typeof document.execCommand === 'function') {
+        document.execCommand('insertText', false, plain);
+      } else {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          const range = sel.getRangeAt(0);
+          range.deleteContents();
+          range.insertNode(document.createTextNode(plain));
+          range.collapse(false);
+        }
+      }
+      syncWysiwygBlockInput(editorEl);
+    }
+  });
 
   containerEl.addEventListener('input', (e) => {
     const target = e.target;
 
-    // Live Preview inline block editor
-    if (target.matches('.lp-block-editor')) {
-      syncBlockEditorInput(target);
+    // Live Preview WYSIWYG inline block editor
+    const wysiwygEl = target.closest?.('.lp-block-wysiwyg') || (target.matches?.('.lp-block-wysiwyg') ? target : null);
+    if (wysiwygEl) {
+      syncWysiwygBlockInput(wysiwygEl);
+      maybeTriggerSlashMenuFromWysiwyg(wysiwygEl);
       return;
     }
 
@@ -5308,6 +6157,7 @@ export function initCenterView(containerEl) {
       state.dirty = true;
       store.state.activeDocumentText = target.value;
       updateMdDirtyIndicators();
+      maybeTriggerSlashMenuFromSource(target);
       return;
     }
 
@@ -5351,6 +6201,34 @@ export function initCenterView(containerEl) {
     const fontFamilySelect = e.target.closest('select[data-action="font-family"]');
     if (fontFamilySelect) {
       updateTypographyAndPersist(store.state.docFontSize, fontFamilySelect.value);
+      return;
+    }
+
+    // Task checkbox toggle inside .lp-block-view (editing or non-editing)
+    if (e.target.matches('.lp-block-view input[type="checkbox"]')) {
+      const doc = state.activeDoc;
+      if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+      const wysiwygEl = e.target.closest('.lp-block-wysiwyg');
+      if (wysiwygEl) {
+        syncWysiwygBlockInput(wysiwygEl);
+        return;
+      }
+      const viewEl = e.target.closest('.lp-block-view');
+      const blockEl = e.target.closest('.lp-block[data-md-start]');
+      if (!viewEl || !blockEl) return;
+      const startLine = Number.parseInt(blockEl.dataset.mdStart, 10);
+      const endLine = Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10);
+      if (!Number.isFinite(startLine)) return;
+      const nextBlockMd = wysiwygElementToMarkdown(viewEl);
+      const lines = getMdLines();
+      const oldCount = Math.max(1, endLine - startLine + 1);
+      const newLines = nextBlockMd.split('\n');
+      pushUndoSnapshot(doc.content, { immediate: true });
+      lines.splice(startLine, oldCount, ...newLines);
+      doc.content = lines.join('\n');
+      state.dirty = true;
+      store.state.activeDocumentText = doc.content;
+      updateMdDirtyIndicators();
     }
   });
 
@@ -5375,7 +6253,7 @@ export function initCenterView(containerEl) {
       sess.blockEl.classList.remove('is-hold-arming', 'is-dragging-source');
     }
     if (sess.ghostEl) sess.ghostEl.remove();
-    document.querySelectorAll('#drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
+    document.querySelectorAll('#island-shelf-drawer.is-drag-over, #drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
       el.classList.remove('is-drag-over');
     });
     removeDropInsertLine();
@@ -5390,12 +6268,45 @@ export function initCenterView(containerEl) {
     }
   }
 
+  function cutBlockRangeFromDoc(startLine, endLine) {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    pushUndoSnapshot(doc.content, { immediate: true });
+    const lines = String(doc.content ?? '').replace(/\r\n/g, '\n').split('\n');
+    const delStart = Math.max(0, startLine);
+    let delCount = Math.max(1, endLine - delStart + 1);
+    if (
+      delStart > 0 &&
+      lines[delStart - 1]?.trim() === '' &&
+      delStart + delCount < lines.length &&
+      lines[delStart + delCount]?.trim() === ''
+    ) {
+      delCount += 1;
+    } else if (delStart === 0 && delStart + delCount < lines.length && lines[delStart + delCount]?.trim() === '') {
+      delCount += 1;
+    }
+    lines.splice(delStart, delCount);
+    let nextContent = lines.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
+    if (nextContent.trim() && !nextContent.endsWith('\n')) {
+      nextContent += '\n';
+    } else if (!nextContent.trim()) {
+      nextContent = '';
+    }
+    doc.content = nextContent;
+    state.dirty = true;
+    state.editingBlockIdx = null;
+    state.editingBlockRange = null;
+    state.editingDraftInsert = null;
+    store.state.activeDocumentText = nextContent;
+    renderMarkdownMode();
+  }
+
   function reorderLiveBlock(startLine, endLine, rawBlock, targetInsertLine) {
     const doc = state.activeDoc;
     if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
     pushUndoSnapshot(doc.content, { immediate: true });
     const lines = String(doc.content ?? '').replace(/\r\n/g, '\n').split('\n');
-    let delStart = Math.max(0, startLine);
+    const delStart = Math.max(0, startLine);
     let delCount = Math.max(1, endLine - delStart + 1);
 
     if (
@@ -5415,9 +6326,13 @@ export function initCenterView(containerEl) {
     if (adjustedTarget > delStart) {
       adjustedTarget -= Math.min(delCount, adjustedTarget - delStart);
     }
-    const remaining = lines.join('\n').replace(/^\n+/, '');
+
+    const rawRemaining = lines.join('\n');
+    const leadingBlankMatch = rawRemaining.match(/^\n+/);
+    const strippedLeadingCount = leadingBlankMatch ? leadingBlankMatch[0].length : 0;
+    const remaining = rawRemaining.slice(strippedLeadingCount);
     const remLines = remaining ? remaining.split('\n') : [];
-    const clampedTarget = Math.max(0, Math.min(remLines.length, adjustedTarget));
+    const clampedTarget = Math.max(0, Math.min(remLines.length, adjustedTarget - strippedLeadingCount));
     const beforeSlice = remLines.slice(0, clampedTarget).join('\n').replace(/\n+$/g, '');
     const actualStartLine = beforeSlice.trim() ? beforeSlice.split('\n').length + 1 : 0;
     const firstLinePrefix = rawBlock.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 16);
@@ -5426,13 +6341,14 @@ export function initCenterView(containerEl) {
     state.dirty = true;
     state.editingBlockIdx = null;
     state.editingBlockRange = null;
+    state.editingDraftInsert = null;
     state.justDroppedTarget = { lineIdx: clampedTarget, actualStartLine, prefix: firstLinePrefix };
     store.state.activeDocumentText = doc.content;
     renderMarkdownMode();
     showToast('已调整段落顺序（Ctrl+Z 可撤回）', 'success');
   }
 
-  // V4 #6: Drag Resize Handle (.media-resize-handle) & V5 1s Long-Press Block Drag
+  // V4 #6: Drag Resize Handle (.media-resize-handle) & V6 0.5s Long-Press Block Drag
   containerEl.addEventListener('pointerdown', (e) => {
     const handle = e.target.closest('.media-resize-handle');
     if (handle) {
@@ -5470,7 +6386,7 @@ export function initCenterView(containerEl) {
       return;
     }
 
-    // V5 1-Second Long-Press Block Dragging (Pointer-Hold Engine)
+    // V6 0.5-Second Long-Press Block Dragging (Pointer-Hold Engine)
     if (e.button !== 0) return;
     if (!state.activeDoc || (state.activeDoc.type !== 'markdown' && state.activeDoc.type !== 'text')) return;
     if (state.mdMode !== 'live') return;
@@ -5534,12 +6450,12 @@ export function initCenterView(containerEl) {
         sess.ghostEl.style.transform = `translate3d(${Math.round(ev.clientX + 14)}px, ${Math.round(ev.clientY + 14)}px, 0)`;
       }
 
-      document.querySelectorAll('#drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
+      document.querySelectorAll('#island-shelf-drawer.is-drag-over, #drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
         el.classList.remove('is-drag-over');
       });
 
       const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
-      const shelfEl = hitEl?.closest('#drag-shelf, [data-drop-zone="drag-shelf"]');
+      const shelfEl = hitEl?.closest('#island-shelf-drawer, #drag-shelf, [data-drop-zone="drag-shelf"], #dynamic-island');
       const rightEl = hitEl?.closest('#right-panel, [data-drop-zone="right-ai"]');
       if (shelfEl) {
         shelfEl.classList.add('is-drag-over');
@@ -5547,7 +6463,7 @@ export function initCenterView(containerEl) {
       } else if (rightEl) {
         rightEl.classList.add('is-drag-over');
         removeDropInsertLine();
-      } else if (containerEl.contains(hitEl) && state.mdMode === 'live') {
+      } else if (ensureMainPaneEl().contains(hitEl) && state.mdMode === 'live') {
         updatePrecisionDropLine(ev);
       } else {
         removeDropInsertLine();
@@ -5563,21 +6479,31 @@ export function initCenterView(containerEl) {
       const savedLineIdx = dropTargetLineIdx;
       const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
       const payload = sess.payload;
+      const isCopyDrag = Boolean(ev.ctrlKey || ev.metaKey);
       cancelActiveHoldSession();
       window.setTimeout(() => {
         suppressNextBlockClick = false;
       }, 120);
 
-      if (hitEl?.closest('#drag-shelf, [data-drop-zone="drag-shelf"]')) {
-        store.addToShelf(payload);
-        showToast('已放入拖拽暂存栏', 'success');
+      if (hitEl?.closest('#island-shelf-drawer, #drag-shelf, [data-drop-zone="drag-shelf"], #dynamic-island')) {
+        if (typeof addToShelf === 'function') {
+          addToShelf({ ...payload, dragMode: isCopyDrag ? 'copy' : 'move' });
+        } else {
+          store.addToShelf?.(payload);
+        }
+        if (!isCopyDrag) {
+          cutBlockRangeFromDoc(startLine, endLine);
+          showToast('已剪切至灵动岛暂存栏（按住 Ctrl 拖为复制）', 'success');
+        } else {
+          showToast('已复制至灵动岛暂存栏', 'success');
+        }
         return;
       }
       if (hitEl?.closest('#right-panel, [data-drop-zone="right-ai"]')) {
         store.emit('right:drop-payload', payload);
         return;
       }
-      if (containerEl.contains(hitEl) && Number.isFinite(savedLineIdx)) {
+      if (ensureMainPaneEl().contains(hitEl) && Number.isFinite(savedLineIdx)) {
         if (savedLineIdx < startLine || savedLineIdx > endLine + 1) {
           reorderLiveBlock(startLine, endLine, raw, savedLineIdx);
         }
@@ -5617,7 +6543,7 @@ export function initCenterView(containerEl) {
         return;
       }
       blockEl.classList.add('is-hold-arming');
-    }, 220);
+    }, 120);
 
     sess.holdTimer = window.setTimeout(() => {
       if (activeHoldSession !== sess) return;
@@ -5628,6 +6554,7 @@ export function initCenterView(containerEl) {
       sess.active = true;
       suppressNextBlockClick = true;
       hideFormatBar();
+      hideHoverPeekCard();
       window.getSelection()?.removeAllRanges?.();
       blockEl.classList.remove('is-hold-arming');
       blockEl.classList.add('is-dragging-source');
@@ -5641,11 +6568,11 @@ export function initCenterView(containerEl) {
       document.body.appendChild(ghost);
       sess.ghostEl = ghost;
       store.emit('drag:active', true);
-    }, 1000);
+    }, 500);
   });
 
   // =========================================================================
-  // V5 Capsule / Media Card Right-Click Context Menu (#capsule-context-menu)
+  // V5/V6 Capsule / Media Card Right-Click Context Menu (#capsule-context-menu)
   // =========================================================================
   let capsuleMenuTarget = null;
   let capsuleMenuListenersBound = false;
@@ -5696,7 +6623,6 @@ export function initCenterView(containerEl) {
       const before = sliceStr.slice(0, idx);
       const after = sliceStr.slice(idx + rawToken.length);
       if (!replacementMd) {
-        // Removing token cleanly
         const joined = `${before}${after}`;
         return joined
           .split('\n')
@@ -5737,6 +6663,7 @@ export function initCenterView(containerEl) {
     state.dirty = true;
     state.editingBlockIdx = null;
     state.editingBlockRange = null;
+    state.editingDraftInsert = null;
     store.state.activeDocumentText = nextFull;
     renderMarkdownMode();
     return true;
@@ -5747,7 +6674,7 @@ export function initCenterView(containerEl) {
     hideCapsuleContextMenu();
     if (!info) return;
 
-    const { el, anchorType, rawToken, fileRef, page, sheet, cell, member, label, blockRange } = info;
+    const { el, anchorType, rawToken, fileRef, page, sheet, cell, heading, member, time, label, blockRange } = info;
     const doc = state.activeDoc;
     const isEditableDoc = Boolean(doc && (doc.type === 'markdown' || doc.type === 'text'));
 
@@ -5768,19 +6695,59 @@ export function initCenterView(containerEl) {
       return;
     }
 
+    if (act === 'open-split') {
+      await openCapsuleInSplit(el);
+      return;
+    }
+
     if (act === 'copy') {
+      internalClipboard = rawToken;
       copyInternal(rawToken, '已复制直达语法');
+      return;
+    }
+
+    if (act === 'cut') {
+      if (!isEditableDoc) return;
+      internalClipboard = rawToken;
+      copyInternal(rawToken, false);
+      commitActiveBlock({ reRender: false });
+      const ok = replaceOrRemoveTokenInDoc(rawToken, '', blockRange);
+      if (ok) {
+        showToast('已剪切直达胶囊（Ctrl+Z 可撤回）', 'success');
+      } else {
+        showToast('未能在原文定位该胶囊语法', 'warning');
+      }
+      return;
+    }
+
+    if (act === 'paste') {
+      if (!isEditableDoc) return;
+      let clipText = '';
+      try {
+        clipText = await navigator.clipboard.readText();
+      } catch {
+        clipText = '';
+      }
+      const textToPaste = String(clipText || internalClipboard || '').trim();
+      if (!textToPaste) {
+        showToast('剪贴板为空', 'warning');
+        return;
+      }
+      const insertLine = blockRange && Number.isFinite(blockRange.endLine) ? blockRange.endLine + 1 : getMdLines().length;
+      insertDroppedMarkdown({ markdown: textToPaste, label: '剪贴板内容' }, { lineIdx: insertLine });
       return;
     }
 
     if (act === 'to-shelf') {
       const target = fileRef ? findWorkspaceFile(fileRef) : null;
-      store.addToShelf({
+      const shelfPayload = {
         type: 'capsule',
         label: label || fileRef || '直达胶囊',
         markdown: rawToken,
         path: target?.path || el.dataset.mediaPath || '',
-      });
+      };
+      if (typeof addToShelf === 'function') addToShelf(shelfPayload);
+      else store.addToShelf?.(shelfPayload);
       showToast('已放入拖拽暂存栏', 'success');
       return;
     }
@@ -5859,6 +6826,7 @@ export function initCenterView(containerEl) {
           state.dirty = true;
           state.editingBlockIdx = null;
           state.editingBlockRange = null;
+          state.editingDraftInsert = null;
           store.state.activeDocumentText = doc.content;
           renderMarkdownMode();
           showToast('已展开内容并保留原胶囊（Ctrl+Z 可一键还原）', 'success');
@@ -5874,6 +6842,7 @@ export function initCenterView(containerEl) {
     if (!capEl) return;
     e.preventDefault();
     e.stopPropagation();
+    hideHoverPeekCard();
 
     const globalMenu = document.getElementById('context-menu');
     if (globalMenu) {
@@ -5895,6 +6864,7 @@ export function initCenterView(containerEl) {
         }
       : null;
     const isEditableDoc = Boolean(state.activeDoc && (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text'));
+    const canSplit = anchorType !== 'app' && anchorType !== 'url' && (Boolean(fileRef) || Boolean(ds.anchorHeading));
 
     capsuleMenuTarget = {
       el: capEl,
@@ -5904,7 +6874,9 @@ export function initCenterView(containerEl) {
       page: ds.anchorPage || '',
       sheet: ds.anchorSheet || '',
       cell: ds.anchorCell || '',
+      heading: ds.anchorHeading || '',
       member: ds.anchorMember || '',
+      time: ds.anchorTime || ds.mediaTime || '',
       label: capEl.querySelector('span, .media-embed-label')?.textContent?.trim() || fileRef || ds.anchorApp || '直达胶囊',
       blockRange,
     };
@@ -5927,15 +6899,37 @@ export function initCenterView(containerEl) {
       <button type="button" class="context-menu-item" data-cap-act="open" role="menuitem">
         <span class="ctx-item-left"><span>↗</span><span>打开原文件</span></span>
       </button>
+      ${
+        canSplit
+          ? `
+            <button type="button" class="context-menu-item" data-cap-act="open-split" role="menuitem">
+              <span class="ctx-item-left"><span>◫</span><span>在右侧分屏打开</span></span>
+            </button>
+          `
+          : ''
+      }
       <button type="button" class="context-menu-item" data-cap-act="to-shelf" role="menuitem">
         <span class="ctx-item-left"><span>📥</span><span>放入拖拽暂存栏</span></span>
       </button>
+      <div class="context-menu-sep" role="separator"></div>
+      ${
+        isEditableDoc
+          ? `
+            <button type="button" class="context-menu-item" data-cap-act="cut" role="menuitem">
+              <span class="ctx-item-left"><span>✂</span><span>剪切</span></span>
+            </button>
+          `
+          : ''
+      }
       <button type="button" class="context-menu-item" data-cap-act="copy" role="menuitem">
-        <span class="ctx-item-left"><span>📋</span><span>复制直达语法</span></span>
+        <span class="ctx-item-left"><span>📋</span><span>复制</span></span>
       </button>
       ${
         isEditableDoc
           ? `
+            <button type="button" class="context-menu-item" data-cap-act="paste" role="menuitem">
+              <span class="ctx-item-left"><span>📥</span><span>粘贴到此处</span></span>
+            </button>
             <div class="context-menu-sep" role="separator"></div>
             <button type="button" class="context-menu-item" data-cap-act="remove" role="menuitem" style="color:var(--danger);">
               <span class="ctx-item-left"><span>🗑</span><span>从笔记移除此模块</span></span>
@@ -5957,7 +6951,7 @@ export function initCenterView(containerEl) {
     menu.classList.add('is-open');
     const rect = menu.getBoundingClientRect();
     const maxX = Math.max(8, window.innerWidth - (rect.width || 220) - 10);
-    const maxY = Math.max(8, window.innerHeight - (rect.height || 200) - 10);
+    const maxY = Math.max(8, window.innerHeight - (rect.height || 240) - 10);
     menu.style.left = `${Math.min(maxX, Math.max(8, e.clientX))}px`;
     menu.style.top = `${Math.min(maxY, Math.max(8, e.clientY))}px`;
   });
@@ -5966,17 +6960,24 @@ export function initCenterView(containerEl) {
     if (activeFormatBar && !activeFormatBar.contains(e.target) && !e.target.closest('.lp-container, .md-preview')) {
       hideFormatBar();
     }
-    // Commit active block editor when clicking outside any .lp-block (and not clicking find bar or add-block zone)
+    const slashEl = document.getElementById('slash-command-menu');
+    if (slashEl && !slashEl.hidden && !slashEl.contains(e.target)) {
+      closeSlashMenu();
+    }
+    // Commit active block editor when clicking outside any .lp-block (and not clicking find bar, format bar, slash menu, or add-block zone)
     if (
       state.activeDoc &&
       (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text') &&
       state.mdMode === 'live' &&
-      (state.editingBlockIdx !== null || state.editingDraftNewBlock)
+      (state.editingBlockIdx !== null || state.editingDraftNewBlock || state.editingDraftInsert !== null)
     ) {
       if (
         !e.target.closest('.lp-block') &&
         !e.target.closest('.lp-add-block-zone') &&
         !e.target.closest('[data-role="doc-find-bar"]') &&
+        !e.target.closest('[data-role="wysiwyg-format-bar"]') &&
+        !e.target.closest('#slash-command-menu') &&
+        !e.target.closest('#capsule-context-menu') &&
         !e.target.closest('[data-md-mode]') &&
         !e.target.closest('[data-action="md-undo"]') &&
         !e.target.closest('[data-action="md-redo"]')
@@ -5986,7 +6987,1193 @@ export function initCenterView(containerEl) {
     }
   });
 
+  // =========================================================================
+  // Innovation A: Slash Command Menu (/ -> #slash-command-menu)
+  // =========================================================================
+  const SLASH_COMMANDS = [
+    { id: 'h1', icon: 'H1', label: '一级标题', hint: '# ', keywords: 'h1 heading title yijibiaoti 一级标题' },
+    { id: 'h2', icon: 'H2', label: '二级标题', hint: '## ', keywords: 'h2 heading erjibiaoti 二级标题' },
+    { id: 'h3', icon: 'H3', label: '三级标题', hint: '### ', keywords: 'h3 heading sanjibiaoti 三级标题' },
+    { id: 'todo', icon: '☑', label: '待办清单', hint: '- [ ]', keywords: 'todo task check daiban 待办清单' },
+    { id: 'quote', icon: '”', label: '引用块', hint: '> ', keywords: 'quote blockquote yinyong 引用块' },
+    { id: 'tip', icon: '💡', label: '提示卡片', hint: 'TIP', keywords: 'tip callout note tishi 提示卡片' },
+    { id: 'warn', icon: '⚠️', label: '易错提醒', hint: 'WARN', keywords: 'warn warning callout yicuo 易错提醒' },
+    { id: 'codeblock', icon: '💻', label: '代码块', hint: '```', keywords: 'code codeblock daima 代码块' },
+    { id: 'hr', icon: '—', label: '分割线', hint: '---', keywords: 'hr divider line fengexian 分割线' },
+    { id: 'file', icon: '🔗', label: '插入文件直达胶囊', hint: '[[文件]]', keywords: 'file link capsule anchor wenjian 插入文件直达胶囊' },
+    { id: 'url', icon: '🌐', label: '插入网址胶囊', hint: '[[url:]]', keywords: 'url web link wangzhi 插入网址胶囊' },
+    { id: 'app', icon: '🚀', label: '插入软件直达', hint: '[[app:]]', keywords: 'app software launcher ruanjian 插入软件直达' },
+  ];
+
+  let slashState = {
+    open: false,
+    mode: 'commands', // 'commands' | 'file' | 'url' | 'app'
+    query: '',
+    activeIdx: 0,
+    sourceKind: 'wysiwyg', // 'wysiwyg' | 'source'
+    editorEl: null,
+    textNode: null,
+    startOffset: 0,
+    endOffset: 0,
+    taStart: 0,
+    taEnd: 0,
+    anchorRect: null,
+  };
+
+  function getSlashMenuEl() {
+    let menu = document.getElementById('slash-command-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'slash-command-menu';
+      menu.className = 'slash-command-menu';
+      menu.setAttribute('role', 'listbox');
+      menu.hidden = true;
+      document.body.appendChild(menu);
+    }
+    return menu;
+  }
+
+  function closeSlashMenu() {
+    slashState.open = false;
+    slashState.mode = 'commands';
+    slashState.textNode = null;
+    slashState.editorEl = null;
+    const menu = document.getElementById('slash-command-menu');
+    if (menu) {
+      menu.hidden = true;
+      menu.innerHTML = '';
+    }
+  }
+
+  function positionSlashMenu(menu, rect) {
+    const r = rect || { left: 160, bottom: 180, top: 160 };
+    const mRect = menu.getBoundingClientRect();
+    const mw = mRect.width || 248;
+    const mh = mRect.height || 260;
+    const left = Math.min(Math.max(10, r.left), Math.max(10, window.innerWidth - mw - 12));
+    const spaceBelow = window.innerHeight - r.bottom;
+    const top = spaceBelow >= Math.min(mh, 200) || r.top < mh + 12
+      ? Math.min(window.innerHeight - mh - 10, Math.max(10, r.bottom + 6))
+      : Math.max(10, r.top - mh - 6);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  }
+
+  function getFilteredSlashCommands() {
+    const q = slashState.query.trim().toLowerCase();
+    if (!q) return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter((c) =>
+      c.label.toLowerCase().includes(q) || c.keywords.toLowerCase().includes(q) || c.id.includes(q)
+    );
+  }
+
+  function removeSlashTriggerText() {
+    if (slashState.sourceKind === 'source') {
+      const ta = slashState.editorEl;
+      if (!ta) return null;
+      const val = ta.value;
+      const s = Math.max(0, Math.min(val.length, slashState.taStart));
+      const e = Math.max(s, Math.min(val.length, slashState.taEnd));
+      ta.value = `${val.slice(0, s)}${val.slice(e)}`;
+      ta.focus();
+      ta.setSelectionRange(s, s);
+      return { kind: 'source', ta, pos: s };
+    }
+
+    const editorEl = slashState.editorEl;
+    const tNode = slashState.textNode;
+    if (!editorEl) return null;
+    if (tNode && editorEl.contains(tNode) && tNode.nodeType === 3) {
+      const len = (tNode.nodeValue || '').length;
+      const s = Math.max(0, Math.min(len, slashState.startOffset));
+      const e = Math.max(s, Math.min(len, slashState.endOffset));
+      const range = document.createRange();
+      range.setStart(tNode, s);
+      range.setEnd(tNode, e);
+      range.deleteContents();
+      const sel = window.getSelection();
+      if (sel) {
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      if (!tNode.nodeValue && tNode.parentElement && tNode.parentElement.childNodes.length === 0) {
+        tNode.parentElement.appendChild(document.createElement('br'));
+      }
+    }
+    return { kind: 'wysiwyg', editorEl };
+  }
+
+  function insertTokenAtActiveSlashTarget(tokenMd) {
+    const cleanToken = String(tokenMd || '').trim();
+    if (!cleanToken) return;
+    const doc = state.activeDoc;
+    if (!doc) return;
+
+    const targetInfo = removeSlashTriggerText();
+    closeSlashMenu();
+    if (!targetInfo) return;
+
+    if (targetInfo.kind === 'source') {
+      const { ta, pos } = targetInfo;
+      pushUndoSnapshot(doc.content, { immediate: true });
+      const val = ta.value;
+      const nextVal = `${val.slice(0, pos)}${cleanToken} ${val.slice(pos)}`;
+      ta.value = nextVal;
+      ta.setSelectionRange(pos + cleanToken.length + 1, pos + cleanToken.length + 1);
+      doc.content = nextVal;
+      state.dirty = true;
+      store.state.activeDocumentText = nextVal;
+      updateMdDirtyIndicators();
+      return;
+    }
+
+    const { editorEl } = targetInfo;
+    pushUndoSnapshot(doc.content, { immediate: true });
+    editorEl.focus({ preventScroll: true });
+
+    const tpl = document.createElement('template');
+    tpl.innerHTML = markdownToWysiwygBlockHtml(cleanToken);
+    const pillNode = tpl.content.querySelector('.anchor-pill, .media-embed-card');
+
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && editorEl.contains(sel.getRangeAt(0).startContainer)) {
+      const range = sel.getRangeAt(0);
+      range.deleteContents();
+      if (pillNode) {
+        const spaceNode = document.createTextNode(' ');
+        range.insertNode(spaceNode);
+        range.insertNode(pillNode);
+        const afterRange = document.createRange();
+        afterRange.setStartAfter(spaceNode);
+        afterRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(afterRange);
+      } else {
+        const txtNode = document.createTextNode(`${cleanToken} `);
+        range.insertNode(txtNode);
+        range.setStartAfter(txtNode);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    } else if (pillNode) {
+      const p = editorEl.querySelector('p') || editorEl;
+      p.appendChild(pillNode);
+      p.appendChild(document.createTextNode(' '));
+      placeCaretInsideWysiwyg(editorEl, 'end');
+    }
+    syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed: true });
+  }
+
+  function applySlashFormatCommand(cmdId) {
+    const doc = state.activeDoc;
+    if (!doc) return;
+    const targetInfo = removeSlashTriggerText();
+    closeSlashMenu();
+    if (!targetInfo) return;
+
+    if (targetInfo.kind === 'source') {
+      const { ta, pos } = targetInfo;
+      pushUndoSnapshot(doc.content, { immediate: true });
+      const insertMap = {
+        h1: '# ',
+        h2: '## ',
+        h3: '### ',
+        todo: '- [ ] ',
+        quote: '> ',
+        tip: '> 💡 **提示**：',
+        warn: '> ⚠️ **易错提醒**：',
+        codeblock: '```\n\n```',
+        hr: '\n---\n',
+      };
+      const snippet = insertMap[cmdId] || '';
+      const val = ta.value;
+      const nextVal = `${val.slice(0, pos)}${snippet}${val.slice(pos)}`;
+      ta.value = nextVal;
+      const nextPos = cmdId === 'codeblock' ? pos + 4 : pos + snippet.length;
+      ta.setSelectionRange(nextPos, nextPos);
+      doc.content = nextVal;
+      state.dirty = true;
+      store.state.activeDocumentText = nextVal;
+      updateMdDirtyIndicators();
+      return;
+    }
+
+    const { editorEl } = targetInfo;
+    pushUndoSnapshot(doc.content, { immediate: true });
+    editorEl.focus({ preventScroll: true });
+    execWysiwygFormat(cmdId, editorEl);
+    syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed: true });
+  }
+
+  async function renderSlashSubPicker(mode) {
+    slashState.mode = mode;
+    const menu = getSlashMenuEl();
+    menu.hidden = false;
+
+    if (mode === 'file') {
+      let items = Array.isArray(store.state.files?.items) ? store.state.files.items : [];
+      if (items.length === 0) {
+        menu.innerHTML = `<div style="padding:10px;font-size:12px;color:var(--text-secondary);">正在加载工作区文件…</div>`;
+        positionSlashMenu(menu, slashState.anchorRect);
+        try {
+          const filesData = await api.get('/api/files/list');
+          if (filesData) {
+            store.setState({ files: filesData });
+            items = filesData.items || [];
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!slashState.open || slashState.mode !== 'file') return;
+
+      menu.innerHTML = `
+        <div style="display:flex;align-items:center;gap:4px;padding:3px 4px 5px;border-bottom:1px solid var(--border-hairline);margin-bottom:4px;">
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-slash-back="1" style="height:24px;padding:0 6px;font-size:11px;">←</button>
+          <input type="text" class="apple-input" data-slash-sub-filter="1" placeholder="筛选工作区文件…" style="height:26px;padding:2px 8px;font-size:12px;flex:1;min-width:0;" />
+        </div>
+        <div data-slash-sub-list="1" style="max-height:210px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;"></div>
+      `;
+
+      const listEl = menu.querySelector('[data-slash-sub-list]');
+      const filterInput = menu.querySelector('[data-slash-sub-filter]');
+      let subIdx = 0;
+
+      const renderList = () => {
+        const q = (filterInput?.value || '').trim().toLowerCase();
+        const filtered = (q ? items.filter((f) => String(f.name || f.path || '').toLowerCase().includes(q)) : items).slice(0, 14);
+        if (filtered.length === 0) {
+          listEl.innerHTML = `<div style="padding:10px;font-size:12px;color:var(--text-tertiary);text-align:center;">未匹配到工作区文件</div>`;
+          return;
+        }
+        subIdx = Math.max(0, Math.min(subIdx, filtered.length - 1));
+        listEl.innerHTML = filtered
+          .map((f, idx) => `
+            <button type="button" class="slash-cmd-item ${idx === subIdx ? 'is-active' : ''}" data-slash-file="${escapeHtml(f.name)}">
+              <span class="slash-cmd-main">
+                <span class="slash-cmd-icon">${icon(docIconName('', f.ext), 12)}</span>
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>
+              </span>
+              <span class="slash-cmd-hint">${escapeHtml(f.ext || '')}</span>
+            </button>
+          `)
+          .join('');
+      };
+
+      renderList();
+      positionSlashMenu(menu, slashState.anchorRect);
+      window.requestAnimationFrame(() => filterInput?.focus());
+
+      menu.querySelector('[data-slash-back]')?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        renderSlashCommandsMenu();
+      });
+      filterInput?.addEventListener('input', () => {
+        subIdx = 0;
+        renderList();
+      });
+      filterInput?.addEventListener('keydown', (ev) => {
+        const rows = Array.from(listEl.querySelectorAll('[data-slash-file]'));
+        if (ev.key === 'ArrowDown' && rows.length > 0) {
+          ev.preventDefault();
+          subIdx = (subIdx + 1) % rows.length;
+          renderList();
+        } else if (ev.key === 'ArrowUp' && rows.length > 0) {
+          ev.preventDefault();
+          subIdx = (subIdx - 1 + rows.length) % rows.length;
+          renderList();
+        } else if (ev.key === 'Enter' && rows[subIdx]) {
+          ev.preventDefault();
+          insertTokenAtActiveSlashTarget(`[[${rows[subIdx].dataset.slashFile}]]`);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          const ed = slashState.editorEl;
+          closeSlashMenu();
+          ed?.focus?.();
+        }
+      });
+      listEl.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-slash-file]');
+        if (!btn) return;
+        ev.stopPropagation();
+        insertTokenAtActiveSlashTarget(`[[${btn.dataset.slashFile}]]`);
+      });
+      return;
+    }
+
+    if (mode === 'url') {
+      menu.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:3px 4px 6px;border-bottom:1px solid var(--border-hairline);margin-bottom:6px;">
+          <span style="font-size:12px;font-weight:600;">🌐 插入网址胶囊</span>
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-slash-back="1" style="height:22px;padding:0 6px;font-size:11px;">返回</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;padding:2px 4px 4px;">
+          <input type="text" class="apple-input" data-slash-url-title="1" placeholder="标题（可选）" style="height:27px;padding:3px 8px;font-size:12px;" />
+          <input type="url" class="apple-input" data-slash-url-href="1" placeholder="https://..." style="height:27px;padding:3px 8px;font-size:12px;" />
+          <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-slash-url-submit="1" style="justify-content:center;">插入网址胶囊</button>
+        </div>
+      `;
+      positionSlashMenu(menu, slashState.anchorRect);
+      const titleInp = menu.querySelector('[data-slash-url-title]');
+      const hrefInp = menu.querySelector('[data-slash-url-href]');
+      const submitBtn = menu.querySelector('[data-slash-url-submit]');
+      window.requestAnimationFrame(() => hrefInp?.focus());
+
+      const doInsertUrl = () => {
+        const url = (hrefInp?.value || '').trim();
+        if (!url) {
+          showToast('请输入网址 URL', 'warning');
+          hrefInp?.focus();
+          return;
+        }
+        const title = (titleInp?.value || '').trim();
+        const tok = title ? `[[url:${title}|${url}]]` : `[[url:${url}]]`;
+        insertTokenAtActiveSlashTarget(tok);
+      };
+
+      menu.querySelector('[data-slash-back]')?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        renderSlashCommandsMenu();
+      });
+      submitBtn?.addEventListener('click', doInsertUrl);
+      menu.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          doInsertUrl();
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          const ed = slashState.editorEl;
+          closeSlashMenu();
+          ed?.focus?.();
+        }
+      });
+      return;
+    }
+
+    if (mode === 'app') {
+      let apps = Array.isArray(store.state.apps) ? store.state.apps : [];
+      if (apps.length === 0) {
+        menu.innerHTML = `<div style="padding:10px;font-size:12px;color:var(--text-secondary);">正在读取已登记软件…</div>`;
+        positionSlashMenu(menu, slashState.anchorRect);
+        try {
+          const res = await api.get('/api/apps');
+          apps = Array.isArray(res) ? res : (res?.apps || []);
+          if (apps.length > 0) store.setState({ apps });
+        } catch {
+          // ignore
+        }
+      }
+      if (!slashState.open || slashState.mode !== 'app') return;
+
+      menu.innerHTML = `
+        <div style="display:flex;align-items:center;gap:4px;padding:3px 4px 5px;border-bottom:1px solid var(--border-hairline);margin-bottom:4px;">
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-slash-back="1" style="height:24px;padding:0 6px;font-size:11px;">←</button>
+          <input type="text" class="apple-input" data-slash-app-filter="1" placeholder="输入或选择软件名…" style="height:26px;padding:2px 8px;font-size:12px;flex:1;min-width:0;" />
+        </div>
+        <div data-slash-app-list="1" style="max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;"></div>
+      `;
+      const listEl = menu.querySelector('[data-slash-app-list]');
+      const filterInp = menu.querySelector('[data-slash-app-filter]');
+
+      const renderApps = () => {
+        const q = (filterInp?.value || '').trim().toLowerCase();
+        const filtered = (q ? apps.filter((a) => String(a.name || '').toLowerCase().includes(q)) : apps).slice(0, 12);
+        const rowsHtml = filtered
+          .map((a) => `
+            <button type="button" class="slash-cmd-item" data-slash-app="${escapeHtml(a.name)}">
+              <span class="slash-cmd-main">
+                <span class="slash-cmd-icon">🚀</span>
+                <span>${escapeHtml(a.name)}</span>
+              </span>
+              <span class="slash-cmd-hint">app</span>
+            </button>
+          `)
+          .join('');
+        const customHtml = q && filtered.length === 0
+          ? `<button type="button" class="slash-cmd-item is-active" data-slash-app="${escapeHtml(filterInp.value.trim())}">
+              <span class="slash-cmd-main"><span class="slash-cmd-icon">🚀</span><span>插入 [[app:${escapeHtml(filterInp.value.trim())}]]</span></span>
+             </button>`
+          : '';
+        listEl.innerHTML = rowsHtml || customHtml || `<div style="padding:10px;font-size:12px;color:var(--text-tertiary);text-align:center;">输入软件名称后按 Enter</div>`;
+      };
+
+      renderApps();
+      positionSlashMenu(menu, slashState.anchorRect);
+      window.requestAnimationFrame(() => filterInp?.focus());
+
+      menu.querySelector('[data-slash-back]')?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        renderSlashCommandsMenu();
+      });
+      filterInp?.addEventListener('input', renderApps);
+      filterInp?.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          const first = listEl.querySelector('[data-slash-app]');
+          const appName = first?.dataset.slashApp || filterInp.value.trim();
+          if (appName) insertTokenAtActiveSlashTarget(`[[app:${appName}]]`);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          const ed = slashState.editorEl;
+          closeSlashMenu();
+          ed?.focus?.();
+        }
+      });
+      listEl.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-slash-app]');
+        if (!btn) return;
+        ev.stopPropagation();
+        insertTokenAtActiveSlashTarget(`[[app:${btn.dataset.slashApp}]]`);
+      });
+    }
+  }
+
+  function executeSlashCommand(cmdId) {
+    if (cmdId === 'file' || cmdId === 'url' || cmdId === 'app') {
+      renderSlashSubPicker(cmdId);
+      return;
+    }
+    applySlashFormatCommand(cmdId);
+  }
+
+  function renderSlashCommandsMenu() {
+    slashState.mode = 'commands';
+    const menu = getSlashMenuEl();
+    const items = getFilteredSlashCommands();
+    if (items.length === 0) {
+      closeSlashMenu();
+      return;
+    }
+    slashState.activeIdx = Math.max(0, Math.min(slashState.activeIdx, items.length - 1));
+    menu.innerHTML = items
+      .map((cmd, idx) => `
+        <button type="button" class="slash-cmd-item ${idx === slashState.activeIdx ? 'is-active' : ''}" data-slash-cmd="${cmd.id}" role="option" aria-selected="${idx === slashState.activeIdx}">
+          <span class="slash-cmd-main">
+            <span class="slash-cmd-icon">${cmd.icon}</span>
+            <span>${escapeHtml(cmd.label)}</span>
+          </span>
+          <span class="slash-cmd-hint">${escapeHtml(cmd.hint)}</span>
+        </button>
+      `)
+      .join('');
+
+    menu.onmousedown = (ev) => {
+      if (ev.target.closest('[data-slash-cmd]')) {
+        ev.preventDefault();
+      }
+    };
+    menu.onclick = (ev) => {
+      const btn = ev.target.closest('[data-slash-cmd]');
+      if (!btn) return;
+      ev.stopPropagation();
+      executeSlashCommand(btn.dataset.slashCmd);
+    };
+
+    menu.hidden = false;
+    positionSlashMenu(menu, slashState.anchorRect);
+  }
+
+  function maybeTriggerSlashMenuFromWysiwyg(editorEl) {
+    if (!editorEl || state.mdMode !== 'live') {
+      closeSlashMenu();
+      return;
+    }
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) {
+      closeSlashMenu();
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer;
+    if (!editorEl.contains(node) || node.nodeType !== 3) {
+      closeSlashMenu();
+      return;
+    }
+    const parentTag = node.parentElement?.tagName;
+    if (parentTag === 'CODE' || node.parentElement?.closest('pre')) {
+      closeSlashMenu();
+      return;
+    }
+    const before = (node.nodeValue || '').slice(0, range.startOffset);
+    const m = before.match(/(?:^|\s)\/([^\s/]*)$/);
+    if (!m) {
+      closeSlashMenu();
+      return;
+    }
+    const query = m[1] || '';
+    const slashOffset = range.startOffset - query.length - 1;
+    // If '/' is at offset 0 of text node, ensure previous sibling in block isn't plain inline text without space
+    if (slashOffset === 0 && node.previousSibling && node.previousSibling.nodeType === 3 && !/\s$/.test(node.previousSibling.nodeValue || '')) {
+      closeSlashMenu();
+      return;
+    }
+
+    let rect = range.getBoundingClientRect();
+    if (!rect || (rect.left === 0 && rect.top === 0 && rect.bottom === 0)) {
+      rect = (node.parentElement || editorEl).getBoundingClientRect();
+    }
+
+    slashState = {
+      open: true,
+      mode: 'commands',
+      query,
+      activeIdx: 0,
+      sourceKind: 'wysiwyg',
+      editorEl,
+      textNode: node,
+      startOffset: slashOffset,
+      endOffset: range.startOffset,
+      taStart: 0,
+      taEnd: 0,
+      anchorRect: rect,
+    };
+    renderSlashCommandsMenu();
+  }
+
+  function maybeTriggerSlashMenuFromSource(ta) {
+    if (!ta || state.mdMode !== 'source') {
+      closeSlashMenu();
+      return;
+    }
+    const pos = ta.selectionStart ?? 0;
+    const beforeAll = ta.value.slice(0, pos);
+    const lineStart = beforeAll.lastIndexOf('\n') + 1;
+    const lineBefore = beforeAll.slice(lineStart);
+    const m = lineBefore.match(/(?:^|\s)\/([^\s/]*)$/);
+    if (!m) {
+      closeSlashMenu();
+      return;
+    }
+    const query = m[1] || '';
+    const taRect = ta.getBoundingClientRect();
+    const cs = window.getComputedStyle(ta);
+    const lh = Number.parseFloat(cs.lineHeight) || (Number.parseFloat(cs.fontSize) || 15) * 1.7;
+    const lineNum = beforeAll.split('\n').length - 1;
+    const approxTop = Math.min(taRect.bottom - 20, Math.max(taRect.top + 16, taRect.top + 18 + lineNum * lh - ta.scrollTop));
+
+    slashState = {
+      open: true,
+      mode: 'commands',
+      query,
+      activeIdx: 0,
+      sourceKind: 'source',
+      editorEl: ta,
+      textNode: null,
+      startOffset: 0,
+      endOffset: 0,
+      taStart: pos - query.length - 1,
+      taEnd: pos,
+      anchorRect: { left: taRect.left + 32, top: approxTop, bottom: approxTop + lh },
+    };
+    renderSlashCommandsMenu();
+  }
+
+  // =========================================================================
+  // Innovation B: Capsule Hover Peek Card (400ms -> #hover-peek-card)
+  // =========================================================================
+  const hoverPeekCache = new Map(); // key -> { ts, title, bodyHtml, targetItem, payload }
+  const HOVER_PEEK_TTL_MS = 30000;
+  let hoverPeekOpenTimer = 0;
+  let hoverPeekCloseTimer = 0;
+  let hoverPeekActivePill = null;
+  let hoverPeekBound = false;
+
+  function clearHoverPeekTimers() {
+    if (hoverPeekOpenTimer) {
+      window.clearTimeout(hoverPeekOpenTimer);
+      hoverPeekOpenTimer = 0;
+    }
+    if (hoverPeekCloseTimer) {
+      window.clearTimeout(hoverPeekCloseTimer);
+      hoverPeekCloseTimer = 0;
+    }
+  }
+
+  function hideHoverPeekCard() {
+    clearHoverPeekTimers();
+    hoverPeekActivePill = null;
+    const card = document.getElementById('hover-peek-card');
+    if (card) {
+      card.hidden = true;
+      card.innerHTML = '';
+    }
+  }
+
+  function scheduleHoverPeekClose() {
+    if (hoverPeekCloseTimer) window.clearTimeout(hoverPeekCloseTimer);
+    hoverPeekCloseTimer = window.setTimeout(() => {
+      hoverPeekCloseTimer = 0;
+      hideHoverPeekCard();
+    }, 180);
+  }
+
+  function getHoverPeekCardEl() {
+    let card = document.getElementById('hover-peek-card');
+    if (!card) {
+      card = document.createElement('div');
+      card.id = 'hover-peek-card';
+      card.className = 'hover-peek-card';
+      card.hidden = true;
+      document.body.appendChild(card);
+    }
+    if (!hoverPeekBound) {
+      hoverPeekBound = true;
+      card.addEventListener('mouseenter', () => {
+        if (hoverPeekCloseTimer) {
+          window.clearTimeout(hoverPeekCloseTimer);
+          hoverPeekCloseTimer = 0;
+        }
+      });
+      card.addEventListener('mouseleave', (ev) => {
+        if (hoverPeekActivePill && ev.relatedTarget && hoverPeekActivePill.contains(ev.relatedTarget)) {
+          return;
+        }
+        scheduleHoverPeekClose();
+      });
+    }
+    return card;
+  }
+
+  function extractAnchorPayloadFromPill(pill) {
+    const ds = pill?.dataset || {};
+    let type = ds.anchorType || '';
+    if (!type) {
+      if (ds.anchorApp) type = 'app';
+      else if (ds.anchorUrl) type = 'url';
+      else if (ds.anchorPage) type = 'pdf';
+      else if (ds.anchorCell || ds.anchorSheet) type = 'excel';
+      else if (ds.anchorMember) type = 'archive';
+      else if (ds.anchorTime) type = 'media';
+      else if (!ds.anchorFile && ds.anchorHeading) type = 'heading';
+      else if (ds.anchorFile) type = 'file';
+    }
+    return {
+      type,
+      file: ds.anchorFile || '',
+      page: ds.anchorPage || '',
+      sheet: ds.anchorSheet || '',
+      cell: ds.anchorCell || '',
+      heading: ds.anchorHeading || '',
+      member: ds.anchorMember || '',
+      time: ds.anchorTime || '',
+      app: ds.anchorApp || '',
+      url: ds.anchorUrl || '',
+      raw: ds.anchorRaw || '',
+    };
+  }
+
+  function positionHoverPeekCard(card, anchorRect) {
+    const rect = card.getBoundingClientRect();
+    const cw = rect.width || 320;
+    const ch = rect.height || 200;
+    const left = Math.min(Math.max(12, anchorRect.left), Math.max(12, window.innerWidth - cw - 12));
+    const spaceBelow = window.innerHeight - anchorRect.bottom;
+    const top = spaceBelow >= ch + 14 || anchorRect.top < ch + 14
+      ? Math.min(window.innerHeight - ch - 12, anchorRect.bottom + 8)
+      : Math.max(12, anchorRect.top - ch - 8);
+    card.style.left = `${Math.round(left)}px`;
+    card.style.top = `${Math.round(top)}px`;
+  }
+
+  async function buildHoverPeekData(payload) {
+    const cacheKey = JSON.stringify([
+      payload.type,
+      payload.file,
+      payload.page,
+      payload.sheet,
+      payload.cell,
+      payload.member,
+      payload.heading,
+      payload.app,
+      payload.url,
+    ]);
+    const cached = hoverPeekCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < HOVER_PEEK_TTL_MS) {
+      return cached;
+    }
+
+    let result = {
+      ts: Date.now(),
+      title: payload.file || payload.app || payload.url || payload.heading || '链接速览',
+      iconName: 'file-text',
+      bodyHtml: '',
+      targetItem: null,
+      canSplit: false,
+      payload,
+    };
+
+    if (payload.type === 'app' || (!payload.file && payload.app)) {
+      result.title = `软件直达 · ${payload.app}`;
+      result.iconName = 'rocket';
+      result.bodyHtml = `<div style="color:var(--text-secondary);">点击「↗ 直达」立即启动本地应用 <strong>${escapeHtml(payload.app)}</strong></div>`;
+      hoverPeekCache.set(cacheKey, result);
+      return result;
+    }
+
+    if (payload.type === 'url' || payload.url) {
+      result.title = '外部网页链接';
+      result.iconName = 'globe';
+      result.bodyHtml = `<div style="font-family:var(--font-mono);font-size:11.5px;word-break:break-all;color:var(--accent);">${escapeHtml(payload.url)}</div>`;
+      hoverPeekCache.set(cacheKey, result);
+      return result;
+    }
+
+    if (payload.type === 'heading' && !payload.file && state.activeDoc) {
+      result.title = `${state.activeDoc.name} # ${payload.heading}`;
+      result.iconName = 'file-text';
+      result.targetItem = { path: state.activeDoc.path, name: state.activeDoc.name, ext: state.activeDoc.ext };
+      result.canSplit = true;
+      const lines = String(state.activeDoc.content || '').split('\n');
+      const hNorm = normalizeHeadingKey(payload.heading);
+      const hIdx = lines.findIndex((ln) => /^\s{0,3}#{1,6}\s+/.test(ln) && normalizeHeadingKey(ln).includes(hNorm));
+      const snippet = (hIdx >= 0 ? lines.slice(hIdx, hIdx + 10) : lines.slice(0, 10)).join('\n').slice(0, 420);
+      result.bodyHtml = `<pre style="margin:0;white-space:pre-wrap;color:var(--text-secondary);">${escapeHtml(snippet || '无章节预览内容')}</pre>`;
+      hoverPeekCache.set(cacheKey, result);
+      return result;
+    }
+
+    const targetItem = payload.file ? findWorkspaceFile(payload.file) : null;
+    if (!targetItem?.path) {
+      result.bodyHtml = `<div style="color:var(--warning);">工作区暂未定位到「${escapeHtml(payload.file)}」，点击直达可自动寻回。</div>`;
+      hoverPeekCache.set(cacheKey, result);
+      return result;
+    }
+
+    result.targetItem = targetItem;
+    result.canSplit = true;
+    const ext = getExtLower(targetItem.path);
+    result.iconName = docIconName('', ext);
+    const badgeParts = [];
+    if (payload.page) badgeParts.push(`P.${payload.page}`);
+    if (payload.sheet || payload.cell) badgeParts.push(`${payload.sheet || ''}${payload.cell ? `!${payload.cell}` : ''}`);
+    if (payload.member) badgeParts.push(`!${payload.member}`);
+    if (payload.heading) badgeParts.push(`#${payload.heading}`);
+    if (payload.time) badgeParts.push(`⏱ ${payload.time}`);
+    result.title = badgeParts.length ? `${targetItem.name} · ${badgeParts.join(' ')}` : targetItem.name;
+
+    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'].includes(ext)) {
+      const src = `/api/files/raw-stream?path=${encodeURIComponent(targetItem.path)}`;
+      result.bodyHtml = `<div style="display:flex;justify-content:center;"><img src="${src}" alt="${escapeHtml(targetItem.name)}" /></div>`;
+      hoverPeekCache.set(cacheKey, result);
+      return result;
+    }
+
+    if (['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.mp4', '.webm', '.mov', '.mkv', '.avi'].includes(ext)) {
+      const isVid = ['.mp4', '.webm', '.mov', '.mkv', '.avi'].includes(ext);
+      result.iconName = 'play';
+      result.bodyHtml = `
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <div>${isVid ? '🎬 本地视频文件' : '🎵 本地音频文件'}${payload.time ? ` · 时间戳 <strong>${escapeHtml(payload.time)}</strong>` : ''}</div>
+          <div style="font-size:11px;font-family:var(--font-mono);color:var(--text-tertiary);">${escapeHtml(targetItem.path)}</div>
+        </div>
+      `;
+      hoverPeekCache.set(cacheKey, result);
+      return result;
+    }
+
+    try {
+      const reqPayload = {
+        path: targetItem.path,
+        ...(payload.page ? { page: Number.parseInt(payload.page, 10) || undefined } : {}),
+        ...(payload.sheet ? { sheet: payload.sheet } : {}),
+        ...(payload.cell ? { cell: payload.cell } : {}),
+        ...(payload.member ? { member: payload.member } : {}),
+      };
+      const res = await api.expandFileContent(reqPayload);
+      const rawPreview = String(res?.markdown || res?.content || res?.text || '').trim();
+      if (rawPreview) {
+        const truncated = rawPreview.split('\n').slice(0, 12).join('\n').slice(0, 450);
+        const suffix = rawPreview.length > truncated.length ? '\n…' : '';
+        result.bodyHtml = `<pre style="margin:0;white-space:pre-wrap;color:var(--text-secondary);">${escapeHtml(truncated + suffix)}</pre>`;
+      } else {
+        result.bodyHtml = `<div style="color:var(--text-tertiary);">${escapeHtml(res?.reason || '该文件暂无可预览文本内容')}</div>`;
+      }
+    } catch {
+      result.bodyHtml = `<div style="font-size:11px;font-family:var(--font-mono);color:var(--text-tertiary);">${escapeHtml(targetItem.path)}</div>`;
+    }
+
+    hoverPeekCache.set(cacheKey, result);
+    return result;
+  }
+
+  async function showHoverPeekForPill(pill) {
+    if (!pill || !document.body.contains(pill)) return;
+    if (activeHoldSession?.active || store.state.activeDragPayload) return;
+    const capMenu = document.getElementById('capsule-context-menu');
+    if (capMenu && !capMenu.hidden) return;
+
+    const payload = extractAnchorPayloadFromPill(pill);
+    const pillRect = pill.getBoundingClientRect();
+    const card = getHoverPeekCardEl();
+
+    card.innerHTML = `
+      <div class="hover-peek-header">
+        <span class="hover-peek-title">${icon('file-text', 13)} ${escapeHtml(payload.file || payload.app || payload.url || payload.heading || '速览')}</span>
+      </div>
+      <div class="hover-peek-body">正在加载速览…</div>
+    `;
+    card.hidden = false;
+    positionHoverPeekCard(card, pillRect);
+
+    const data = await buildHoverPeekData(payload);
+    if (hoverPeekActivePill !== pill || card.hidden) return;
+
+    card.innerHTML = `
+      <div class="hover-peek-header">
+        <span class="hover-peek-title" style="display:inline-flex;align-items:center;gap:5px;">
+          ${icon(data.iconName, 13)} <span>${escapeHtml(data.title)}</span>
+        </span>
+      </div>
+      <div class="hover-peek-body">${data.bodyHtml}</div>
+      <div class="hover-peek-footer">
+        <button type="button" class="pill-btn pill-btn-sm" data-peek-act="jump">↗ 直达</button>
+        ${data.canSplit ? `<button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-peek-act="split">◫ 分屏看</button>` : ''}
+      </div>
+    `;
+    positionHoverPeekCard(card, pill.getBoundingClientRect());
+
+    card.querySelector('[data-peek-act="jump"]')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      hideHoverPeekCard();
+      handleAnchorClick(pill);
+    });
+    card.querySelector('[data-peek-act="split"]')?.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      hideHoverPeekCard();
+      await openCapsuleInSplit(pill);
+    });
+  }
+
+  containerEl.addEventListener('mouseover', (e) => {
+    const pill = e.target.closest('.lp-container .anchor-pill, .md-preview .anchor-pill');
+    if (!pill) return;
+    if (hoverPeekActivePill === pill) {
+      if (hoverPeekCloseTimer) {
+        window.clearTimeout(hoverPeekCloseTimer);
+        hoverPeekCloseTimer = 0;
+      }
+      return;
+    }
+    if (activeHoldSession?.active || store.state.activeDragPayload) return;
+    const capMenu = document.getElementById('capsule-context-menu');
+    if (capMenu && !capMenu.hidden) return;
+
+    clearHoverPeekTimers();
+    hoverPeekActivePill = pill;
+    hoverPeekOpenTimer = window.setTimeout(() => {
+      hoverPeekOpenTimer = 0;
+      if (hoverPeekActivePill === pill) {
+        showHoverPeekForPill(pill);
+      }
+    }, 400);
+  });
+
+  containerEl.addEventListener('mouseout', (e) => {
+    const pill = e.target.closest('.lp-container .anchor-pill, .md-preview .anchor-pill');
+    if (!pill || pill !== hoverPeekActivePill) return;
+    const rel = e.relatedTarget;
+    const card = document.getElementById('hover-peek-card');
+    if (rel && (pill.contains(rel) || (card && card.contains(rel)))) {
+      return;
+    }
+    if (hoverPeekOpenTimer) {
+      window.clearTimeout(hoverPeekOpenTimer);
+      hoverPeekOpenTimer = 0;
+    }
+    scheduleHoverPeekClose();
+  });
+
+  // =========================================================================
+  // Innovation C: Dual-Pane Split View (renderSplitPane & openCapsuleInSplit)
+  // =========================================================================
+  async function openCapsuleInSplit(pillEl) {
+    if (!pillEl) return;
+    const ds = pillEl.dataset || {};
+    const payload = extractAnchorPayloadFromPill(pillEl);
+    if (payload.type === 'app' || payload.type === 'url') {
+      showToast('应用/网址胶囊暂不支持分屏预览，请直接点击打开', 'info');
+      return;
+    }
+
+    if (payload.type === 'heading' && !payload.file) {
+      if (!state.activeDoc) return;
+      splitExtraMeta.set(normalizePath(state.activeDoc.path), { member: '', time: '' });
+      openSplitDoc({
+        path: state.activeDoc.path,
+        name: state.activeDoc.name,
+        ext: state.activeDoc.ext,
+        heading: payload.heading,
+      });
+      return;
+    }
+
+    if (!payload.file) return;
+    let targetItem = findWorkspaceFile(payload.file);
+    if (!targetItem) {
+      targetItem = await tryRelocateMissingFile(payload.file);
+    }
+    if (!targetItem?.path) {
+      showToast(`未找到目标文件：${payload.file}`, 'warning');
+      return;
+    }
+
+    splitExtraMeta.set(normalizePath(targetItem.path), {
+      member: payload.member || '',
+      time: payload.time || '',
+    });
+
+    openSplitDoc({
+      path: targetItem.path,
+      name: targetItem.name || getBaseName(targetItem.path),
+      ext: targetItem.ext || getExtLower(targetItem.path),
+      page: payload.page ? Number.parseInt(payload.page, 10) || payload.page : null,
+      sheet: payload.sheet || '',
+      cell: payload.cell || '',
+      heading: payload.heading || '',
+    });
+  }
+
+  async function renderSplitPane(splitDoc = store.state.splitDoc) {
+    const layout = ensureSplitLayoutEl();
+    const existingPane = layout.querySelector(':scope > .center-split-pane');
+
+    if (!splitDoc || !splitDoc.path) {
+      containerEl.classList.remove('has-split-pane');
+      if (existingPane) existingPane.remove();
+      return;
+    }
+
+    const seq = ++state.splitSeq;
+    containerEl.classList.add('has-split-pane');
+    let splitPane = existingPane;
+    if (!splitPane) {
+      splitPane = document.createElement('aside');
+      splitPane.className = 'center-split-pane';
+      splitPane.setAttribute('aria-label', '右侧分屏预览');
+      layout.appendChild(splitPane);
+    }
+
+    const ext = String(splitDoc.ext || getExtLower(splitDoc.path)).toLowerCase();
+    const extra = splitExtraMeta.get(normalizePath(splitDoc.path)) || {};
+    const member = extra.member || '';
+    const timeStr = extra.time || '';
+    const subTag = splitDoc.page
+      ? `P.${splitDoc.page}`
+      : splitDoc.sheet || splitDoc.cell
+      ? `${splitDoc.sheet || ''}${splitDoc.cell ? `!${splitDoc.cell}` : ''}`
+      : member
+      ? `!${member}`
+      : splitDoc.heading
+      ? `#${splitDoc.heading}`
+      : '';
+
+    splitPane.innerHTML = `
+      <div class="center-split-pane-header">
+        <div style="display:inline-flex;align-items:center;gap:6px;min-width:0;flex:1;">
+          <span style="color:var(--accent);display:inline-flex;flex-shrink:0;">${icon(docIconName('', ext), 14)}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(splitDoc.path)}">${escapeHtml(splitDoc.name)}</span>
+          ${subTag ? `<span class="file-ext-badge" style="text-transform:none;flex-shrink:0;">${escapeHtml(subTag)}</span>` : ''}
+        </div>
+        <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+          <button type="button" class="pill-btn pill-btn-sm" data-split-act="open-main" title="在主栏打开此文件">主栏打开</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-split-act="close" title="关闭分屏">✕ 关闭分屏</button>
+        </div>
+      </div>
+      <div class="center-split-pane-body" data-role="split-pane-body">
+        <div class="empty-state"><p class="empty-desc">正在加载分屏预览…</p></div>
+      </div>
+    `;
+
+    const bodyEl = splitPane.querySelector('[data-role="split-pane-body"]');
+    if (!bodyEl) return;
+
+    if (ext === '.pdf') {
+      const pageHash = splitDoc.page ? `#page=${encodeURIComponent(splitDoc.page)}` : '';
+      bodyEl.style.padding = '8px';
+      bodyEl.innerHTML = `<iframe class="split-pdf-frame" src="/api/files/pdf-stream?path=${encodeURIComponent(splitDoc.path)}${pageHash}" title="${escapeHtml(splitDoc.name)}"></iframe>`;
+      return;
+    }
+
+    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'].includes(ext)) {
+      bodyEl.innerHTML = `
+        <div class="split-media-stage">
+          <img src="/api/files/raw-stream?path=${encodeURIComponent(splitDoc.path)}" alt="${escapeHtml(splitDoc.name)}" />
+        </div>
+      `;
+      return;
+    }
+
+    if (['.mp4', '.webm', '.mov', '.mkv', '.avi'].includes(ext)) {
+      bodyEl.innerHTML = `
+        <div class="split-media-stage">
+          <video controls preload="metadata" data-role="split-media-el" src="/api/files/raw-stream?path=${encodeURIComponent(splitDoc.path)}"></video>
+        </div>
+      `;
+      if (timeStr) {
+        const vid = bodyEl.querySelector('[data-role="split-media-el"]');
+        const sec = parseMediaTimeSeconds(timeStr);
+        vid?.addEventListener('loadedmetadata', () => {
+          try { vid.currentTime = sec; } catch {}
+        }, { once: true });
+      }
+      return;
+    }
+
+    if (['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac'].includes(ext)) {
+      bodyEl.innerHTML = `
+        <div class="split-media-stage" style="flex-direction:column;gap:10px;">
+          <div style="font-size:13px;font-weight:600;">${escapeHtml(splitDoc.name)}</div>
+          <audio controls preload="metadata" data-role="split-media-el" src="/api/files/raw-stream?path=${encodeURIComponent(splitDoc.path)}" style="width:100%;"></audio>
+        </div>
+      `;
+      if (timeStr) {
+        const aud = bodyEl.querySelector('[data-role="split-media-el"]');
+        const sec = parseMediaTimeSeconds(timeStr);
+        aud?.addEventListener('loadedmetadata', () => {
+          try { aud.currentTime = sec; } catch {}
+        }, { once: true });
+      }
+      return;
+    }
+
+    if (['.xlsx', '.xls', '.xlsm'].includes(ext)) {
+      try {
+        const params = new URLSearchParams({
+          path: splitDoc.path,
+          sheet: splitDoc.sheet || '',
+          page: '1',
+          page_size: '60',
+        });
+        const data = await api.get(`/api/excel/rows?${params.toString()}`);
+        if (seq !== state.splitSeq) return;
+        const headers = Array.isArray(data?.headers) ? data.headers : [];
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        const targetRef = splitDoc.cell ? parseExcelCellRef(splitDoc.cell) : null;
+        bodyEl.innerHTML = `
+          <div style="font-size:11.5px;color:var(--text-secondary);margin-bottom:8px;">工作表：<strong>${escapeHtml(data?.sheet || splitDoc.sheet || 'Sheet1')}</strong>（前 ${rows.length} 行）</div>
+          <div style="overflow:auto;border:1px solid var(--border-hairline);border-radius:var(--radius-control);">
+            <table class="excel-table">
+              <thead>
+                <tr>
+                  <th class="excel-row-num">#</th>
+                  ${headers.map((h, i) => `<th><span style="color:var(--text-tertiary);margin-right:3px;">${colIndexToLetter(i + 1)}</span>${escapeHtml(h)}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map((r) => `
+                  <tr>
+                    <td class="excel-row-num">${r.row_num}</td>
+                    ${headers.map((_, cIdx) => {
+                      const isHit = targetRef && targetRef.row === r.row_num && targetRef.col === cIdx + 1;
+                      return `<td class="${isHit ? 'excel-cell-selected' : ''}">${escapeHtml(r.cells?.[cIdx] ?? '')}</td>`;
+                    }).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      } catch (err) {
+        if (seq !== state.splitSeq) return;
+        bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">表格预览失败</p><p class="empty-desc">${escapeHtml(getErrorMsg(err))}</p></div>`;
+      }
+      return;
+    }
+
+    if (['.zip', '.tar', '.gz', '.tgz'].includes(ext) && member) {
+      try {
+        const d = await api.get(`/api/files/archive-entry?path=${encodeURIComponent(splitDoc.path)}&member=${encodeURIComponent(member)}`);
+        if (seq !== state.splitSeq) return;
+        if (d?.data_url || (d?.base64 && String(d?.mime || '').startsWith('image/'))) {
+          const src = d.data_url || `data:${d.mime};base64,${d.base64}`;
+          bodyEl.innerHTML = `<div class="split-media-stage"><img src="${escapeHtml(src)}" alt="${escapeHtml(member)}" /></div>`;
+        } else if (d?.content != null) {
+          bodyEl.innerHTML = getExtLower(member) === '.md'
+            ? `<div class="md-preview split-md-preview">${renderMarkdownSafe(String(d.content), { withLineMap: false })}</div>`
+            : `<pre class="split-code-pre"><code>${escapeHtml(String(d.content))}</code></pre>`;
+        } else {
+          bodyEl.innerHTML = `<div class="empty-state"><p class="empty-desc">${escapeHtml(d?.message || '二进制成员不支持预览')}</p></div>`;
+        }
+      } catch (err) {
+        if (seq !== state.splitSeq) return;
+        bodyEl.innerHTML = `<div class="empty-state"><p class="empty-desc">${escapeHtml(getErrorMsg(err))}</p></div>`;
+      }
+      return;
+    }
+
+    try {
+      const data = await api.get(`/api/files/read?path=${encodeURIComponent(splitDoc.path)}`);
+      if (seq !== state.splitSeq) return;
+      const dType = data?.type || '';
+      if (ext === '.docx' || ext === '.pptx' || dType === 'office_preview') {
+        const md = data?.preview_markdown || data?.previewMarkdown || data?.content || '*暂无可预览文本*';
+        bodyEl.innerHTML = `<div class="md-preview split-md-preview">${renderMarkdownSafe(md, { withLineMap: false })}</div>`;
+      } else if (ext === '.md' || dType === 'markdown') {
+        bodyEl.innerHTML = `<div class="md-preview split-md-preview">${renderMarkdownSafe(data?.content || '', { withLineMap: false })}</div>`;
+        if (splitDoc.heading) {
+          const hKey = normalizeHeadingKey(splitDoc.heading);
+          const matchH = Array.from(bodyEl.querySelectorAll('h1,h2,h3,h4,h5,h6')).find(
+            (h) => normalizeHeadingKey(h.textContent).includes(hKey)
+          );
+          matchH?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      } else if (data?.content != null) {
+        bodyEl.innerHTML = `<pre class="split-code-pre"><code>${escapeHtml(String(data.content))}</code></pre>`;
+      } else {
+        bodyEl.innerHTML = `
+          <div class="empty-state">
+            <p class="empty-title">${escapeHtml(splitDoc.name)}</p>
+            <p class="empty-desc">暂不支持该格式分屏内置预览</p>
+            <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-split-act="open-main">在主栏打开</button>
+          </div>
+        `;
+      }
+    } catch (err) {
+      if (seq !== state.splitSeq) return;
+      bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">分屏读取失败</p><p class="empty-desc">${escapeHtml(getErrorMsg(err))}</p></div>`;
+    }
+  }
+
+  store.on('split:changed', (doc) => {
+    renderSplitPane(doc);
+  });
+
+  // =========================================================================
+  // Click / Double-Click / Keydown Delegation
+  // =========================================================================
   containerEl.addEventListener('click', (e) => {
+    // 0. Split-pane header actions
+    const splitActBtn = e.target.closest('[data-split-act]');
+    if (splitActBtn) {
+      const act = splitActBtn.dataset.splitAct;
+      const sDoc = store.state.splitDoc;
+      if (act === 'close') {
+        closeSplitDoc();
+      } else if (act === 'open-main' && sDoc?.path) {
+        const extra = splitExtraMeta.get(normalizePath(sDoc.path)) || {};
+        closeSplitDoc();
+        openFile(sDoc.path, {
+          initialPage: sDoc.page || undefined,
+          sheet: sDoc.sheet || undefined,
+          heading: sDoc.heading || undefined,
+          member: extra.member || undefined,
+          initialTime: extra.time ? parseMediaTimeSeconds(extra.time) : undefined,
+        });
+      }
+      return;
+    }
+
+    // 0b. Word-style Icon Format Toolbar (.wysiwyg-format-bar)
+    const fmtBarBtn = e.target.closest('[data-fmt-bar]');
+    if (fmtBarBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      applyWysiwygBarAction(fmtBarBtn.dataset.fmtBar);
+      return;
+    }
+
     // 0a. Inline Media Card actions (play-inline, open-media, preset width buttons)
     const mediaPlayBtn = e.target.closest('[data-media-action="play-inline"]');
     if (mediaPlayBtn) {
@@ -6062,9 +8249,16 @@ export function initCenterView(containerEl) {
       }
     }
 
-    // 1. Anchor pill click in MD preview or companion preview
+    // 1. Anchor pill click in MD preview, split preview, or companion preview (Ctrl+Click = Split View!)
     const anchorPill = e.target.closest('.anchor-pill');
     if (anchorPill) {
+      hideHoverPeekCard();
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        openCapsuleInSplit(anchorPill);
+        return;
+      }
       handleAnchorClick(anchorPill);
       return;
     }
@@ -6144,7 +8338,7 @@ export function initCenterView(containerEl) {
         state.mdMode = nextMode;
         renderMarkdownMode();
         if (nextMode === 'source') {
-          containerEl.querySelector('.md-editor')?.focus();
+          ensureMainPaneEl().querySelector('.md-editor')?.focus();
         }
       }
       return;
@@ -6153,7 +8347,7 @@ export function initCenterView(containerEl) {
     // 2b. PDF HD / Native Iframe segmented pill
     const pdfViewBtn = e.target.closest('[data-pdf-view]');
     if (pdfViewBtn && state.activeDoc?.type === 'pdf') {
-      const nextView = pdfViewBtn.dataset.pdfView === 'iframe' ? 'iframe' : 'hd';
+      const nextView = pdfViewBtn.dataset.pdfView === 'hd' ? 'hd' : 'iframe';
       if (nextView !== state.pdf.viewMode) {
         state.pdf.viewMode = nextView;
         renderPdfMode();
@@ -6216,7 +8410,13 @@ export function initCenterView(containerEl) {
     if (actionBtn) {
       const action = actionBtn.dataset.action;
 
-      if (action === 'lp-add-block') {
+      if (action === 'nav-back') {
+        navigateHistory(-1);
+        return;
+      } else if (action === 'nav-forward') {
+        navigateHistory(1);
+        return;
+      } else if (action === 'lp-add-block') {
         appendNewBlockAndFocus();
         return;
       } else if (action === 'md-undo') {
@@ -6444,7 +8644,7 @@ export function initCenterView(containerEl) {
       }
     }
 
-    // 7. V4 Live Preview click-to-edit block activation
+    // 7. V6 Live Preview click-to-edit WYSIWYG block activation
     if (
       (state.activeDoc?.type === 'markdown' || state.activeDoc?.type === 'text') &&
       state.mdMode === 'live'
@@ -6468,7 +8668,7 @@ export function initCenterView(containerEl) {
         }
         const startLine = Number.parseInt(lpBlock.dataset.mdStart, 10);
         if (Number.isFinite(startLine)) {
-          activateBlockByStartLine(startLine, 'end');
+          activateBlockByStartLine(startLine, 'end', { x: e.clientX, y: e.clientY });
         }
       }
     }
@@ -6486,26 +8686,94 @@ export function initCenterView(containerEl) {
     }
   });
 
-  containerEl.addEventListener('keydown', (e) => {
-    // V4: Inline block editor keyboard flow (ArrowUp, ArrowDown, Escape, Ctrl+B/I//)
-    if (e.target.matches('.lp-block-editor')) {
-      const ta = e.target;
-      const idx = Number.parseInt(ta.dataset.blockIdx, 10);
-      const mod = e.metaKey || e.ctrlKey;
+  function isCaretAtVisualEdge(editorEl, edge) {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+    const range = sel.getRangeAt(0);
+    if (!editorEl.contains(range.startContainer)) return false;
+    const rawMd = wysiwygElementToMarkdown(editorEl);
+    if (!rawMd.trim()) return true;
 
-      if (mod && e.key.toLowerCase() === 'b') {
+    const edRect = editorEl.getBoundingClientRect();
+    let caretRect = range.getBoundingClientRect();
+    if (!caretRect || (caretRect.width === 0 && caretRect.height === 0 && caretRect.top === 0)) {
+      const rects = range.getClientRects();
+      caretRect = rects.length > 0 ? rects[0] : (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement)?.getBoundingClientRect();
+    }
+    if (!caretRect || caretRect.height === 0) {
+      const probe = document.createRange();
+      if (edge === 'top') {
+        probe.setStart(editorEl, 0);
+        probe.setEnd(range.startContainer, range.startOffset);
+      } else {
+        probe.setStart(range.endContainer, range.endOffset);
+        probe.setEnd(editorEl, editorEl.childNodes.length);
+      }
+      return probe.toString().trim() === '';
+    }
+    const lineTol = Math.max(22, caretRect.height * 1.45);
+    return edge === 'top'
+      ? (caretRect.top - edRect.top <= lineTol)
+      : (edRect.bottom - caretRect.bottom <= lineTol);
+  }
+
+  containerEl.addEventListener('keydown', (e) => {
+    // Slash Command Menu navigation when open in commands mode
+    if (slashState.open && slashState.mode === 'commands') {
+      const items = getFilteredSlashCommands();
+      if (e.key === 'ArrowDown' && items.length > 0) {
         e.preventDefault();
-        applyEditorInlineShortcut(ta, 'bold');
+        slashState.activeIdx = (slashState.activeIdx + 1) % items.length;
+        renderSlashCommandsMenu();
         return;
       }
-      if (mod && e.key.toLowerCase() === 'i') {
+      if (e.key === 'ArrowUp' && items.length > 0) {
         e.preventDefault();
-        applyEditorInlineShortcut(ta, 'italic');
+        slashState.activeIdx = (slashState.activeIdx - 1 + items.length) % items.length;
+        renderSlashCommandsMenu();
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && items[slashState.activeIdx]) {
+        e.preventDefault();
+        executeSlashCommand(items[slashState.activeIdx].id);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+    }
+
+    // V6: Pure WYSIWYG inline block editor keyboard flow
+    const wysiwygEl = e.target.closest?.('.lp-block-wysiwyg') || (e.target.matches?.('.lp-block-wysiwyg') ? e.target : null);
+    if (wysiwygEl) {
+      const mod = e.metaKey || e.ctrlKey;
+      const keyLower = String(e.key || '').toLowerCase();
+
+      if (mod && !e.shiftKey && keyLower === 'b') {
+        e.preventDefault();
+        applyWysiwygBarAction('bold');
+        return;
+      }
+      if (mod && !e.shiftKey && keyLower === 'i') {
+        e.preventDefault();
+        applyWysiwygBarAction('italic');
+        return;
+      }
+      if (mod && e.shiftKey && keyLower === 'x') {
+        e.preventDefault();
+        applyWysiwygBarAction('strike');
+        return;
+      }
+      if (mod && !e.shiftKey && keyLower === 'e') {
+        e.preventDefault();
+        applyWysiwygBarAction('code');
         return;
       }
       if (mod && e.key === '/') {
         e.preventDefault();
-        applyEditorInlineShortcut(ta, 'quote');
+        applyWysiwygBarAction('quote');
         return;
       }
       if (e.key === 'Escape') {
@@ -6513,21 +8781,90 @@ export function initCenterView(containerEl) {
         commitActiveBlock({ reRender: true });
         return;
       }
-      if (
-        e.key === 'ArrowUp' &&
-        !e.shiftKey &&
-        !e.altKey &&
-        !mod &&
-        ta.selectionStart === ta.selectionEnd &&
-        !ta.value.slice(0, ta.selectionStart).includes('\n')
-      ) {
-        const blockEl = ta.closest('.lp-block');
-        const curStart = state.editingBlockRange?.startLine ?? (Number.parseInt(blockEl?.dataset?.mdStart, 10) || 0);
-        if (curStart > 0) {
+
+      // Backspace when block is completely empty: delete empty block & focus previous block
+      if (e.key === 'Backspace' && !mod && !e.altKey) {
+        const mdNow = wysiwygElementToMarkdown(wysiwygEl);
+        const txtNow = (wysiwygEl.textContent || '').replace(/\u200B/g, '').trim();
+        if (!mdNow && !txtNow && !wysiwygEl.querySelector('img, .anchor-pill, .media-embed-card, input[type="checkbox"]')) {
           e.preventDefault();
+          deleteActiveEmptyOrSelectedBlock(wysiwygEl);
+          return;
+        }
+      }
+
+      // Enter inside paragraph/heading (not Shift+Enter, not inside <pre> or <li> or <table>)
+      if (e.key === 'Enter' && !e.shiftKey && !mod && !e.altKey && !e.isComposing) {
+        const sel = window.getSelection();
+        const anchorNode = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startContainer : null;
+        const anchorEl = anchorNode?.nodeType === 1 ? anchorNode : anchorNode?.parentElement;
+        if (!anchorEl?.closest('pre, li, table, thead, tbody, tr, td, th')) {
+          e.preventDefault();
+          const doc = state.activeDoc;
+          if (!doc) return;
+          let tailMd = '';
+          if (sel && sel.rangeCount > 0 && wysiwygEl.contains(sel.getRangeAt(0).endContainer)) {
+            const range = sel.getRangeAt(0);
+            const blockNode = anchorEl?.closest('p, h1, h2, h3, h4, h5, h6, div');
+            const scopeEl = blockNode && wysiwygEl.contains(blockNode) && blockNode !== wysiwygEl ? blockNode : wysiwygEl;
+            const tailRange = document.createRange();
+            tailRange.setStart(range.endContainer, range.endOffset);
+            tailRange.setEnd(scopeEl, scopeEl.childNodes.length);
+            const frag = tailRange.extractContents();
+            const tmp = document.createElement('div');
+            tmp.appendChild(frag);
+            tailMd = wysiwygElementToMarkdown(tmp);
+          }
+
+          syncWysiwygBlockInput(wysiwygEl);
+          const headMd = wysiwygElementToMarkdown(wysiwygEl);
+          if (!headMd && !tailMd && state.editingDraftInsert) {
+            return;
+          }
+
+          const blocksNow = parseMarkdownBlocks(doc.content || '');
+          const curIdx = Number.isFinite(state.editingBlockIdx)
+            ? state.editingBlockIdx
+            : blocksNow.findIndex((b) => b.startLine === state.editingBlockRange?.startLine);
+          const curEnd = state.editingBlockRange?.endLine ?? (blocksNow[curIdx]?.endLine ?? 0);
+          const afterLine = curEnd + 1;
+
+          if (tailMd) {
+            pushUndoSnapshot(doc.content, { immediate: true });
+            doc.content = insertMarkdownWithPadding(doc.content || '', afterLine, tailMd);
+            state.dirty = true;
+            state.editingDraftNewBlock = false;
+            state.editingDraftInsert = null;
+            store.state.activeDocumentText = doc.content;
+            activateBlockByIndex(Math.max(0, curIdx) + 1, 'start');
+            return;
+          }
+
+          commitActiveBlock({ reRender: false });
+          const afterBlocks = parseMarkdownBlocks(doc.content || '');
+          if (curIdx < 0 || curIdx >= afterBlocks.length - 1) {
+            appendNewBlockAndFocus();
+          } else {
+            insertDraftBlockAfter(curIdx, afterBlocks[curIdx].endLine + 1);
+          }
+          return;
+        }
+      }
+
+      // ArrowUp at top edge -> previous block
+      if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !mod && isCaretAtVisualEdge(wysiwygEl, 'top')) {
+        const blockEl = wysiwygEl.closest('.lp-block');
+        const curStart = state.editingDraftInsert
+          ? state.editingDraftInsert.startLine
+          : (state.editingBlockRange?.startLine ?? (Number.parseInt(blockEl?.dataset?.mdStart, 10) || 0));
+        if (curStart > 0 || (state.editingDraftInsert && state.editingDraftInsert.afterBlockIdx >= 0)) {
+          e.preventDefault();
+          const prevAfterIdx = state.editingDraftInsert ? state.editingDraftInsert.afterBlockIdx : -1;
           commitActiveBlock({ reRender: false });
           const blocks = parseMarkdownBlocks(state.activeDoc?.content || '');
-          const prevBlkIdx = blocks.reduce((acc, b, i) => (b.startLine < curStart ? i : acc), -1);
+          const prevBlkIdx = prevAfterIdx >= 0
+            ? prevAfterIdx
+            : blocks.reduce((acc, b, i) => (b.startLine < curStart ? i : acc), -1);
           if (prevBlkIdx >= 0) {
             activateBlockByIndex(prevBlkIdx, 'end');
           } else {
@@ -6536,28 +8873,28 @@ export function initCenterView(containerEl) {
         }
         return;
       }
-      if (
-        e.key === 'ArrowDown' &&
-        !e.shiftKey &&
-        !e.altKey &&
-        !mod &&
-        ta.selectionStart === ta.selectionEnd &&
-        !ta.value.slice(ta.selectionStart).includes('\n')
-      ) {
-        const blockEl = ta.closest('.lp-block');
-        const curEnd =
-          state.editingBlockRange?.endLine ??
-          (Number.parseInt(blockEl?.dataset?.mdEnd ?? blockEl?.dataset?.mdStart, 10) || 0);
+
+      // ArrowDown at bottom edge -> next block
+      if (e.key === 'ArrowDown' && !e.shiftKey && !e.altKey && !mod && isCaretAtVisualEdge(wysiwygEl, 'bottom')) {
+        const blockEl = wysiwygEl.closest('.lp-block');
+        const curEnd = state.editingDraftInsert
+          ? state.editingDraftInsert.startLine - 1
+          : (state.editingBlockRange?.endLine ?? (Number.parseInt(blockEl?.dataset?.mdEnd ?? blockEl?.dataset?.mdStart, 10) || 0));
         const prevLineCount = getMdLines().length;
         const blocksBefore = parseMarkdownBlocks(state.activeDoc?.content || '');
-        const hasNext = blocksBefore.some((b) => b.startLine > curEnd);
+        const hasNext = state.editingDraftInsert
+          ? (state.editingDraftInsert.afterBlockIdx + 1 < blocksBefore.length)
+          : blocksBefore.some((b) => b.startLine > curEnd);
         if (hasNext) {
           e.preventDefault();
+          const targetIdxHint = state.editingDraftInsert ? state.editingDraftInsert.afterBlockIdx + 1 : -1;
           commitActiveBlock({ reRender: false });
           const lineDelta = getMdLines().length - prevLineCount;
           const blocksAfter = parseMarkdownBlocks(state.activeDoc?.content || '');
-          const nextBlkIdx = blocksAfter.findIndex((b) => b.startLine > curEnd + lineDelta);
-          if (nextBlkIdx >= 0) {
+          const nextBlkIdx = targetIdxHint >= 0
+            ? targetIdxHint
+            : blocksAfter.findIndex((b) => b.startLine > curEnd + lineDelta);
+          if (nextBlkIdx >= 0 && nextBlkIdx < blocksAfter.length) {
             activateBlockByIndex(nextBlkIdx, 'start');
           } else {
             renderMarkdownMode();
@@ -6568,22 +8905,33 @@ export function initCenterView(containerEl) {
       return;
     }
 
-    // V4: Source mode Ctrl+B / Ctrl+I / Ctrl+/
+    // V4/V6: Source mode Ctrl+B / Ctrl+I / Ctrl+Shift+X / Ctrl+E / Ctrl+/
     if (e.target.matches('.md-editor') && !e.target.dataset.role) {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key.toLowerCase() === 'b') {
+      const keyLower = String(e.key || '').toLowerCase();
+      if (mod && !e.shiftKey && keyLower === 'b') {
         e.preventDefault();
-        applyEditorInlineShortcut(e.target, 'bold');
+        applySourceFormatAction(e.target, 'bold');
         return;
       }
-      if (mod && e.key.toLowerCase() === 'i') {
+      if (mod && !e.shiftKey && keyLower === 'i') {
         e.preventDefault();
-        applyEditorInlineShortcut(e.target, 'italic');
+        applySourceFormatAction(e.target, 'italic');
+        return;
+      }
+      if (mod && e.shiftKey && keyLower === 'x') {
+        e.preventDefault();
+        applySourceFormatAction(e.target, 'strike');
+        return;
+      }
+      if (mod && !e.shiftKey && keyLower === 'e') {
+        e.preventDefault();
+        applySourceFormatAction(e.target, 'code');
         return;
       }
       if (mod && e.key === '/') {
         e.preventDefault();
-        applyEditorInlineShortcut(e.target, 'quote');
+        applySourceFormatAction(e.target, 'quote');
         return;
       }
     }
@@ -6646,6 +8994,7 @@ export function initCenterView(containerEl) {
 
   // Pain Point #2: Auto-save silently on window blur when autoSaveOnSwitch is enabled
   window.addEventListener('blur', () => {
+    hideHoverPeekCard();
     if (!store.state.autoSaveOnSwitch || state.saving) return;
     window.setTimeout(() => {
       if (hasUnsavedChanges() && !state.saving) {
@@ -6703,6 +9052,7 @@ export function initCenterView(containerEl) {
         const isUnrelatedInput =
           activeEl &&
           activeEl.matches('input, textarea, select, [contenteditable="true"]') &&
+          !activeEl.classList.contains('lp-block-wysiwyg') &&
           !activeEl.classList.contains('lp-block-editor') &&
           !(activeEl.classList.contains('md-editor') && containerEl.contains(activeEl) && !activeEl.dataset.role);
 
@@ -6741,6 +9091,9 @@ export function initCenterView(containerEl) {
   });
 
   // Initial render (and auto-open first .md if files are already populated)
+  if (store.state.splitDoc) {
+    renderSplitPane(store.state.splitDoc);
+  }
   const initialItems = store.state.files?.items || [];
   if (initialItems.length > 0) {
     const firstMd = initialItems.find(

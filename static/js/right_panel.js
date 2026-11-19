@@ -167,21 +167,22 @@ function normalizeModuleList(rawList, defaults) {
       if (!id || !allowed.includes(id) || seen.has(id)) continue;
       seen.add(id);
       const visible = typeof entry === 'object' && entry !== null ? entry.visible !== false : true;
-      result.push({ id, visible });
+      const collapsed = typeof entry === 'object' && entry !== null ? Boolean(entry.collapsed) : false;
+      result.push({ id, visible, collapsed });
     }
   } else if (rawList && typeof rawList === 'object' && Array.isArray(rawList.order)) {
     const hiddenSet = new Set(Array.isArray(rawList.hidden) ? rawList.hidden : []);
     for (const id of rawList.order) {
       if (!allowed.includes(id) || seen.has(id)) continue;
       seen.add(id);
-      result.push({ id, visible: !hiddenSet.has(id) });
+      result.push({ id, visible: !hiddenSet.has(id), collapsed: false });
     }
   }
 
   for (const def of defaults) {
     if (!seen.has(def.id)) {
       seen.add(def.id);
-      result.push({ id: def.id, visible: def.visible !== false });
+      result.push({ id: def.id, visible: def.visible !== false, collapsed: Boolean(def.collapsed) });
     }
   }
   return result;
@@ -469,10 +470,22 @@ export function initRightPanel(containerEl) {
       nodes: Array.isArray(store.state.tree?.nodes) ? store.state.tree.nodes : [],
       table_rows: [],
     },
+    inlineTreeCreateOpen: false,
+    inlineTreeCreateDraft: '',
     classifyResult: null,
     classifyLoading: false,
     classifyTargetPath: '',
   };
+
+  function setBgAiTaskSafe(task) {
+    const fn = storeMod.setBgAiTask || store.setBgAiTask;
+    if (typeof fn === 'function') {
+      return fn(task);
+    }
+    store.state.bgAiTask = task || null;
+    store.emit('ai:bg-task', task || null);
+    return task;
+  }
 
   let msgSeq = 1;
   let draggedToolModuleId = null;
@@ -995,32 +1008,37 @@ export function initRightPanel(containerEl) {
     const matchedFiles = Array.isArray(res?.matched_files) ? res.matched_files : [];
     const pendingAndFired = [...(state.reminders || [])].reverse();
 
+    const summaryModulesMap = new Map(getUiLayout().rightSummaryModules.map((m) => [m.id, m]));
+    const isCollapsedMod = (id) => Boolean(summaryModulesMap.get(id)?.collapsed);
+
     const inputHtml = `
-      <div class="glass-card module-block" data-summary-module-id="input" style="margin-bottom:10px;padding:10px 12px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
+      <div class="glass-card module-block ${isCollapsedMod('input') ? 'is-collapsed' : ''}" data-module-id="input" data-summary-module-id="input" style="margin-bottom:10px;padding:10px 12px;">
+        <div class="module-header" style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
           <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">速记与智能提炼</span>
           <span style="font-size:11px;color:var(--text-tertiary);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(activeLabel)}">${escapeHtml(activeLabel)}</span>
         </div>
-        <textarea
-          id="right-summary-input"
-          class="apple-textarea"
-          rows="3"
-          style="min-height:74px;font-size:13px;"
-          placeholder="随时记下一段想法、会议记录或复习安排，点击 AI 自动提炼待办与软件直达..."
-        >${escapeHtml(state.summaryInputText)}</textarea>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
-          <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="summarize-doc" ${state.summaryLoading ? 'disabled' : ''}>
-            ${icon('sparkles', 13)} ${state.summaryLoading ? '提炼中...' : '总结当前文档'}
-          </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" ${state.summaryLoading ? 'disabled' : ''}>
-            ${icon('sparkles', 13)} 总结上方文本
-          </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="ai-generate-mindmap" title="生成当前文档脑图或切换脑图视图">
-            🧠 AI 生成当前文档脑图
-          </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="ai-polish-fragments" title="将碎片内容智能润色成文（保留 [[...]] 锚点）">
-            ✨ AI 碎片润色成文
-          </button>
+        <div class="module-content">
+          <textarea
+            id="right-summary-input"
+            class="apple-textarea"
+            rows="3"
+            style="min-height:74px;font-size:13px;"
+            placeholder="随时记下一段想法、会议记录或复习安排，点击 AI 自动提炼待办与软件直达..."
+          >${escapeHtml(state.summaryInputText)}</textarea>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+            <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="summarize-doc" ${state.summaryLoading ? 'disabled' : ''}>
+              ${icon('sparkles', 13)} ${state.summaryLoading ? '提炼中...' : '总结当前文档'}
+            </button>
+            <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" ${state.summaryLoading ? 'disabled' : ''}>
+              ${icon('sparkles', 13)} 总结上方文本
+            </button>
+            <button type="button" class="pill-btn pill-btn-sm" data-action="ai-generate-mindmap" title="生成当前文档脑图或切换脑图视图">
+              🧠 AI 生成当前文档脑图
+            </button>
+            <button type="button" class="pill-btn pill-btn-sm" data-action="ai-polish-fragments" title="将碎片内容智能润色成文（保留 [[...]] 锚点）">
+              ✨ AI 碎片润色成文
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -1196,66 +1214,75 @@ export function initRightPanel(containerEl) {
 
     const sumCardStyle = buildScrollBodyStyle('summary_card');
     const summaryCardModuleHtml = `
-      <div class="module-block" data-module-id="summary_card" data-summary-module-id="summary_card" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
-        <div class="module-scroll-body" data-scroll-module="right_summary_card" style="${sumCardStyle}min-height:0;">
-          ${resultHtml}
+      <div class="module-block ${isCollapsedMod('summary_card') ? 'is-collapsed' : ''}" data-module-id="summary_card" data-summary-module-id="summary_card" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
+        <div class="module-header" style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:2px 2px 6px;">
+          <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">AI 摘要与待办</span>
         </div>
-        ${renderModuleResizerHtml('summary_card')}
+        <div class="module-content">
+          <div class="module-scroll-body" data-scroll-module="right_summary_card" style="${sumCardStyle}min-height:0;">
+            ${resultHtml}
+          </div>
+          ${renderModuleResizerHtml('summary_card')}
+        </div>
       </div>
     `;
 
     const remStyle = buildScrollBodyStyle('reminders');
     const remindersHtml = `
-      <div class="module-block" data-module-id="reminders" data-summary-module-id="reminders" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
-        <div class="module-scroll-body" data-scroll-module="right_reminders" style="${remStyle}min-height:0;">
-          <div class="section-heading" style="margin-top:14px;">
-            <span>定时提醒 (${pendingAndFired.length})</span>
-            <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
-              ${icon('rotate-ccw', 11)} 刷新
-            </button>
-          </div>
-          ${
-            pendingAndFired.length
-              ? pendingAndFired
-                  .map((rem) => {
-                    const isFired = rem.status === 'fired';
-                    return `
-                      <div class="glass-card" style="padding:9px 11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                        <div style="min-width:0;flex:1 1 auto;">
-                          <div style="display:flex;align-items:center;gap:6px;">
-                            <span style="width:7px;height:7px;border-radius:9999px;flex-shrink:0;background:${isFired ? 'var(--warning)' : 'var(--success)'};"></span>
-                            <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(rem.title)}</span>
-                          </div>
-                          <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;padding-left:13px;">
-                            ${isFired ? '已触发' : '待触发'} · ${escapeHtml(formatTriggerTime(rem.trigger_at))}
-                          </div>
-                        </div>
-                        <button type="button" class="icon-pill" data-action="delete-reminder" data-reminder-id="${escapeHtml(rem.id)}" title="取消/删除提醒" aria-label="删除提醒" style="width:26px;height:26px;">
-                          ${icon('x', 12)}
-                        </button>
-                      </div>
-                    `;
-                  })
-                  .join('')
-              : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
-          }
+      <div class="module-block ${isCollapsedMod('reminders') ? 'is-collapsed' : ''}" data-module-id="reminders" data-summary-module-id="reminders" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
+        <div class="section-heading module-header" style="margin-top:8px;">
+          <span>定时提醒 (${pendingAndFired.length})</span>
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
+            ${icon('rotate-ccw', 11)} 刷新
+          </button>
         </div>
-        ${renderModuleResizerHtml('reminders')}
+        <div class="module-content">
+          <div class="module-scroll-body" data-scroll-module="right_reminders" style="${remStyle}min-height:0;">
+            ${
+              pendingAndFired.length
+                ? pendingAndFired
+                    .map((rem) => {
+                      const isFired = rem.status === 'fired';
+                      return `
+                        <div class="glass-card" style="padding:9px 11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                          <div style="min-width:0;flex:1 1 auto;">
+                            <div style="display:flex;align-items:center;gap:6px;">
+                              <span style="width:7px;height:7px;border-radius:9999px;flex-shrink:0;background:${isFired ? 'var(--warning)' : 'var(--success)'};"></span>
+                              <span style="font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(rem.title)}</span>
+                            </div>
+                            <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;padding-left:13px;">
+                              ${isFired ? '已触发' : '待触发'} · ${escapeHtml(formatTriggerTime(rem.trigger_at))}
+                            </div>
+                          </div>
+                          <button type="button" class="icon-pill" data-action="delete-reminder" data-reminder-id="${escapeHtml(rem.id)}" title="取消/删除提醒" aria-label="删除提醒" style="width:26px;height:26px;">
+                            ${icon('x', 12)}
+                          </button>
+                        </div>
+                      `;
+                    })
+                    .join('')
+                : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
+            }
+          </div>
+          ${renderModuleResizerHtml('reminders')}
+        </div>
       </div>
     `;
 
     const tplSumStyle = buildScrollBodyStyle('ai_templates_summary');
     const aiTemplatesSummaryHtml = `
-      <div class="glass-card module-block" data-module-id="ai_templates_summary" data-summary-module-id="ai_templates" style="margin-top:10px;padding:10px 12px 4px;">
-        <div class="module-scroll-body" data-scroll-module="right_ai_templates_summary" style="${tplSumStyle}min-height:0;">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
-            <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-primary);">
-              ${icon('zap', 13)} AI 常用指令模板
-            </span>
-          </div>
-          ${renderAiTemplatesCardContentHtml()}
+      <div class="glass-card module-block ${isCollapsedMod('ai_templates') ? 'is-collapsed' : ''}" data-module-id="ai_templates_summary" data-summary-module-id="ai_templates" style="margin-top:10px;padding:10px 12px 4px;">
+        <div class="module-header" style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
+          <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-primary);">
+            ${icon('zap', 13)} AI 常用指令模板
+          </span>
         </div>
-        ${renderModuleResizerHtml('ai_templates_summary')}
+        <div class="module-content">
+          <div class="module-scroll-body" data-scroll-module="right_ai_templates_summary" style="${tplSumStyle}min-height:0;">
+            ${renderAiTemplatesCardContentHtml()}
+          </div>
+          ${renderModuleResizerHtml('ai_templates_summary')}
+        </div>
       </div>
     `;
 
@@ -1764,6 +1791,76 @@ export function initRightPanel(containerEl) {
     await sendChatMessage(finalPrompt);
   }
 
+  function showMindmapResultSheet({ activeFile, activeName, isMarkdown, suggestedTitle, outline, providerLabel }) {
+    openSheet({
+      title: `🧠 AI 生成脑图大纲 · ${activeName}`,
+      bodyHtml: `
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:var(--text-secondary);">主题：<strong>${escapeHtml(suggestedTitle)}</strong></span>
+            ${providerLabel ? `<span class="file-ext-badge">${escapeHtml(providerLabel)}</span>` : ''}
+          </div>
+          <div class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
+            ${renderMarkdownSafe(outline, { compactMedia: true })}
+          </div>
+        </div>
+      `,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="rp-mm-close">关闭</button>
+        <button type="button" class="pill-btn" id="rp-mm-copy">${icon('copy', 13)} 复制大纲</button>
+        <button type="button" class="pill-btn" id="rp-mm-save-new">${icon('file-text', 13)} 另存为脑图笔记</button>
+        ${
+          isMarkdown
+            ? `<button type="button" class="pill-btn pill-btn-primary" id="rp-mm-open-view">🧠 保存并切换脑图视图</button>`
+            : `<button type="button" class="pill-btn pill-btn-primary" id="rp-mm-append">${icon('plus', 13)} 追加到当前笔记</button>`
+        }
+      `,
+      onMount(card) {
+        card.querySelector('#rp-mm-close')?.addEventListener('click', closeSheet);
+        card.querySelector('#rp-mm-copy')?.addEventListener('click', () => {
+          copyInternal?.(outline, '已复制脑图 Markdown 大纲');
+        });
+
+        card.querySelector('#rp-mm-save-new')?.addEventListener('click', async () => {
+          try {
+            const title = `${suggestedTitle}_脑图`;
+            const created = await api.post('/api/files/create-note', {
+              title,
+              content: outline,
+            });
+            closeSheet();
+            store.emit('files:updated', created);
+            if (created?.path) {
+              store.emit('center:toggle-mindmap', { path: created.path });
+            }
+            showToast(`已保存并打开脑图笔记：${created?.name || title}`, 'success');
+          } catch (err) {
+            showToast(err?.message || '保存脑图笔记失败', 'error');
+          }
+        });
+
+        card.querySelector('#rp-mm-open-view')?.addEventListener('click', async () => {
+          if (!activeFile?.path) return;
+          try {
+            await api.put('/api/files/write', { path: activeFile.path, content: outline });
+            closeSheet();
+            store.state.activeDocumentText = outline;
+            store.emit('center:toggle-mindmap', { path: activeFile.path });
+            store.emit('file:open', { path: activeFile.path, name: activeFile.name, mode: 'mindmap', forceReload: true, skipUnsavedGuard: true });
+            showToast('已更新当前笔记并切换至脑图视图', 'success');
+          } catch (err) {
+            showToast(err?.message || '写入脑图大纲失败', 'error');
+          }
+        });
+
+        card.querySelector('#rp-mm-append')?.addEventListener('click', () => {
+          closeSheet();
+          store.emit('doc:append', { content: outline, path: activeFile?.path });
+        });
+      },
+    });
+  }
+
   async function handleAiGenerateMindmap() {
     const activeFile = store.state.activeFile;
     const activeText = String(store.state.activeDocumentText || state.summaryInputText || '').trim();
@@ -1775,112 +1872,151 @@ export function initRightPanel(containerEl) {
     const activeName = activeFile?.name || '当前文档';
     const isMarkdown =
       activeFile?.type === 'markdown' || String(activeName).toLowerCase().endsWith('.md');
+    const taskId = `bg_mindmap_${Date.now()}`;
 
+    setBgAiTaskSafe({ id: taskId, label: 'AI 正在生成脑图大纲…', status: 'running' });
+    showToast('AI 已在后台生成，可继续操作', 'info');
+
+    try {
+      const res = await api.post('/api/ai/mindmap', {
+        text: activeText,
+        file_path: activeFile?.path || null,
+      });
+      if (res?.provider_label) {
+        state.liveProviderLabel = String(res.provider_label);
+        renderSummaryMode();
+        renderChatHeaderStatus();
+      }
+      const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
+      const suggestedTitle = String(res?.title || `${activeName.replace(/\.[^.]+$/, '')} 脑图`).trim();
+      if (!outline) {
+        setBgAiTaskSafe({ id: taskId, label: 'AI 未返回有效脑图大纲', status: 'error' });
+        showToast('AI 未返回有效脑图大纲', 'warning');
+        return;
+      }
+
+      const openResult = () =>
+        showMindmapResultSheet({
+          activeFile,
+          activeName,
+          isMarkdown,
+          suggestedTitle,
+          outline,
+          providerLabel: res?.provider_label || '',
+        });
+
+      setBgAiTaskSafe({
+        id: taskId,
+        label: 'AI 脑图大纲已就绪',
+        status: 'done',
+        onOpen: openResult,
+      });
+      showToast('AI 脑图大纲已就绪', 'success', {
+        duration: 5000,
+        actionLabel: '查看结果',
+        onAction: openResult,
+      });
+    } catch (err) {
+      const errMsg = err?.message || '请稍后重试';
+      setBgAiTaskSafe({ id: taskId, label: `生成脑图失败：${errMsg}`, status: 'error' });
+      showToast(`生成脑图失败：${errMsg}`, 'error');
+    }
+  }
+
+  function showPolishResultSheet({ activeFile, activeName, rawText, polished, canReplaceDoc }) {
     openSheet({
-      title: `🧠 AI 生成脑图大纲 · ${activeName}`,
+      title: `✨ AI 碎片润色成文 · ${activeName}`,
       bodyHtml: `
-        <div class="empty-state" style="padding:26px 12px;">
-          <p class="empty-title">正在智能梳理文档脉络并生成思维导图大纲…</p>
-          <p class="empty-desc">保留文内所有 [[...]] 传送门锚点，自动提炼 3 级知识分支</p>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:var(--text-secondary);">原文 ${rawText.length} 字 → 润色后 ${polished.length} 字</span>
+            <div class="segmented-pill" role="tablist">
+              <div class="segmented-thumb" data-role="rp-pol-thumb" style="width:calc(50% - 3px);transform:translateX(0%);"></div>
+              <button type="button" class="segmented-btn is-active" data-rp-pol-view="preview" style="height:24px;font-size:11.5px;">预览效果</button>
+              <button type="button" class="segmented-btn" data-rp-pol-view="raw" style="height:24px;font-size:11.5px;">Markdown 源码</button>
+            </div>
+          </div>
+          <div data-role="rp-pol-preview" class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
+            ${renderMarkdownSafe(polished, { compactMedia: true })}
+          </div>
+          <textarea data-role="rp-pol-raw" class="apple-textarea" rows="12" style="display:none;font-family:var(--font-mono);font-size:12.5px;">${escapeHtml(polished)}</textarea>
         </div>
       `,
-      footerHtml: `<button type="button" class="pill-btn" id="rp-mm-cancel">取消</button>`,
-      async onMount(card) {
-        card.querySelector('#rp-mm-cancel')?.addEventListener('click', closeSheet);
-        const bodyEl = card.querySelector('.sheet-body');
-        const footerEl = card.querySelector('.sheet-footer');
-        try {
-          const res = await api.post('/api/ai/mindmap', {
-            text: activeText,
-            file_path: activeFile?.path || null,
-          });
-          if (res?.provider_label) {
-            state.liveProviderLabel = String(res.provider_label);
-            renderSummaryMode();
-            renderChatHeaderStatus();
-          }
-          const outline = String(res?.markdown || res?.outline || res?.content || '').trim();
-          const suggestedTitle = String(res?.title || `${activeName.replace(/\.[^.]+$/, '')} 脑图`).trim();
-          if (!outline) {
-            if (bodyEl) {
-              bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 未返回有效脑图大纲</p></div>`;
-            }
-            return;
-          }
-
-          if (bodyEl) {
-            bodyEl.innerHTML = `
-              <div style="display:flex;flex-direction:column;gap:10px;">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-                  <span style="font-size:12px;color:var(--text-secondary);">主题：<strong>${escapeHtml(suggestedTitle)}</strong></span>
-                  ${res?.provider_label ? `<span class="file-ext-badge">${escapeHtml(res.provider_label)}</span>` : ''}
-                </div>
-                <div class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
-                  ${renderMarkdownSafe(outline, { compactMedia: true })}
-                </div>
-              </div>
-            `;
-          }
-
-          if (footerEl) {
-            footerEl.innerHTML = `
-              <button type="button" class="pill-btn" id="rp-mm-close">关闭</button>
-              <button type="button" class="pill-btn" id="rp-mm-copy">${icon('copy', 13)} 复制大纲</button>
-              <button type="button" class="pill-btn" id="rp-mm-save-new">${icon('file-text', 13)} 另存为脑图笔记</button>
-              ${
-                isMarkdown
-                  ? `<button type="button" class="pill-btn pill-btn-primary" id="rp-mm-open-view">🧠 保存并切换脑图视图</button>`
-                  : `<button type="button" class="pill-btn pill-btn-primary" id="rp-mm-append">${icon('plus', 13)} 追加到当前笔记</button>`
-              }
-            `;
-
-            footerEl.querySelector('#rp-mm-close')?.addEventListener('click', closeSheet);
-            footerEl.querySelector('#rp-mm-copy')?.addEventListener('click', () => {
-              copyInternal?.(outline, '已复制脑图 Markdown 大纲');
-            });
-
-            footerEl.querySelector('#rp-mm-save-new')?.addEventListener('click', async () => {
-              try {
-                const title = `${suggestedTitle}_脑图`;
-                const created = await api.post('/api/files/create-note', {
-                  title,
-                  content: outline,
-                });
-                closeSheet();
-                store.emit('files:updated', created);
-                if (created?.path) {
-                  store.emit('center:toggle-mindmap', { path: created.path });
-                }
-                showToast(`已保存并打开脑图笔记：${created?.name || title}`, 'success');
-              } catch (err) {
-                showToast(err?.message || '保存脑图笔记失败', 'error');
-              }
-            });
-
-            footerEl.querySelector('#rp-mm-open-view')?.addEventListener('click', async () => {
-              if (!activeFile?.path) return;
-              try {
-                await api.put('/api/files/write', { path: activeFile.path, content: outline });
-                closeSheet();
-                store.state.activeDocumentText = outline;
-                store.emit('center:toggle-mindmap', { path: activeFile.path });
-                store.emit('file:open', { path: activeFile.path, name: activeFile.name, mode: 'mindmap', forceReload: true, skipUnsavedGuard: true });
-                showToast('已更新当前笔记并切换至脑图视图', 'success');
-              } catch (err) {
-                showToast(err?.message || '写入脑图大纲失败', 'error');
-              }
-            });
-
-            footerEl.querySelector('#rp-mm-append')?.addEventListener('click', () => {
-              closeSheet();
-              store.emit('doc:append', { content: outline, path: activeFile?.path });
-            });
-          }
-        } catch (err) {
-          if (bodyEl) {
-            bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">生成脑图失败</p><p class="empty-desc">${escapeHtml(err?.message || '请稍后重试')}</p></div>`;
-          }
+      footerHtml: `
+        <button type="button" class="pill-btn" id="rp-pol-close">取消</button>
+        <button type="button" class="pill-btn" id="rp-pol-copy">${icon('copy', 13)} 复制</button>
+        <button type="button" class="pill-btn" id="rp-pol-append">${icon('plus', 13)} 追加到笔记</button>
+        ${
+          canReplaceDoc
+            ? `<button type="button" class="pill-btn pill-btn-primary" id="rp-pol-replace">${icon('check', 13)} 确认替换当前文档</button>`
+            : `<button type="button" class="pill-btn pill-btn-primary" id="rp-pol-save-new">${icon('file-text', 13)} 存为新笔记</button>`
         }
+      `,
+      onMount(card) {
+        const thumb = card.querySelector('[data-role="rp-pol-thumb"]');
+        const prevBox = card.querySelector('[data-role="rp-pol-preview"]');
+        const rawBox = card.querySelector('[data-role="rp-pol-raw"]');
+        card.querySelectorAll('[data-rp-pol-view]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const isRaw = btn.dataset.rpPolView === 'raw';
+            card.querySelectorAll('[data-rp-pol-view]').forEach((b) => b.classList.toggle('is-active', b === btn));
+            if (thumb) thumb.style.transform = `translateX(${isRaw ? '100%' : '0%'})`;
+            if (prevBox) prevBox.style.display = isRaw ? 'none' : 'block';
+            if (rawBox) rawBox.style.display = isRaw ? 'block' : 'none';
+          });
+        });
+
+        const getLatestPolished = () => card.querySelector('[data-role="rp-pol-raw"]')?.value ?? polished;
+
+        card.querySelector('#rp-pol-close')?.addEventListener('click', closeSheet);
+        card.querySelector('#rp-pol-copy')?.addEventListener('click', () => {
+          copyInternal?.(getLatestPolished(), '已复制润色成文结果');
+        });
+
+        card.querySelector('#rp-pol-append')?.addEventListener('click', () => {
+          const latest = getLatestPolished();
+          closeSheet();
+          store.emit('doc:append', { content: latest, path: activeFile?.path });
+        });
+
+        card.querySelector('#rp-pol-replace')?.addEventListener('click', async () => {
+          const latest = getLatestPolished();
+          if (!activeFile?.path) return;
+          try {
+            const writeRes = await api.put('/api/files/write', {
+              path: activeFile.path,
+              content: latest,
+            });
+            store.state.activeDocumentText = latest;
+            closeSheet();
+            store.emit('file:saved', { path: activeFile.path, snapshot_id: writeRes?.snapshot_id || null });
+            store.emit('file:open', {
+              path: activeFile.path,
+              name: activeFile.name,
+              forceReload: true,
+              skipUnsavedGuard: true,
+            });
+            showToast('已润色替换当前文档（已自动生成写前快照）', 'success');
+          } catch (err) {
+            showToast(err?.message || '替换文档失败', 'error');
+          }
+        });
+
+        card.querySelector('#rp-pol-save-new')?.addEventListener('click', async () => {
+          const latest = getLatestPolished();
+          try {
+            const title = `润色成文_${activeName.replace(/\.[^.]+$/, '')}`;
+            const created = await api.post('/api/files/create-note', { title, content: latest });
+            closeSheet();
+            store.emit('files:updated', created);
+            if (created?.path) {
+              store.emit('file:open', created);
+            }
+            showToast(`已存为新笔记：${created?.name || title}`, 'success');
+          } catch (err) {
+            showToast(err?.message || '保存新笔记失败', 'error');
+          }
+        });
       },
     });
   }
@@ -1900,142 +2036,53 @@ export function initRightPanel(containerEl) {
           activeFile?.type === 'text' ||
           /\.(md|txt)$/i.test(activeName))
     );
+    const taskId = `bg_polish_${Date.now()}`;
 
-    openSheet({
-      title: `✨ AI 碎片润色成文 · ${activeName}`,
-      bodyHtml: `
-        <div class="empty-state" style="padding:26px 12px;">
-          <p class="empty-title">正在将零散碎片润色整理为结构化文章…</p>
-          <p class="empty-desc">完整保留所有 [[...]] 传送门锚点与待办勾选框</p>
-        </div>
-      `,
-      footerHtml: `<button type="button" class="pill-btn" id="rp-pol-cancel">取消</button>`,
-      async onMount(card) {
-        card.querySelector('#rp-pol-cancel')?.addEventListener('click', closeSheet);
-        const bodyEl = card.querySelector('.sheet-body');
-        const footerEl = card.querySelector('.sheet-footer');
+    setBgAiTaskSafe({ id: taskId, label: 'AI 正在润色碎片成文…', status: 'running' });
+    showToast('AI 已在后台生成，可继续操作', 'info');
 
-        try {
-          const res = await api.post('/api/ai/polish', {
-            text: rawText,
-            style: 'article',
-          });
-          if (res?.provider_label) {
-            state.liveProviderLabel = String(res.provider_label);
-            renderSummaryMode();
-            renderChatHeaderStatus();
-          }
-          const polished = String(res?.markdown || res?.polished || res?.content || '').trim();
-          if (!polished) {
-            if (bodyEl) {
-              bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">AI 未返回有效润色内容</p></div>`;
-            }
-            return;
-          }
+    try {
+      const res = await api.post('/api/ai/polish', {
+        text: rawText,
+        style: 'article',
+      });
+      if (res?.provider_label) {
+        state.liveProviderLabel = String(res.provider_label);
+        renderSummaryMode();
+        renderChatHeaderStatus();
+      }
+      const polished = String(res?.markdown || res?.polished || res?.content || '').trim();
+      if (!polished) {
+        setBgAiTaskSafe({ id: taskId, label: 'AI 未返回有效润色内容', status: 'error' });
+        showToast('AI 未返回有效润色内容', 'warning');
+        return;
+      }
 
-          if (bodyEl) {
-            bodyEl.innerHTML = `
-              <div style="display:flex;flex-direction:column;gap:10px;">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-                  <span style="font-size:12px;color:var(--text-secondary);">原文 ${rawText.length} 字 → 润色后 ${polished.length} 字</span>
-                  <div class="segmented-pill" role="tablist">
-                    <div class="segmented-thumb" data-role="rp-pol-thumb" style="width:calc(50% - 3px);transform:translateX(0%);"></div>
-                    <button type="button" class="segmented-btn is-active" data-rp-pol-view="preview" style="height:24px;font-size:11.5px;">预览效果</button>
-                    <button type="button" class="segmented-btn" data-rp-pol-view="raw" style="height:24px;font-size:11.5px;">Markdown 源码</button>
-                  </div>
-                </div>
-                <div data-role="rp-pol-preview" class="glass-card md-preview" style="padding:12px 14px;max-height:46vh;overflow-y:auto;">
-                  ${renderMarkdownSafe(polished, { compactMedia: true })}
-                </div>
-                <textarea data-role="rp-pol-raw" class="apple-textarea" rows="12" style="display:none;font-family:var(--font-mono);font-size:12.5px;">${escapeHtml(polished)}</textarea>
-              </div>
-            `;
+      const openResult = () =>
+        showPolishResultSheet({
+          activeFile,
+          activeName,
+          rawText,
+          polished,
+          canReplaceDoc,
+        });
 
-            const thumb = bodyEl.querySelector('[data-role="rp-pol-thumb"]');
-            const prevBox = bodyEl.querySelector('[data-role="rp-pol-preview"]');
-            const rawBox = bodyEl.querySelector('[data-role="rp-pol-raw"]');
-            bodyEl.querySelectorAll('[data-rp-pol-view]').forEach((btn) => {
-              btn.addEventListener('click', () => {
-                const isRaw = btn.dataset.rpPolView === 'raw';
-                bodyEl.querySelectorAll('[data-rp-pol-view]').forEach((b) => b.classList.toggle('is-active', b === btn));
-                if (thumb) thumb.style.transform = `translateX(${isRaw ? '100%' : '0%'})`;
-                if (prevBox) prevBox.style.display = isRaw ? 'none' : 'block';
-                if (rawBox) rawBox.style.display = isRaw ? 'block' : 'none';
-              });
-            });
-          }
-
-          if (footerEl) {
-            footerEl.innerHTML = `
-              <button type="button" class="pill-btn" id="rp-pol-close">取消</button>
-              <button type="button" class="pill-btn" id="rp-pol-copy">${icon('copy', 13)} 复制</button>
-              <button type="button" class="pill-btn" id="rp-pol-append">${icon('plus', 13)} 追加到笔记</button>
-              ${
-                canReplaceDoc
-                  ? `<button type="button" class="pill-btn pill-btn-primary" id="rp-pol-replace">${icon('check', 13)} 确认替换当前文档</button>`
-                  : `<button type="button" class="pill-btn pill-btn-primary" id="rp-pol-save-new">${icon('file-text', 13)} 存为新笔记</button>`
-              }
-            `;
-
-            const getLatestPolished = () => bodyEl?.querySelector('[data-role="rp-pol-raw"]')?.value ?? polished;
-
-            footerEl.querySelector('#rp-pol-close')?.addEventListener('click', closeSheet);
-            footerEl.querySelector('#rp-pol-copy')?.addEventListener('click', () => {
-              copyInternal?.(getLatestPolished(), '已复制润色成文结果');
-            });
-
-            footerEl.querySelector('#rp-pol-append')?.addEventListener('click', () => {
-              const latest = getLatestPolished();
-              closeSheet();
-              store.emit('doc:append', { content: latest, path: activeFile?.path });
-            });
-
-            footerEl.querySelector('#rp-pol-replace')?.addEventListener('click', async () => {
-              const latest = getLatestPolished();
-              if (!activeFile?.path) return;
-              try {
-                const writeRes = await api.put('/api/files/write', {
-                  path: activeFile.path,
-                  content: latest,
-                });
-                store.state.activeDocumentText = latest;
-                closeSheet();
-                store.emit('file:saved', { path: activeFile.path, snapshot_id: writeRes?.snapshot_id || null });
-                store.emit('file:open', {
-                  path: activeFile.path,
-                  name: activeFile.name,
-                  forceReload: true,
-                  skipUnsavedGuard: true,
-                });
-                showToast('已润色替换当前文档（已自动生成写前快照）', 'success');
-              } catch (err) {
-                showToast(err?.message || '替换文档失败', 'error');
-              }
-            });
-
-            footerEl.querySelector('#rp-pol-save-new')?.addEventListener('click', async () => {
-              const latest = getLatestPolished();
-              try {
-                const title = `润色成文_${activeName.replace(/\.[^.]+$/, '')}`;
-                const created = await api.post('/api/files/create-note', { title, content: latest });
-                closeSheet();
-                store.emit('files:updated', created);
-                if (created?.path) {
-                  store.emit('file:open', created);
-                }
-                showToast(`已存为新笔记：${created?.name || title}`, 'success');
-              } catch (err) {
-                showToast(err?.message || '保存新笔记失败', 'error');
-              }
-            });
-          }
-        } catch (err) {
-          if (bodyEl) {
-            bodyEl.innerHTML = `<div class="empty-state"><p class="empty-title">碎片润色失败</p><p class="empty-desc">${escapeHtml(err?.message || '请稍后重试')}</p></div>`;
-          }
-        }
-      },
-    });
+      setBgAiTaskSafe({
+        id: taskId,
+        label: 'AI 润色成文已就绪',
+        status: 'done',
+        onOpen: openResult,
+      });
+      showToast('AI 润色成文已就绪', 'success', {
+        duration: 5000,
+        actionLabel: '查看结果',
+        onAction: openResult,
+      });
+    } catch (err) {
+      const errMsg = err?.message || '请稍后重试';
+      setBgAiTaskSafe({ id: taskId, label: `碎片润色失败：${errMsg}`, status: 'error' });
+      showToast(`碎片润色失败：${errMsg}`, 'error');
+    }
   }
 
   async function openSaveNoteSheet(msg) {
@@ -2344,10 +2391,18 @@ export function initRightPanel(containerEl) {
     const apps = store.state.apps || [];
     const workspaces = store.state.workspaces || [];
     const appsById = new Map(apps.map((a) => [String(a.id), a]));
+    const toolModsMap = new Map(getUiLayout().rightToolModules.map((m) => [m.id, m]));
+    const isToolOpen = (id) => {
+      const mod = toolModsMap.get(id);
+      if (mod && typeof mod.collapsed === 'boolean') {
+        return !mod.collapsed;
+      }
+      return toolOpenStateById.get(id) !== false;
+    };
 
     const quickExcelScrollStyle = buildScrollBodyStyle('quick_excel');
     const card1Html = `
-      <details class="tool-card module-block" data-module-id="quick_excel" draggable="true" ${toolOpenStateById.get('quick_excel') !== false ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="quick_excel" draggable="true" ${isToolOpen('quick_excel') ? 'open' : ''}>
         <summary class="tool-card-summary">
           <span style="display:inline-flex;align-items:center;gap:6px;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
@@ -2434,8 +2489,28 @@ export function initRightPanel(containerEl) {
 
     const treeIsTable = state.treeViewMode === 'table';
     const treeScrollStyle = buildScrollBodyStyle('knowledge_tree');
+    const inlineTreeCreateHtml = state.inlineTreeCreateOpen
+      ? `
+        <div class="inline-quick-create-row" data-role="inline-tree-create-row" style="margin-bottom:8px;">
+          <input
+            type="text"
+            class="inline-rename-input"
+            data-role="inline-tree-node-input"
+            value="${escapeHtml(state.inlineTreeCreateDraft || '')}"
+            placeholder="输入分类名称，回车创建…"
+            autocomplete="off"
+          />
+          <button type="button" class="icon-pill" data-action="tree-inline-create-submit" title="创建节点" aria-label="确认创建" style="width:24px;height:24px;flex-shrink:0;">
+            ${icon('check', 12)}
+          </button>
+          <button type="button" class="icon-pill" data-action="tree-inline-create-cancel" title="取消" aria-label="取消创建" style="width:24px;height:24px;flex-shrink:0;">
+            ${icon('x', 12)}
+          </button>
+        </div>
+      `
+      : '';
     const card2Html = `
-      <details class="tool-card module-block" data-module-id="knowledge_tree" draggable="true" ${toolOpenStateById.get('knowledge_tree') !== false ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="knowledge_tree" draggable="true" ${isToolOpen('knowledge_tree') ? 'open' : ''}>
         <summary class="tool-card-summary">
           <span style="display:inline-flex;align-items:center;gap:6px;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
@@ -2460,6 +2535,8 @@ export function initRightPanel(containerEl) {
               </button>
             </div>
           </div>
+
+          ${inlineTreeCreateHtml}
 
           ${
             state.classifyResult
@@ -2583,7 +2660,7 @@ export function initRightPanel(containerEl) {
 
     const appsWsScrollStyle = buildScrollBodyStyle('apps_workspaces');
     const card3Html = `
-      <details class="tool-card module-block" data-module-id="apps_workspaces" draggable="true" ${toolOpenStateById.get('apps_workspaces') !== false ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="apps_workspaces" draggable="true" ${isToolOpen('apps_workspaces') ? 'open' : ''}>
         <summary class="tool-card-summary">
           <span style="display:inline-flex;align-items:center;gap:6px;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
@@ -2664,7 +2741,7 @@ export function initRightPanel(containerEl) {
 
     const aiTplScrollStyle = buildScrollBodyStyle('ai_templates');
     const card4Html = `
-      <details class="tool-card module-block" data-module-id="ai_templates" draggable="true" ${toolOpenStateById.get('ai_templates') !== false ? 'open' : ''}>
+      <details class="tool-card module-block" data-module-id="ai_templates" draggable="true" ${isToolOpen('ai_templates') ? 'open' : ''}>
         <summary class="tool-card-summary">
           <span style="display:inline-flex;align-items:center;gap:6px;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
@@ -3201,6 +3278,48 @@ export function initRightPanel(containerEl) {
   // Event Delegation & Store EventBus Wiring
   // ---------------------------------------------------------------------------
 
+  async function submitInlineTreeNode() {
+    const input = toolsEl?.querySelector('[data-role="inline-tree-node-input"]');
+    const name = String(input?.value ?? state.inlineTreeCreateDraft ?? '').trim();
+    if (!name) {
+      showToast('节点名称不能为空', 'warning');
+      input?.focus();
+      return;
+    }
+    try {
+      await api.post('/api/tree', { name, parent_id: null });
+      state.inlineTreeCreateOpen = false;
+      state.inlineTreeCreateDraft = '';
+      await fetchTree();
+      store.emit('tree:updated');
+      showToast(`已创建节点「${name}」`, 'success');
+    } catch (err) {
+      showToast(err?.message || '创建节点失败', 'error');
+    }
+  }
+
+  containerEl.addEventListener('contextmenu', (e) => {
+    const header = e.target.closest('.module-header, .tool-card-summary');
+    if (!header || !containerEl.contains(header)) return;
+    const block = header.closest('.module-block');
+    if (!block) return;
+    const summaryModId = block.dataset.summaryModuleId;
+    const toolModId = block.dataset.moduleId;
+    const group = summaryModId ? 'summary' : 'tools';
+    const moduleId = summaryModId || toolModId;
+    if (!moduleId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    store.emit('module:context-menu', {
+      side: 'right',
+      group,
+      moduleId,
+      heightKey: toolModId ? `right_${toolModId}` : `right_${moduleId}`,
+      x: e.clientX,
+      y: e.clientY,
+    });
+  });
+
   containerEl.addEventListener('input', (e) => {
     const sumTa = e.target.closest('#right-summary-input');
     if (sumTa) {
@@ -3210,6 +3329,11 @@ export function initRightPanel(containerEl) {
     const chatTa = e.target.closest('#chat-input');
     if (chatTa) {
       state.chatDraft = chatTa.value;
+      return;
+    }
+    const treeInput = e.target.closest('[data-role="inline-tree-node-input"]');
+    if (treeInput) {
+      state.inlineTreeCreateDraft = treeInput.value;
     }
   });
 
@@ -3217,6 +3341,18 @@ export function initRightPanel(containerEl) {
     if (e.target?.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendChatMessage();
+      return;
+    }
+    if (e.target?.matches?.('[data-role="inline-tree-node-input"]')) {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        submitInlineTreeNode();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        state.inlineTreeCreateOpen = false;
+        state.inlineTreeCreateDraft = '';
+        renderToolsMode();
+      }
     }
   });
 
@@ -3535,7 +3671,25 @@ export function initRightPanel(containerEl) {
     }
 
     if (action === 'tree-create-node') {
-      openCreateTreeNodeSheet();
+      state.inlineTreeCreateOpen = true;
+      state.inlineTreeCreateDraft = '';
+      renderToolsMode();
+      window.requestAnimationFrame(() => {
+        const inp = toolsEl?.querySelector('[data-role="inline-tree-node-input"]');
+        inp?.focus();
+      });
+      return;
+    }
+
+    if (action === 'tree-inline-create-submit') {
+      await submitInlineTreeNode();
+      return;
+    }
+
+    if (action === 'tree-inline-create-cancel') {
+      state.inlineTreeCreateOpen = false;
+      state.inlineTreeCreateDraft = '';
+      renderToolsMode();
       return;
     }
 
@@ -3705,6 +3859,17 @@ export function initRightPanel(containerEl) {
     const next = typeof payload === 'string' ? payload : payload?.mode;
     if (next && next !== state.mode) {
       switchMode(next, { emitEvent: false });
+    }
+  });
+
+  store.on('right:tool-collapse-sync', (mods) => {
+    if (Array.isArray(mods)) {
+      for (const m of mods) {
+        if (m?.id && typeof m.collapsed === 'boolean') {
+          toolOpenStateById.set(m.id, !m.collapsed);
+        }
+      }
+      renderToolsMode();
     }
   });
 

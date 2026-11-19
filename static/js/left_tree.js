@@ -69,11 +69,54 @@ const mutating = {
 let containerRef = null;
 let isLoadingInitial = true;
 let dragModuleId = null;
+let dragFileItem = null;
 let quickPomodoroTask = '';
 let leftFilterQuery = '';
 let leftContextMenuEl = null;
+let moduleContextMenuEl = null;
 let isResizingModule = false;
 let globalMenuListenersBound = false;
+let moduleMenuListenersBound = false;
+const soloRestoreStateByGroup = new Map();
+
+const SORT_FIELD_LABELS = {
+  name: '按名称',
+  mtime: '按修改时间',
+  ext: '按文件类型',
+  size: '按文件大小',
+};
+
+function getPinnedFilesList() {
+  return Array.isArray(store.state.pinnedFiles) ? store.state.pinnedFiles : [];
+}
+
+function isCustomSortEnabled() {
+  return Boolean(store.state.customSortEnabled);
+}
+
+function getCustomFileOrderList() {
+  return Array.isArray(store.state.customFileOrder) ? store.state.customFileOrder : [];
+}
+
+function renderSortCornerBadgeHtml(by) {
+  let inner = '';
+  if (by === 'mtime') inner = icon('clock', 9);
+  else if (by === 'ext') inner = icon('file-text', 9);
+  else if (by === 'size') inner = icon('bar-chart-2', 9);
+  else inner = '<span class="left-sort-corner-letter">A</span>';
+  return `<span class="left-sort-corner-icon" aria-hidden="true">${inner}</span>`;
+}
+
+function renderSortTriggerContentHtml(sortCfg = getLeftFileSort()) {
+  const by = sortCfg?.by || 'name';
+  return `${icon('arrow-up-down', 14)}${renderSortCornerBadgeHtml(by)}`;
+}
+
+function getSortTooltip(sortCfg = getLeftFileSort()) {
+  const byLabel = SORT_FIELD_LABELS[sortCfg?.by] || SORT_FIELD_LABELS.name;
+  const dirLabel = sortCfg?.dir === 'desc' ? '降序' : '升序';
+  return `排序：${byLabel} · ${dirLabel}`;
+}
 
 function getLeftFileSort() {
   const raw = store.state.leftFileSort;
@@ -305,7 +348,29 @@ function sortFileItems(items, sortCfg = getLeftFileSort()) {
   const by = sortCfg?.by || 'name';
   const mult = sortCfg?.dir === 'desc' ? -1 : 1;
 
-  list.sort((a, b) => {
+  const pinnedOrder = new Map(getPinnedFilesList().map((p, idx) => [p, idx]));
+  const customEnabled = isCustomSortEnabled();
+  const customOrder = new Map(getCustomFileOrderList().map((p, idx) => [p, idx]));
+
+  const pinnedItems = [];
+  const manualItems = [];
+  const autoItems = [];
+
+  for (const item of list) {
+    const path = item?.path || '';
+    if (pinnedOrder.has(path)) {
+      pinnedItems.push(item);
+    } else if (customEnabled && customOrder.has(path)) {
+      manualItems.push(item);
+    } else {
+      autoItems.push(item);
+    }
+  }
+
+  pinnedItems.sort((a, b) => (pinnedOrder.get(a?.path || '') ?? 0) - (pinnedOrder.get(b?.path || '') ?? 0));
+  manualItems.sort((a, b) => (customOrder.get(a?.path || '') ?? 0) - (customOrder.get(b?.path || '') ?? 0));
+
+  autoItems.sort((a, b) => {
     const nameA = String(a?.name || getBasename(a?.path || ''));
     const nameB = String(b?.name || getBasename(b?.path || ''));
     let cmp = 0;
@@ -328,7 +393,7 @@ function sortFileItems(items, sortCfg = getLeftFileSort()) {
     return cmp * mult;
   });
 
-  return list;
+  return [...pinnedItems, ...manualItems, ...autoItems];
 }
 
 function filterFileItems(items, query) {
@@ -506,6 +571,7 @@ function renderFilesSection(items, selectedSet, activePath) {
   const sortCfg = getLeftFileSort();
   const groups = groupFiles(visibleItems, sortCfg);
   const forceExpand = Boolean(trimmedQuery);
+  const pinnedSet = new Set(getPinnedFilesList());
 
   return groups
     .map((grp) => {
@@ -529,14 +595,17 @@ function renderFilesSection(items, selectedSet, activePath) {
                     const isChecked = selectedSet.has(path);
                     const isActive = Boolean(activePath) && activePath === path;
                     const isPriv = Boolean(item.is_private);
+                    const isPinned = pinnedSet.has(path);
                     const mtimeText = formatMtime(item.mtime);
                     return `
                       <div
-                        class="tree-file-item ${isActive ? 'is-selected' : ''}"
+                        class="tree-file-item ${isActive ? 'is-selected' : ''} ${isPinned ? 'is-pinned' : ''}"
                         data-action="open-file"
                         data-path="${escapeHtml(path)}"
                         data-name="${escapeHtml(name)}"
                         data-ext="${escapeHtml(ext)}"
+                        data-pinned="${isPinned ? '1' : '0'}"
+                        data-group-key="${escapeHtml(grp.key)}"
                         draggable="true"
                         role="button"
                         tabindex="0"
@@ -553,7 +622,10 @@ function renderFilesSection(items, selectedSet, activePath) {
                           ${icon(getFileIconName(ext), 15)}
                         </span>
                         <span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;">
-                          <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点 · 右键更多操作）">${escapeHtml(name)}</span>
+                          <span style="display:flex;align-items:center;gap:4px;min-width:0;">
+                            <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点 · 右键更多操作）">${escapeHtml(name)}</span>
+                            ${isPinned ? `<span class="file-pin-badge" title="已置顶" aria-label="已置顶">${icon('pin', 10)}</span>` : ''}
+                          </span>
                           <span style="display:flex;align-items:center;gap:5px;min-width:0;">
                             <span class="file-ext-badge" style="padding:0 5px;font-size:9.5px;">${escapeHtml(ext)}</span>
                             ${mtimeText ? `<span class="file-meta-time" style="font-size:10px;color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(mtimeText)}</span>` : ''}
@@ -878,6 +950,8 @@ const SORT_FIELD_OPTIONS = [
 function renderSortPopoverContentHtml(sortCfg = getLeftFileSort()) {
   const by = sortCfg?.by || 'name';
   const dir = sortCfg?.dir === 'desc' ? 'desc' : 'asc';
+  const customEnabled = isCustomSortEnabled();
+  const customOrderCount = getCustomFileOrderList().length;
   return `
     <div class="left-sort-group">
       ${SORT_FIELD_OPTIONS.map(
@@ -917,13 +991,35 @@ function renderSortPopoverContentHtml(sortCfg = getLeftFileSort()) {
         ${icon('arrow-down', 12)} 降序 (Z→A / 新→旧)
       </button>
     </div>
+    <div class="left-sort-divider" role="separator"></div>
+    <div class="left-sort-group">
+      <button
+        type="button"
+        class="left-sort-option ${customEnabled ? 'is-active' : ''}"
+        data-action="toggle-custom-sort"
+        role="menuitemcheckbox"
+        aria-checked="${customEnabled ? 'true' : 'false'}"
+      >
+        <span>✋ 自定义拖拽排序</span>
+        ${customEnabled ? icon('check', 12) : ''}
+      </button>
+      <button
+        type="button"
+        class="left-sort-option"
+        data-action="tidy-custom-sort"
+        ${customOrderCount === 0 ? 'disabled style="opacity:0.45;cursor:not-allowed;"' : ''}
+        role="menuitem"
+      >
+        <span style="display:inline-flex;align-items:center;gap:5px;">${icon('list-restart', 12)} 🧹 一键整理（按默认排序归位）</span>
+      </button>
+    </div>
   `;
 }
 
 function renderStickyTopHtml(selectedCount) {
   const hasFilter = Boolean(leftFilterQuery);
   const sort = getLeftFileSort();
-  const hasActiveSort = sort.by !== 'name' || sort.dir !== 'asc';
+  const sortTooltip = getSortTooltip(sort);
   return `
     <div class="left-sticky-top">
       <div class="left-header-row">
@@ -973,14 +1069,14 @@ function renderStickyTopHtml(selectedCount) {
         <div class="left-sort-wrap">
           <button
             type="button"
-            class="left-icon-btn left-sort-trigger ${hasActiveSort ? 'has-active-sort' : ''}"
+            class="left-icon-btn left-sort-trigger"
             data-action="toggle-sort-popover"
-            title="排序方式"
-            aria-label="排序方式"
+            title="${escapeHtml(sortTooltip)}"
+            aria-label="${escapeHtml(sortTooltip)}"
             aria-expanded="false"
             aria-haspopup="menu"
           >
-            ${icon('arrow-up-down', 14)}
+            ${renderSortTriggerContentHtml(sort)}
           </button>
           <div class="left-sort-popover" data-role="left-sort-popover" role="menu" hidden>
             ${renderSortPopoverContentHtml(sort)}
@@ -1087,10 +1183,13 @@ function buildModulesHtml() {
 function syncSortPopoverUi(containerEl) {
   if (!containerEl) return;
   const sort = getLeftFileSort();
-  const hasActiveSort = sort.by !== 'name' || sort.dir !== 'asc';
+  const sortTooltip = getSortTooltip(sort);
   const trigger = containerEl.querySelector('[data-action="toggle-sort-popover"]');
   if (trigger) {
-    trigger.classList.toggle('has-active-sort', hasActiveSort);
+    trigger.classList.remove('has-active-sort');
+    trigger.innerHTML = renderSortTriggerContentHtml(sort);
+    trigger.title = sortTooltip;
+    trigger.setAttribute('aria-label', sortTooltip);
   }
   const popover = containerEl.querySelector('[data-role="left-sort-popover"]');
   if (popover) {
@@ -1420,7 +1519,7 @@ function openImportSheet() {
         <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;flex-wrap:wrap;">
           <span style="font-size:12px;color:var(--text-secondary);">想快速体验全格式预览与跨模态跳转？</span>
           <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="import-seed-test-btn">
-            🧪 一键加载 V5 全格式实测流程包
+            🧪 一键加载 V6 全格式实测流程包
           </button>
         </div>
       </div>
@@ -1536,7 +1635,7 @@ function openImportSheet() {
           if (checklist?.path) {
             handleOpenFilePath(checklist.path);
           }
-          showToast('已加载 V5 全格式实测流程包', 'success');
+          showToast('已加载 V6 全格式实测流程包', 'success');
         } catch (err) {
           showToast(`加载实测流程包失败：${err?.message || '未知错误'}`, 'error');
         } finally {
@@ -2168,6 +2267,7 @@ function showLeftContextMenu(clientX, clientY, headerLabel, items, onSelect) {
             type="button"
             class="context-menu-item"
             data-lctx-id="${escapeHtml(entry.id)}"
+            data-file-act="${escapeHtml(entry.id)}"
             role="menuitem"
             style="${entry.danger ? 'color:var(--danger);' : ''}"
           >
@@ -2205,6 +2305,279 @@ function showLeftContextMenu(clientX, clientY, headerLabel, items, onSelect) {
   });
 }
 
+function findTreeFileRowByPath(rootEl, filePath) {
+  if (!rootEl || !filePath) return null;
+  const rows = rootEl.querySelectorAll('.left-files-list .tree-file-item[data-path]');
+  for (const row of rows) {
+    if (row.dataset.path === filePath) return row;
+  }
+  return null;
+}
+
+function startInlineFileRename(path) {
+  if (!path) return;
+  const item = findFileItemByPath(path) || { path, name: getBasename(path), ext: '' };
+  const row = findTreeFileRowByPath(containerRef, path);
+  const nameSpan = row?.querySelector('.file-name');
+  if (!row || !nameSpan) {
+    openRenameFileSheet(item);
+    return;
+  }
+
+  const existingInput = row.querySelector('.inline-rename-input');
+  if (existingInput) {
+    existingInput.focus();
+    return;
+  }
+
+  const oldName = item.name || row.dataset.name || getBasename(path);
+  const origClass = nameSpan.className;
+  const origTitle = nameSpan.getAttribute('title') || '';
+
+  row.setAttribute('draggable', 'false');
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'inline-rename-input';
+  input.value = oldName;
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.setAttribute('aria-label', `重命名 ${oldName}`);
+
+  nameSpan.replaceWith(input);
+
+  window.requestAnimationFrame(() => {
+    input.focus();
+    const dotIdx = oldName.lastIndexOf('.');
+    if (dotIdx > 0) {
+      input.setSelectionRange(0, dotIdx);
+    } else {
+      input.select();
+    }
+  });
+
+  let finished = false;
+  const restoreSpan = (displayName = oldName) => {
+    const span = document.createElement('span');
+    span.className = origClass || 'file-name';
+    if (origTitle) span.setAttribute('title', origTitle);
+    span.textContent = displayName;
+    if (input.isConnected) {
+      input.replaceWith(span);
+    }
+    row.setAttribute('draggable', 'true');
+  };
+
+  const cancel = () => {
+    if (finished) return;
+    finished = true;
+    restoreSpan(oldName);
+  };
+
+  const commit = async () => {
+    if (finished) return;
+    finished = true;
+    const newName = input.value.trim();
+    if (!newName || newName === oldName) {
+      restoreSpan(oldName);
+      return;
+    }
+
+    input.disabled = true;
+    try {
+      const res = await api.post('/api/files/rename', {
+        path: item.path,
+        new_name: newName,
+      });
+      const nextPath = res?.path || item.path;
+      const nextName = res?.name || newName;
+      const nextExt = res?.ext || item.ext;
+
+      if (Array.isArray(store.state.selectedContextPaths)) {
+        const idx = store.state.selectedContextPaths.indexOf(item.path);
+        if (idx >= 0) {
+          const nextCtx = [...store.state.selectedContextPaths];
+          nextCtx[idx] = nextPath;
+          store.state.selectedContextPaths = nextCtx;
+          store.emit('context:changed', nextCtx);
+        }
+      }
+      if (Array.isArray(store.state.pinnedFiles) && store.state.pinnedFiles.includes(item.path)) {
+        store.state.pinnedFiles = store.state.pinnedFiles.map((p) => (p === item.path ? nextPath : p));
+      }
+      if (Array.isArray(store.state.customFileOrder) && store.state.customFileOrder.includes(item.path)) {
+        store.state.customFileOrder = store.state.customFileOrder.map((p) => (p === item.path ? nextPath : p));
+      }
+
+      const wasActive = store.state.activeFile?.path === item.path;
+      await loadFiles();
+      emitWithGuard('files', store.state.files);
+      renderLeftPanel(containerRef);
+
+      if (wasActive) {
+        const updatedItem = findFileItemByPath(nextPath) || {
+          ...store.state.activeFile,
+          path: nextPath,
+          name: nextName,
+          ext: nextExt,
+        };
+        store.state.activeFile = updatedItem;
+        syncActiveFileHighlight(containerRef, updatedItem.path);
+        store.emit('file:open', updatedItem);
+      }
+
+      showToast(`已重命名为：${nextName}`, 'success');
+    } catch (err) {
+      restoreSpan(oldName);
+      showToast(`重命名失败：${err.message}`, 'error');
+    }
+  };
+
+  ['click', 'pointerdown', 'mousedown'].forEach((evtName) => {
+    input.addEventListener(evtName, (ev) => ev.stopPropagation());
+  });
+
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    commit();
+  });
+}
+
+function startInlineNewNote() {
+  if (!containerRef) {
+    openCreateNoteSheet();
+    return;
+  }
+
+  const mods = getLeftModules();
+  const filesMod = mods.find((m) => m.id === 'files');
+  if (filesMod && (filesMod.visible === false || filesMod.collapsed)) {
+    const nextModules = mods.map((m) =>
+      m.id === 'files' ? { ...m, visible: true, collapsed: false } : { ...m }
+    );
+    updateUiLayout({ leftModules: nextModules });
+  }
+
+  const filesListEl = containerRef.querySelector('.left-files-list');
+  if (!filesListEl) {
+    openCreateNoteSheet();
+    return;
+  }
+
+  const existingRow = filesListEl.querySelector('.inline-quick-create-row');
+  if (existingRow) {
+    const inp = existingRow.querySelector('.inline-rename-input');
+    inp?.focus();
+    inp?.select();
+    return;
+  }
+
+  const row = document.createElement('div');
+  row.className = 'inline-quick-create-row';
+  row.innerHTML = `
+    <span style="display:inline-flex;flex-shrink:0;color:var(--accent);">${icon('file-text', 14)}</span>
+    <input type="text" class="inline-rename-input" placeholder="输入笔记名，回车创建…" autocomplete="off" spellcheck="false" />
+    <button type="button" class="icon-pill" data-role="inline-create-ok" title="创建" aria-label="确认创建" style="width:22px;height:22px;flex-shrink:0;">
+      ${icon('check', 12)}
+    </button>
+    <button type="button" class="icon-pill" data-role="inline-create-cancel" title="取消" aria-label="取消" style="width:22px;height:22px;flex-shrink:0;">
+      ${icon('x', 12)}
+    </button>
+  `;
+
+  filesListEl.prepend(row);
+  const input = row.querySelector('.inline-rename-input');
+  const okBtn = row.querySelector('[data-role="inline-create-ok"]');
+  const cancelBtn = row.querySelector('[data-role="inline-create-cancel"]');
+
+  window.requestAnimationFrame(() => {
+    input?.focus();
+  });
+
+  let busy = false;
+  const cleanup = () => {
+    row.remove();
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const raw = input?.value?.trim() || '';
+    if (!raw) {
+      showToast('请输入笔记名称', 'warning');
+      input?.focus();
+      return;
+    }
+    const title = raw.replace(/\.md$/i, '').trim() || raw;
+    busy = true;
+    if (input) input.disabled = true;
+    if (okBtn) okBtn.disabled = true;
+
+    try {
+      const created = await api.post('/api/files/create-note', {
+        title,
+        content: '',
+      });
+      cleanup();
+      await loadFiles();
+      emitWithGuard('files', store.state.files);
+      renderLeftPanel(containerRef);
+
+      const fileItem = findFileItemByPath(created?.path) || {
+        path: created?.path,
+        name: created?.name || `${title}.md`,
+        ext: created?.ext || '.md',
+        is_private: false,
+        source: 'notes',
+      };
+      store.state.activeFile = fileItem;
+      syncActiveFileHighlight(containerRef, fileItem.path);
+      store.emit('file:open', fileItem);
+      showToast(`已创建笔记：${fileItem.name}`, 'success');
+    } catch (err) {
+      busy = false;
+      if (input) input.disabled = false;
+      if (okBtn) okBtn.disabled = false;
+      showToast(`创建笔记失败：${err.message}`, 'error');
+      input?.focus();
+    }
+  };
+
+  okBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    submit();
+  });
+
+  cancelBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    cleanup();
+  });
+
+  input?.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cleanup();
+    }
+  });
+}
+
+export function triggerInlineNewNote() {
+  startInlineNewNote();
+}
+
 function openFileContextMenu(clientX, clientY, rowEl) {
   const path = rowEl?.dataset?.path || '';
   if (!path) return;
@@ -2213,11 +2586,14 @@ function openFileContextMenu(clientX, clientY, rowEl) {
   const item = findFileItemByPath(path) || { path, name, ext, is_private: false };
   const isInContext = (store.state.selectedContextPaths || []).includes(path);
   const isPrivate = Boolean(item.is_private);
+  const isPinned = getPinnedFilesList().includes(path);
 
   const menuItems = [
     { id: 'open', icon: '📖', label: '打开文件' },
-    { id: 'rename', icon: '✏', label: '重命名' },
-    { id: 'copy-anchor', icon: '📌', label: '复制直达胶囊' },
+    { id: 'open-split', icon: '◫', label: '在右侧分屏打开' },
+    { id: 'toggle-pin', icon: '📌', label: isPinned ? '取消置顶' : '置顶到顶部' },
+    { id: 'rename', icon: '✏', label: '重命名 (F2)' },
+    { id: 'copy-anchor', icon: '🔗', label: '复制直达胶囊' },
     { id: 'toggle-context', icon: '☑', label: isInContext ? '移出联合问答' : '加入联合问答' },
     { id: 'toggle-privacy', icon: '🔒', label: isPrivate ? '关闭隐私锁' : '开启隐私锁' },
     { sep: true },
@@ -2232,8 +2608,27 @@ function openFileContextMenu(clientX, clientY, rowEl) {
       case 'open':
         handleOpenFilePath(item.path);
         break;
+      case 'open-split':
+        if (typeof storeMod.openSplitDoc === 'function') {
+          storeMod.openSplitDoc({ path: item.path, name: item.name || name, ext: item.ext || ext });
+        } else {
+          store.emit('doc:open-split', { path: item.path, name: item.name || name, ext: item.ext || ext });
+        }
+        break;
+      case 'toggle-pin':
+        if (typeof storeMod.togglePinFile === 'function') {
+          storeMod.togglePinFile(item.path);
+        } else {
+          const cur = getPinnedFilesList();
+          store.state.pinnedFiles = cur.includes(item.path)
+            ? cur.filter((p) => p !== item.path)
+            : [item.path, ...cur];
+        }
+        updateFilesSectionOnly(containerRef);
+        showToast(isPinned ? '已取消置顶' : '已置顶到顶部', 'info');
+        break;
       case 'rename':
-        openRenameFileSheet(item);
+        startInlineFileRename(item.path);
         break;
       case 'copy-anchor': {
         const md = buildFileAnchorMarkdown(item);
@@ -2259,6 +2654,382 @@ function openFileContextMenu(clientX, clientY, rowEl) {
         break;
     }
   });
+}
+
+function getOrCreateModuleContextMenuEl() {
+  if (typeof document === 'undefined') return null;
+  let el = document.getElementById('module-context-menu');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'module-context-menu';
+    el.className = 'context-menu module-context-menu';
+    el.hidden = true;
+    document.body.appendChild(el);
+  }
+  moduleContextMenuEl = el;
+  return el;
+}
+
+function hideModuleContextMenu() {
+  const el = moduleContextMenuEl || (typeof document !== 'undefined' ? document.getElementById('module-context-menu') : null);
+  if (!el) return;
+  el.classList.remove('is-open');
+  el.hidden = true;
+  el.setAttribute('aria-hidden', 'true');
+  el.innerHTML = '';
+}
+
+function ensureModuleContextMenuDismissListeners() {
+  if (moduleMenuListenersBound || typeof document === 'undefined') return;
+  moduleMenuListenersBound = true;
+
+  document.addEventListener('pointerdown', (e) => {
+    const el = document.getElementById('module-context-menu');
+    if (el && !el.hidden && !e.target.closest('#module-context-menu')) {
+      hideModuleContextMenu();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    const el = document.getElementById('module-context-menu');
+    if (e.key === 'Escape' && el && !el.hidden) {
+      hideModuleContextMenu();
+    }
+  });
+  window.addEventListener('scroll', hideModuleContextMenu, { capture: true, passive: true });
+  window.addEventListener('resize', hideModuleContextMenu, { passive: true });
+  window.addEventListener('blur', hideModuleContextMenu);
+}
+
+function getNamedLayoutPresets() {
+  if (Array.isArray(store.state.layoutPresets)) return store.state.layoutPresets;
+  if (Array.isArray(store.state.uiLayout?.layoutPresets)) return store.state.uiLayout.layoutPresets;
+  if (Array.isArray(store.state.uiLayout?.presets)) return store.state.uiLayout.presets;
+  return [];
+}
+
+function resolveModuleGroupContext({ side = 'left', group = '', moduleId = '', heightKey = '' }) {
+  const ui = store.state.uiLayout || {};
+  if (side === 'right') {
+    const listKey = group === 'tools' ? 'rightToolModules' : 'rightSummaryModules';
+    const rawList = Array.isArray(ui[listKey]) ? ui[listKey] : [];
+    const titleFallback =
+      group === 'tools'
+        ? {
+            quick_excel: '快捷表单填表与表格操作',
+            knowledge_tree: '虚拟知识树分类与总览',
+            apps_workspaces: '本地软件库与一键场景包',
+            ai_templates: 'AI 常用指令模板',
+          }
+        : {
+            input: '速记与智能提炼',
+            summary_card: 'AI 摘要与待办',
+            reminders: '定时提醒',
+            ai_templates: 'AI 常用指令模板',
+          };
+    const list = rawList.map((m) => ({
+      ...m,
+      title: m.title || titleFallback[m.id] || m.id,
+    }));
+    const resolvedHeightKey =
+      heightKey || (group === 'summary' && moduleId === 'ai_templates' ? 'right_ai_templates_summary' : `right_${moduleId}`);
+    return {
+      side: 'right',
+      group: group || 'summary',
+      listKey,
+      list,
+      heightKey: resolvedHeightKey,
+      soloKey: `${side}:${group || 'summary'}`,
+    };
+  }
+
+  return {
+    side: 'left',
+    group: 'left',
+    listKey: 'leftModules',
+    list: getLeftModules().map((m) => ({ ...m })),
+    heightKey: heightKey || moduleId,
+    soloKey: 'left',
+  };
+}
+
+function openModuleContextMenu(opts = {}) {
+  const menu = getOrCreateModuleContextMenuEl();
+  if (!menu) return;
+  ensureModuleContextMenuDismissListeners();
+  hideLeftContextMenu();
+
+  const clientX = Number.isFinite(opts.clientX) ? opts.clientX : Number(opts.x) || 120;
+  const clientY = Number.isFinite(opts.clientY) ? opts.clientY : Number(opts.y) || 120;
+  const moduleId = String(opts.moduleId || '').trim();
+  if (!moduleId) return;
+
+  const ctx = resolveModuleGroupContext(opts);
+  const targetMod = ctx.list.find((m) => m.id === moduleId);
+  const modTitle = targetMod?.title || moduleId;
+  const visibleSiblings = ctx.list.filter((m) => m.visible !== false && m.id !== moduleId);
+  const isAlreadySoloed =
+    visibleSiblings.length > 0 &&
+    visibleSiblings.every((m) => Boolean(m.collapsed)) &&
+    !targetMod?.collapsed;
+
+  const renderMenuContent = (showPresetInput = false) => {
+    const presets = getNamedLayoutPresets();
+    const presetsHtml = presets.length
+      ? `
+        <div class="context-menu-label" style="font-size:10.5px;padding-top:4px;">已保存预设</div>
+        ${presets
+          .map(
+            (p) => `
+          <div class="context-menu-item" style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 8px;">
+            <button
+              type="button"
+              data-mctx-act="apply-preset"
+              data-preset-id="${escapeHtml(p.id)}"
+              data-preset-name="${escapeHtml(p.name)}"
+              style="flex:1;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:inherit;"
+            >
+              📑 ${escapeHtml(p.name)}
+            </button>
+            <button
+              type="button"
+              data-mctx-act="delete-preset"
+              data-preset-id="${escapeHtml(p.id)}"
+              title="删除预设"
+              aria-label="删除预设 ${escapeHtml(p.name)}"
+              style="width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:9999px;color:var(--text-tertiary);flex-shrink:0;"
+            >×</button>
+          </div>
+        `
+          )
+          .join('')}
+      `
+      : '';
+
+    const presetInputHtml = showPresetInput
+      ? `
+        <div class="inline-quick-create-row" data-role="mctx-preset-row" style="margin:4px 6px;">
+          <input type="text" class="inline-rename-input" data-role="mctx-preset-input" placeholder="预设名，回车保存…" autocomplete="off" />
+          <button type="button" class="icon-pill" data-mctx-act="confirm-save-preset" title="保存" style="width:22px;height:22px;flex-shrink:0;">${icon('check', 11)}</button>
+          <button type="button" class="icon-pill" data-mctx-act="cancel-save-preset" title="取消" style="width:22px;height:22px;flex-shrink:0;">${icon('x', 11)}</button>
+        </div>
+      `
+      : '';
+
+    menu.innerHTML = `
+      <div class="context-menu-label">${escapeHtml(modTitle)}</div>
+      <button type="button" class="context-menu-item" data-mctx-act="save-default-layout" role="menuitem">
+        <span class="ctx-item-left"><span>💾</span><span>保存当前布局设定</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-mctx-act="restore-default-layout" role="menuitem">
+        <span class="ctx-item-left"><span>↺</span><span>恢复已记忆布局</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-mctx-act="show-preset-input" role="menuitem">
+        <span class="ctx-item-left"><span>📑</span><span>另存为命名预设…</span></span>
+      </button>
+      ${presetInputHtml}
+      ${presetsHtml}
+      <div class="context-menu-sep" role="separator"></div>
+      <button type="button" class="context-menu-item" data-mctx-act="solo-module" role="menuitem">
+        <span class="ctx-item-left"><span>🎯</span><span>${isAlreadySoloed ? '还原其余模块' : '独享整栏（最大化此模块）'}</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-mctx-act="move-top" role="menuitem">
+        <span class="ctx-item-left"><span>⬆</span><span>置顶此模块</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-mctx-act="move-bottom" role="menuitem">
+        <span class="ctx-item-left"><span>⬇</span><span>置底此模块</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-mctx-act="reset-height" role="menuitem">
+        <span class="ctx-item-left"><span>↕</span><span>重置此模块高度</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-mctx-act="hide-module" role="menuitem" style="color:var(--danger);">
+        <span class="ctx-item-left"><span>👁</span><span>隐藏此模块</span></span>
+      </button>
+    `;
+
+    if (showPresetInput) {
+      window.requestAnimationFrame(() => {
+        menu.querySelector('[data-role="mctx-preset-input"]')?.focus();
+      });
+    }
+  };
+
+  renderMenuContent(false);
+  menu.hidden = false;
+  menu.setAttribute('aria-hidden', 'false');
+  menu.style.zIndex = '98';
+
+  const rect = menu.getBoundingClientRect();
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 800;
+  const left = Math.max(8, Math.min(clientX, vw - rect.width - 8));
+  const top = Math.max(8, Math.min(clientY, vh - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  window.requestAnimationFrame(() => {
+    menu.classList.add('is-open');
+  });
+
+  const commitPreset = () => {
+    const inp = menu.querySelector('[data-role="mctx-preset-input"]');
+    const name = inp?.value?.trim();
+    if (!name) {
+      showToast('请输入预设名称', 'warning');
+      inp?.focus();
+      return;
+    }
+    storeMod.saveNamedLayoutPreset?.(name);
+    store.emit('layout:persist-backend');
+    hideModuleContextMenu();
+    showToast(`已保存布局预设「${name}」`, 'success');
+  };
+
+  menu.onkeydown = (e) => {
+    if (e.target?.matches?.('[data-role="mctx-preset-input"]')) {
+      e.stopPropagation();
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        commitPreset();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        renderMenuContent(false);
+      }
+    }
+  };
+
+  menu.onclick = (e) => {
+    const actEl = e.target.closest('[data-mctx-act]');
+    if (!actEl) return;
+    const act = actEl.dataset.mctxAct;
+
+    if (act === 'save-default-layout') {
+      storeMod.saveLayoutAsDefault?.();
+      store.emit('layout:persist-backend');
+      hideModuleContextMenu();
+      showToast('已记住当前布局设定', 'success');
+      return;
+    }
+
+    if (act === 'restore-default-layout') {
+      storeMod.restoreDefaultLayout?.();
+      hideModuleContextMenu();
+      showToast('已恢复已记忆的布局设定', 'info');
+      return;
+    }
+
+    if (act === 'show-preset-input') {
+      renderMenuContent(true);
+      return;
+    }
+
+    if (act === 'confirm-save-preset') {
+      commitPreset();
+      return;
+    }
+
+    if (act === 'cancel-save-preset') {
+      renderMenuContent(false);
+      return;
+    }
+
+    if (act === 'apply-preset') {
+      const pid = actEl.dataset.presetId;
+      const pname = actEl.dataset.presetName || '预设';
+      if (pid) {
+        storeMod.applyLayoutPreset?.(pid);
+        hideModuleContextMenu();
+        showToast(`已切换至预设「${pname}」`, 'success');
+      }
+      return;
+    }
+
+    if (act === 'delete-preset') {
+      e.stopPropagation();
+      const pid = actEl.dataset.presetId;
+      if (pid) {
+        storeMod.deleteLayoutPreset?.(pid);
+        store.emit('layout:persist-backend');
+        renderMenuContent(false);
+        showToast('已删除布局预设', 'info');
+      }
+      return;
+    }
+
+    if (act === 'solo-module') {
+      const nextHeights = { ...(store.state.uiLayout?.moduleHeights || {}) };
+      if (!isAlreadySoloed) {
+        const prevMap = {};
+        for (const m of ctx.list) {
+          prevMap[m.id] = Boolean(m.collapsed);
+        }
+        soloRestoreStateByGroup.set(ctx.soloKey, {
+          collapsedById: prevMap,
+          prevHeight: nextHeights[ctx.heightKey] ?? null,
+        });
+        const nextList = ctx.list.map((m) => ({
+          ...m,
+          collapsed: m.id !== moduleId,
+        }));
+        nextHeights[ctx.heightKey] = 520;
+        updateUiLayout({ [ctx.listKey]: nextList, moduleHeights: nextHeights });
+        if (ctx.side === 'right' && ctx.group === 'tools') {
+          store.emit('right:tool-collapse-sync', nextList);
+        }
+        showToast(`已独享「${modTitle}」`, 'info');
+      } else {
+        const saved = soloRestoreStateByGroup.get(ctx.soloKey);
+        const nextList = ctx.list.map((m) => ({
+          ...m,
+          collapsed: saved?.collapsedById ? Boolean(saved.collapsedById[m.id]) : false,
+        }));
+        if (saved && saved.prevHeight != null) {
+          nextHeights[ctx.heightKey] = saved.prevHeight;
+        } else {
+          delete nextHeights[ctx.heightKey];
+        }
+        soloRestoreStateByGroup.delete(ctx.soloKey);
+        updateUiLayout({ [ctx.listKey]: nextList, moduleHeights: nextHeights });
+        if (ctx.side === 'right' && ctx.group === 'tools') {
+          store.emit('right:tool-collapse-sync', nextList);
+        }
+        showToast('已还原其余模块', 'info');
+      }
+      hideModuleContextMenu();
+      return;
+    }
+
+    if (act === 'move-top' || act === 'move-bottom') {
+      const nextList = ctx.list.map((m) => ({ ...m }));
+      const idx = nextList.findIndex((m) => m.id === moduleId);
+      if (idx >= 0) {
+        const [moved] = nextList.splice(idx, 1);
+        if (act === 'move-top') nextList.unshift(moved);
+        else nextList.push(moved);
+        updateUiLayout({ [ctx.listKey]: nextList });
+        showToast(act === 'move-top' ? `已置顶「${modTitle}」` : `已置底「${modTitle}」`, 'info');
+      }
+      hideModuleContextMenu();
+      return;
+    }
+
+    if (act === 'reset-height') {
+      const nextHeights = { ...(store.state.uiLayout?.moduleHeights || {}) };
+      delete nextHeights[ctx.heightKey];
+      updateUiLayout({ moduleHeights: nextHeights });
+      hideModuleContextMenu();
+      showToast(`已重置「${modTitle}」高度`, 'info');
+      return;
+    }
+
+    if (act === 'hide-module') {
+      const nextList = ctx.list.map((m) =>
+        m.id === moduleId ? { ...m, visible: false } : { ...m }
+      );
+      updateUiLayout({ [ctx.listKey]: nextList });
+      hideModuleContextMenu();
+      showToast(`已隐藏「${modTitle}」（可在自定义模块中恢复）`, 'info');
+    }
+  };
 }
 
 function openAppContextMenu(clientX, clientY, pillEl) {
@@ -2398,11 +3169,27 @@ export function initLeftTree(containerEl) {
   renderLeftPanel(containerEl);
   bindModuleHeightResizers(containerEl);
 
+  const clearFileReorderClasses = () => {
+    containerEl.querySelectorAll('.tree-file-item.is-reorder-over-top, .tree-file-item.is-reorder-over-bottom').forEach((el) => {
+      el.classList.remove('is-reorder-over-top', 'is-reorder-over-bottom');
+    });
+  };
+
   // Sync checkboxes & active highlight cleanly without full re-render flicker
   store.on('context:changed', () => syncContextCheckboxes(containerEl));
   store.on('file:opened', (file) => syncActiveFileHighlight(containerEl, file?.path));
   store.on('capture:open', () => openCaptureSceneSheet());
   store.on('files:sort-changed', () => updateFilesSectionOnly(containerEl));
+  store.on('files:pin-changed', () => updateFilesSectionOnly(containerEl));
+  store.on('files:pinned-changed', () => updateFilesSectionOnly(containerEl));
+  store.on('left:inline-new-note', () => startInlineNewNote());
+  store.on('module:context-menu', (payload) => {
+    if (payload) openModuleContextMenu(payload);
+  });
+  store.on('layout:applied', () => {
+    renderPanelBody(containerEl);
+    syncSortPopoverUi(containerEl);
+  });
   store.on('ui:layout-changed', () => {
     if (isResizingModule) return;
     const activeEl = document.activeElement;
@@ -2440,7 +3227,7 @@ export function initLeftTree(containerEl) {
     renderPanelBody(containerEl);
   });
 
-  // Dedicated Left-Panel Right-Click Context Menu (#8)
+  // Dedicated Left-Panel Right-Click Context Menu (#8 & #11)
   containerEl.addEventListener('contextmenu', (e) => {
     const fileRow = e.target.closest('.tree-file-item[data-path]');
     if (fileRow) {
@@ -2454,6 +3241,22 @@ export function initLeftTree(containerEl) {
       e.preventDefault();
       e.stopPropagation();
       openAppContextMenu(e.clientX, e.clientY, appPill);
+      return;
+    }
+    const modHeader = e.target.closest('.module-header');
+    if (modHeader) {
+      const modBlock = modHeader.closest('.module-block[data-module-id]');
+      const moduleId = modBlock?.dataset?.moduleId;
+      if (moduleId) {
+        e.preventDefault();
+        e.stopPropagation();
+        openModuleContextMenu({
+          side: 'left',
+          moduleId,
+          clientX: e.clientX,
+          clientY: e.clientY,
+        });
+      }
     }
   });
 
@@ -2547,7 +3350,7 @@ export function initLeftTree(containerEl) {
 
     const fileRow = e.target.closest('.tree-file-item[data-path]');
     if (fileRow) {
-      if (e.target.closest('.file-check, .lock-toggle-btn')) {
+      if (e.target.closest('.file-check, .lock-toggle-btn, .inline-rename-input')) {
         e.preventDefault();
         return;
       }
@@ -2555,6 +3358,17 @@ export function initLeftTree(containerEl) {
       const name = fileRow.dataset.name || getBasename(path);
       const ext = fileRow.dataset.ext || getFileExt({ path, name });
       const markdown = buildFileAnchorMarkdown({ path, name, ext });
+
+      if (fileRow.closest('.left-files-list') && fileRow.dataset.groupKey) {
+        dragFileItem = {
+          path,
+          groupKey: fileRow.dataset.groupKey,
+          isPinned: fileRow.dataset.pinned === '1',
+        };
+      } else {
+        dragFileItem = null;
+      }
+
       setDragPayload(e, {
         type: 'file-anchor',
         label: name,
@@ -2566,6 +3380,36 @@ export function initLeftTree(containerEl) {
   });
 
   containerEl.addEventListener('dragover', (e) => {
+    if (dragFileItem) {
+      const targetRow = e.target.closest('.left-files-list .tree-file-item[data-path]');
+      containerEl.querySelectorAll('.tree-file-item.is-reorder-over-top, .tree-file-item.is-reorder-over-bottom').forEach((el) => {
+        if (el !== targetRow) {
+          el.classList.remove('is-reorder-over-top', 'is-reorder-over-bottom');
+        }
+      });
+      if (
+        targetRow &&
+        targetRow.dataset.path !== dragFileItem.path &&
+        targetRow.dataset.groupKey === dragFileItem.groupKey
+      ) {
+        const targetPinned = targetRow.dataset.pinned === '1';
+        const canReorder =
+          (dragFileItem.isPinned && targetPinned) ||
+          (!dragFileItem.isPinned && !targetPinned && isCustomSortEnabled());
+        if (canReorder) {
+          e.preventDefault();
+          if (e.dataTransfer) {
+            e.dataTransfer.dropEffect = 'move';
+          }
+          const rect = targetRow.getBoundingClientRect();
+          const pos = e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
+          targetRow.classList.toggle('is-reorder-over-top', pos === 'before');
+          targetRow.classList.toggle('is-reorder-over-bottom', pos === 'after');
+        }
+      }
+      return;
+    }
+
     if (!dragModuleId) return;
     const targetBlock = e.target.closest('.module-block[data-module-id]');
     if (!targetBlock) return;
@@ -2582,6 +3426,14 @@ export function initLeftTree(containerEl) {
   });
 
   containerEl.addEventListener('dragleave', (e) => {
+    if (dragFileItem) {
+      const targetRow = e.target.closest('.left-files-list .tree-file-item[data-path]');
+      if (targetRow && !targetRow.contains(e.relatedTarget)) {
+        targetRow.classList.remove('is-reorder-over-top', 'is-reorder-over-bottom');
+      }
+      return;
+    }
+
     const targetBlock = e.target.closest('.module-block[data-module-id]');
     if (!targetBlock) return;
     if (!targetBlock.contains(e.relatedTarget)) {
@@ -2590,6 +3442,54 @@ export function initLeftTree(containerEl) {
   });
 
   containerEl.addEventListener('drop', (e) => {
+    if (dragFileItem) {
+      clearFileReorderClasses();
+      const targetRow = e.target.closest('.left-files-list .tree-file-item[data-path]');
+      const src = dragFileItem;
+      dragFileItem = null;
+
+      if (
+        targetRow &&
+        targetRow.dataset.path !== src.path &&
+        targetRow.dataset.groupKey === src.groupKey
+      ) {
+        const targetPinned = targetRow.dataset.pinned === '1';
+        const rect = targetRow.getBoundingClientRect();
+        const pos = e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
+
+        if (src.isPinned && targetPinned) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (typeof storeMod.reorderPinnedFiles === 'function') {
+            storeMod.reorderPinnedFiles(src.path, targetRow.dataset.path, pos);
+          }
+          clearDragPayload();
+          store.emit('drag:active', false);
+          updateFilesSectionOnly(containerEl);
+          return;
+        }
+
+        if (!src.isPinned && !targetPinned && isCustomSortEnabled()) {
+          e.preventDefault();
+          e.stopPropagation();
+          const groupEl = targetRow.closest('.tree-group');
+          const visibleUnpinnedPaths = Array.from(
+            groupEl?.querySelectorAll('.tree-file-item[data-path][data-pinned="0"]') || []
+          )
+            .map((el) => el.dataset.path)
+            .filter(Boolean);
+          if (typeof storeMod.moveCustomFileOrder === 'function') {
+            storeMod.moveCustomFileOrder(src.path, targetRow.dataset.path, pos, visibleUnpinnedPaths);
+          }
+          clearDragPayload();
+          store.emit('drag:active', false);
+          updateFilesSectionOnly(containerEl);
+          return;
+        }
+      }
+      return;
+    }
+
     if (!dragModuleId) return;
     const targetBlock = e.target.closest('.module-block[data-module-id]');
     containerEl.querySelectorAll('.module-block.is-drag-over, .module-block.is-dragging').forEach((el) => {
@@ -2616,6 +3516,8 @@ export function initLeftTree(containerEl) {
 
   containerEl.addEventListener('dragend', () => {
     dragModuleId = null;
+    dragFileItem = null;
+    clearFileReorderClasses();
     containerEl.querySelectorAll('.module-block.is-drag-over, .module-block.is-dragging').forEach((el) => {
       el.classList.remove('is-drag-over', 'is-dragging');
     });
@@ -2674,6 +3576,34 @@ export function initLeftTree(containerEl) {
       const nextDir = actionEl.dataset.sortDir === 'desc' ? 'desc' : 'asc';
       persistLeftFileSort({ dir: nextDir });
       updateFilesSectionOnly(containerEl);
+      return;
+    }
+
+    if (action === 'toggle-custom-sort') {
+      const nextEnabled = !isCustomSortEnabled();
+      if (typeof storeMod.setCustomSortEnabled === 'function') {
+        storeMod.setCustomSortEnabled(nextEnabled);
+      } else {
+        store.state.customSortEnabled = nextEnabled;
+      }
+      updateFilesSectionOnly(containerEl);
+      showToast(
+        nextEnabled ? '已开启自定义拖拽排序（可上下拖拽调整顺序）' : '已关闭自定义拖拽排序',
+        'info'
+      );
+      return;
+    }
+
+    if (action === 'tidy-custom-sort') {
+      if (getCustomFileOrderList().length === 0) return;
+      if (typeof storeMod.tidyCustomFileOrder === 'function') {
+        storeMod.tidyCustomFileOrder();
+      } else {
+        store.state.customFileOrder = [];
+      }
+      updateFilesSectionOnly(containerEl);
+      setSortPopoverOpen(containerEl, false);
+      showToast('已整理非置顶文件，恢复默认排序', 'success');
       return;
     }
 
@@ -2778,12 +3708,13 @@ export function initLeftTree(containerEl) {
     }
 
     if (action === 'open-file' || action === 'open-tree-file') {
+      if (e.target.closest('.inline-rename-input')) return;
       handleOpenFilePath(actionEl.dataset.path);
       return;
     }
 
     if (action === 'new-note') {
-      openCreateNoteSheet();
+      startInlineNewNote();
       return;
     }
 
@@ -2845,8 +3776,18 @@ export function initLeftTree(containerEl) {
     cb.checked = (store.state.selectedContextPaths || []).includes(path);
   });
 
-  // Keyboard accessibility for row items
+  // Keyboard accessibility for row items & F2 inline file rename
   containerEl.addEventListener('keydown', (e) => {
+    if (e.key === 'F2' && !e.target.closest('input, textarea, select')) {
+      const targetRow =
+        e.target.closest('.left-files-list .tree-file-item[data-path]') ||
+        containerEl.querySelector('.left-files-list .tree-file-item.is-selected[data-path]');
+      if (targetRow?.dataset?.path) {
+        e.preventDefault();
+        startInlineFileRename(targetRow.dataset.path);
+      }
+      return;
+    }
     if (e.key !== 'Enter' && e.key !== ' ') return;
     if (e.target.closest('.file-check, button, select, input, textarea')) return;
     const actionEl = e.target.closest('[data-action="open-file"], [data-action="open-tree-file"], [data-action="toggle-group"]');

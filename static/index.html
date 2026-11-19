@@ -10,10 +10,10 @@
   <title>SmartLocalNote</title>
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23007AFF'/%3E%3Crect x='15' y='13' width='34' height='38' rx='6' fill='%23FFFFFF'/%3E%3Cpath d='M22 24h20M22 32h20M22 40h12' stroke='%23007AFF' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/css/tokens.css?v=5.0">
-  <link rel="stylesheet" href="/static/css/app.css?v=5.0">
-  <script src="/static/vendor/marked.min.js?v=5.0" defer></script>
-  <script type="module" src="/static/js/app.js?v=5.0"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css?v=6.0">
+  <link rel="stylesheet" href="/static/css/app.css?v=6.0">
+  <script src="/static/vendor/marked.min.js?v=6.0" defer></script>
+  <script type="module" src="/static/js/app.js?v=6.0"></script>
   <script>
     window.addEventListener('DOMContentLoaded', function () {
       setTimeout(function () {
@@ -86,6 +86,14 @@
             <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
           </svg>
         </button>
+        <button id="btn-zen-mode" type="button" class="icon-pill" title="极简专注禅模式 (Ctrl+\)" aria-label="极简专注禅模式">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 3 21 3 21 9"/>
+            <polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+        </button>
         <button id="btn-settings" class="icon-pill" type="button" title="系统与 AI 设置" aria-label="系统设置">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3"/>
@@ -100,6 +108,9 @@
         </button>
       </div>
     </header>
+
+    <!-- 灵动岛下拉暂存抽屉 (NotchDrop) -->
+    <div id="island-shelf-drawer" class="island-shelf-drawer" data-drop-zone="drag-shelf" aria-label="灵动岛暂存栏" hidden></div>
 
     <!-- 三栏悬浮岛屿主体 -->
     <div id="main-grid" class="main-grid">
@@ -222,7 +233,13 @@
   <!-- 便签贴边预览框 -->
   <div id="sticky-snap-preview" class="sticky-snap-preview" hidden></div>
 
-  <!-- 拖拽暂存栏 -->
-  <aside id="drag-shelf" class="drag-shelf" data-drop-zone="drag-shelf" aria-label="拖拽暂存栏"></aside>
+  <!-- 斜杠命令菜单 (/) -->
+  <div id="slash-command-menu" class="slash-command-menu" role="listbox" hidden></div>
+
+  <!-- 链接悬停速览卡 -->
+  <div id="hover-peek-card" class="hover-peek-card" hidden></div>
+
+  <!-- 模块级右键菜单 -->
+  <div id="module-context-menu" class="context-menu module-context-menu" role="menu" hidden></div>
 </body>
 </html>

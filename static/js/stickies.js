@@ -1,14 +1,14 @@
 /**
- * SmartLocalNote - Floating Tinted-Paper Stickies (V5) & Scoped Center Context Menu
- *  - V3 warm tinted paper aesthetic ('yellow' | 'blue' | 'green' | 'pink') without macOS traffic-light dots
- *  - Single rounded-square color swatch button in header + 4-swatch popover
+ * SmartLocalNote - Floating Tinted-Paper Stickies (V6) & Scoped Center Context Menu
+ *  - V6 crisp card aesthetic with --sticky-accent top bar + 6 preset swatches + custom hex color picker
  *  - Incremental DOM reconciliation preserving textarea focus, selection, and scrollTop
  *  - 60fps dragging & viewport-clamped resizing with setPointerCapture + body.is-dragging-sticky (PDF iframe safe)
- *  - Pin lock (sticky.pinned), region-aware magnetic edge auto-arrange, and multi-card stack/expand
- *  - Dock toolbar (#sticky-dock-pill) for restoring, tiling, stacking, and spawning
- *  - Drag-to-note (<span draggable="true">) integrated with store DragPayload & Drag Shelf
+ *  - Pin lock (sticky.pinned), region-aware magnetic edge auto-arrange, and lockstep stack move/resize
+ *  - Adaptive unified stack sizing (origW/origH preserved & restored) + multi-step merge undo
+ *  - Dock toolbar (#sticky-dock-pill) for restoring, undoing merge, tiling, stacking, and spawning
+ *  - Drag-to-note (<span draggable="true">) integrated with store DragPayload & Dynamic Island Shelf
  *
- * Exports: initStickies, spawnStickyNote.
+ * Exports: initStickies, spawnStickyNote, undoLastStackMerge.
  */
 
 import {
@@ -24,18 +24,22 @@ import { api } from './api_client.js';
 import { icon } from './icons.js';
 
 const STICKIES_STORAGE_KEY = 'sln_stickies';
-const STICKY_COLORS = ['yellow', 'blue', 'green', 'pink'];
+const STICKY_COLORS = ['yellow', 'blue', 'green', 'pink', 'purple', 'slate'];
 const STICKY_COLOR_LABELS = {
-  yellow: '奶油黄',
-  blue: '晴空蓝',
-  green: '薄荷绿',
-  pink: '樱花粉',
+  yellow: '琥珀黄',
+  blue: '苹果蓝',
+  green: '翡翠绿',
+  pink: '珊瑚粉',
+  purple: '薰衣草紫',
+  slate: '极简灰',
 };
 const STICKY_COLOR_SWATCHES = {
-  yellow: '#F6D55C',
-  blue: '#6BB8FF',
-  green: '#6CD992',
-  pink: '#F595B5',
+  yellow: '#F59E0B',
+  blue: '#0A84FF',
+  green: '#10B981',
+  pink: '#F43F5E',
+  purple: '#8B5CF6',
+  slate: '#64748B',
 };
 const VALID_ZONES = new Set(['free', 'left', 'right', 'top', 'bottom']);
 
@@ -51,7 +55,10 @@ const VIEWPORT_PAD = 12;
 const EDGE_SNAP_DIST = 56;
 const STACK_CASCADE_STEP = 28;
 const STACK_EXPAND_GAP = 10;
-const STACK_DETACH_DIST = 36;
+
+const MERGE_UNDO_MAX = 5;
+const MERGE_UNDO_DOCK_MS = 8000;
+const MERGE_UNDO_KEY_MS = 12000;
 
 let initialized = false;
 let stickies = [];
@@ -61,6 +68,8 @@ let menuEl = null;
 let snapPreviewEl = null;
 let zCounter = 1;
 let lastPinToastAt = 0;
+let lastMergeUndo = [];
+let mergeUndoDockTimer = 0;
 
 function writeDragPayload(event, payload) {
   if (typeof store.setDragPayload === 'function') {
@@ -87,8 +96,13 @@ function getViewportSize() {
 function migrateColor(raw) {
   if (STICKY_COLORS.includes(raw)) return raw;
   if (raw === 'amber') return 'yellow';
-  if (raw === 'slate') return 'blue';
   return 'yellow';
+}
+
+function normalizeCustomColor(raw) {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  return /^#[0-9a-f]{6}$/i.test(trimmed) ? trimmed.toUpperCase() : '';
 }
 
 function clampWidth(w, x = VIEWPORT_PAD) {
@@ -152,6 +166,11 @@ function loadStickies() {
         const w = clampWidth(item.w, x);
         const h = clampHeight(item.h, y);
         const color = migrateColor(item.color || item.accent);
+        const customColor = normalizeCustomColor(item.customColor);
+        const rawOrigW = Number(item.origW);
+        const rawOrigH = Number(item.origH);
+        const origW = Number.isFinite(rawOrigW) && rawOrigW >= MIN_W ? clampWidth(rawOrigW) : null;
+        const origH = Number.isFinite(rawOrigH) && rawOrigH >= MIN_H ? clampHeight(rawOrigH) : null;
         const z = Number.isFinite(Number(item.z)) && Number(item.z) > 0 ? Math.round(Number(item.z)) : idx + 1;
         if (z > maxZ) maxZ = z;
         const zone = VALID_ZONES.has(item.zone) ? item.zone : 'free';
@@ -164,7 +183,10 @@ function loadStickies() {
           y,
           w,
           h,
+          origW,
+          origH,
           color,
+          customColor,
           minimized: Boolean(item.minimized),
           pinned: Boolean(item.pinned),
           z,
@@ -242,16 +264,169 @@ function clearStackTargetHighlights() {
 
 function notifyPinnedBlocked(card) {
   if (card) {
-    card.classList.remove('is-pin-shake');
+    // NEVER add .is-pin-shake to .sticky-card (which uses transform: translate3d for positioning).
+    const pinBtn = card.querySelector('.sticky-pin-btn');
+    if (pinBtn) {
+      pinBtn.classList.remove('is-pin-shake');
+      void pinBtn.offsetWidth;
+      pinBtn.classList.add('is-pin-shake');
+      window.setTimeout(() => pinBtn.classList.remove('is-pin-shake'), 320);
+    }
+    card.classList.remove('is-pin-pulse');
     void card.offsetWidth;
-    card.classList.add('is-pin-shake');
-    window.setTimeout(() => card.classList.remove('is-pin-shake'), 320);
+    card.classList.add('is-pin-pulse');
+    window.setTimeout(() => card.classList.remove('is-pin-pulse'), 420);
   }
   const now = Date.now();
   if (now - lastPinToastAt > 1800) {
     lastPinToastAt = now;
     showToast('已固定位置（点击钉子取消固定后可移动或调大小）', 'info', { duration: 1800 });
   }
+}
+
+function restoreStickyOrigSize(sticky) {
+  if (!sticky) return;
+  if (Number.isFinite(Number(sticky.origW)) && Number(sticky.origW) >= MIN_W) {
+    sticky.w = clampWidth(sticky.origW, sticky.x);
+  }
+  if (Number.isFinite(Number(sticky.origH)) && Number(sticky.origH) >= MIN_H) {
+    sticky.h = clampHeight(sticky.origH, sticky.y);
+  }
+  sticky.origW = null;
+  sticky.origH = null;
+}
+
+function applyUnifiedStackSize(stackId) {
+  if (!stackId) return;
+  const members = stickies.filter((s) => !s.minimized && !s.pinned && s.stackId === stackId);
+  if (members.length < 2) return;
+  for (const m of members) {
+    if (!Number.isFinite(Number(m.origW)) || Number(m.origW) <= 0) m.origW = m.w;
+    if (!Number.isFinite(Number(m.origH)) || Number(m.origH) <= 0) m.origH = m.h;
+  }
+  const stackW = clampWidth(Math.max(...members.map((m) => m.w)));
+  const stackH = clampHeight(Math.max(...members.map((m) => m.h)));
+  for (const m of members) {
+    m.w = stackW;
+    m.h = stackH;
+  }
+}
+
+function getCardElementById(id) {
+  if (!layerEl || !id) return null;
+  return layerEl.querySelector(`.sticky-card[data-sticky-id="${CSS.escape(id)}"]`);
+}
+
+function syncStackCardsDom(stackId) {
+  if (!stackId || !layerEl) return;
+  const members = stickies.filter((s) => !s.minimized && !s.pinned && s.stackId === stackId);
+  for (const m of members) {
+    const el = getCardElementById(m.id);
+    if (!el) continue;
+    el.style.width = `${m.w}px`;
+    el.style.height = `${m.h}px`;
+    el.style.transform = `translate3d(${m.x}px, ${m.y}px, 0)`;
+    el.style.zIndex = String(computeZIndex(m));
+  }
+}
+
+function snapshotStickyState(s, overrides = null) {
+  return {
+    id: s.id,
+    x: overrides?.x ?? s.x,
+    y: overrides?.y ?? s.y,
+    w: overrides?.w ?? s.w,
+    h: overrides?.h ?? s.h,
+    origW: overrides && 'origW' in overrides ? overrides.origW : (s.origW ?? null),
+    origH: overrides && 'origH' in overrides ? overrides.origH : (s.origH ?? null),
+    stackId: overrides && 'stackId' in overrides ? overrides.stackId : (s.stackId ?? null),
+    stackExpanded: overrides && 'stackExpanded' in overrides ? Boolean(overrides.stackExpanded) : Boolean(s.stackExpanded),
+    zone: overrides?.zone ?? s.zone ?? 'free',
+    z: overrides?.z ?? s.z,
+  };
+}
+
+function hasActiveMergeUndo() {
+  if (lastMergeUndo.length === 0) return false;
+  const latest = lastMergeUndo[lastMergeUndo.length - 1];
+  return Boolean(latest && Date.now() - latest.timestamp <= MERGE_UNDO_DOCK_MS);
+}
+
+function renderDockOnly() {
+  const dock = ensureDockPill();
+  if (!dock) return;
+  const minimizedCount = stickies.filter((s) => s.minimized).length;
+  renderDockToolbar(dock, minimizedCount);
+}
+
+function pushMergeUndoSnapshot(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length === 0) return;
+  const deduped = [];
+  const seen = new Set();
+  for (const item of snapshots) {
+    if (!item || !item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    deduped.push({ ...item });
+  }
+  if (deduped.length === 0) return;
+
+  lastMergeUndo.push({
+    timestamp: Date.now(),
+    prevStickies: deduped,
+  });
+  if (lastMergeUndo.length > MERGE_UNDO_MAX) {
+    lastMergeUndo.shift();
+  }
+
+  if (mergeUndoDockTimer) {
+    window.clearTimeout(mergeUndoDockTimer);
+  }
+  mergeUndoDockTimer = window.setTimeout(() => {
+    mergeUndoDockTimer = 0;
+    renderDockOnly();
+  }, MERGE_UNDO_DOCK_MS);
+}
+
+/**
+ * Restore the most recent stack-merge operation from lastMergeUndo.
+ * @returns {boolean} true if a merge snapshot was restored
+ */
+export function undoLastStackMerge() {
+  const snap = lastMergeUndo.pop();
+  if (!snap || !Array.isArray(snap.prevStickies)) {
+    return false;
+  }
+  if (mergeUndoDockTimer && lastMergeUndo.length === 0) {
+    window.clearTimeout(mergeUndoDockTimer);
+    mergeUndoDockTimer = 0;
+  }
+
+  const prevMap = new Map(snap.prevStickies.map((item) => [item.id, item]));
+  let restored = 0;
+  for (const s of stickies) {
+    const prev = prevMap.get(s.id);
+    if (!prev) continue;
+    s.x = clampPosX(prev.x, prev.w);
+    s.y = clampPosY(prev.y, prev.h);
+    s.w = clampWidth(prev.w, s.x);
+    s.h = clampHeight(prev.h, s.y);
+    s.origW = prev.origW ?? null;
+    s.origH = prev.origH ?? null;
+    s.stackId = prev.stackId ?? null;
+    s.stackExpanded = Boolean(prev.stackExpanded);
+    s.zone = VALID_ZONES.has(prev.zone) ? prev.zone : 'free';
+    if (Number.isFinite(Number(prev.z))) {
+      s.z = prev.z;
+    }
+    restored += 1;
+  }
+
+  if (restored === 0) return false;
+  cleanupOrphanStacks();
+  saveStickies();
+  renderStickies();
+  showToast('已撤销闪念卡合并', 'success', { duration: 1800 });
+  return true;
 }
 
 function getStackGroups() {
@@ -266,6 +441,7 @@ function getStackGroups() {
       for (const s of list) {
         s.stackId = null;
         s.stackExpanded = false;
+        restoreStickyOrigSize(s);
       }
       groups.delete(sid);
     } else {
@@ -279,6 +455,28 @@ function cleanupOrphanStacks() {
   getStackGroups();
 }
 
+function detachStickyFromStack(stickyId, { offsetStep = true } = {}) {
+  const sticky = getCardById(stickyId);
+  if (!sticky || !sticky.stackId) return false;
+  const oldSid = sticky.stackId;
+  sticky.stackId = null;
+  sticky.stackExpanded = false;
+  sticky.zone = 'free';
+  restoreStickyOrigSize(sticky);
+  if (offsetStep) {
+    sticky.x = clampPosX(sticky.x + 28, sticky.w);
+    sticky.y = clampPosY(sticky.y + 18, sticky.h);
+  }
+  bringStickyForward(sticky);
+  cleanupOrphanStacks();
+  if (getStackGroups().has(oldSid)) {
+    layoutStack(oldSid);
+  }
+  saveStickies();
+  renderStickies();
+  return true;
+}
+
 function layoutStack(stackId, anchorX = null, anchorY = null) {
   if (!stackId) return;
   const groups = getStackGroups();
@@ -290,8 +488,8 @@ function layoutStack(stackId, anchorX = null, anchorY = null) {
   const maxCardW = Math.max(...list.map((s) => s.w));
   const maxCardH = Math.max(...list.map((s) => s.h));
 
-  let baseX = Number.isFinite(anchorX) ? anchorX : list[0].x;
-  let baseY = Number.isFinite(anchorY) ? anchorY : list[0].y;
+  let baseX = Number.isFinite(anchorX) ? anchorX : Math.min(...list.map((s) => s.x));
+  let baseY = Number.isFinite(anchorY) ? anchorY : Math.min(...list.map((s) => s.y));
   baseX = clampPosX(baseX, maxCardW);
 
   if (!expanded) {
@@ -419,6 +617,7 @@ function tileAllUnpinned() {
     s.stackId = null;
     s.stackExpanded = false;
     s.zone = 'free';
+    restoreStickyOrigSize(s);
 
     let placed = false;
     for (let guard = 0; guard < 18; guard += 1) {
@@ -482,23 +681,29 @@ function stackAllUnpinned() {
     return;
   }
 
+  pushMergeUndoSnapshot(unpinned.map((s) => snapshotStickyState(s)));
+
   const { vw, vh } = getViewportSize();
   const sid = `stack_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
-  const maxW = Math.max(...unpinned.map((s) => s.w));
-  const maxH = Math.max(...unpinned.map((s) => s.h));
-  const deckX = clampPosX(vw - maxW - 22, maxW);
-  const deckY = clampPosY(vh - maxH - (unpinned.length - 1) * STACK_CASCADE_STEP - 64, maxH);
 
   unpinned.sort((a, b) => a.z - b.z).forEach((s) => {
+    if (!Number.isFinite(Number(s.origW)) || Number(s.origW) <= 0) s.origW = s.w;
+    if (!Number.isFinite(Number(s.origH)) || Number(s.origH) <= 0) s.origH = s.h;
     s.stackId = sid;
     s.stackExpanded = false;
     s.zone = 'free';
   });
 
+  applyUnifiedStackSize(sid);
+  const stackW = unpinned[0].w;
+  const stackH = unpinned[0].h;
+  const deckX = clampPosX(vw - stackW - 22, stackW);
+  const deckY = clampPosY(vh - stackH - (unpinned.length - 1) * STACK_CASCADE_STEP - 64, stackH);
+
   layoutStack(sid, deckX, deckY);
   saveStickies();
   renderStickies();
-  showToast(`已将 ${unpinned.length} 张便签合并堆叠`, 'success', { duration: 1600 });
+  showToast('已合并堆叠（按 Ctrl+Z 或点左下「撤销合并」可还原）', 'success', { duration: 3200 });
 }
 
 function ensureDockPill() {
@@ -540,6 +745,8 @@ function ensureDockPill() {
             saveStickies();
             renderStickies();
           }
+        } else if (action === 'undo-merge') {
+          undoLastStackMerge();
         } else if (action === 'tile') {
           tileAllUnpinned();
         } else if (action === 'stack-all') {
@@ -698,13 +905,14 @@ function showContextMenu(clientX, clientY) {
   });
 }
 
-function findOverlapTarget(dragged, pendingX, pendingY, clientX, clientY) {
+function findOverlapTarget(dragged, pendingX, pendingY, clientX, clientY, excludeStackId = null) {
   const dragArea = dragged.w * dragged.h;
   let best = null;
   let bestScore = 0;
 
   for (const other of stickies) {
     if (other.id === dragged.id || other.minimized || other.pinned) continue;
+    if (excludeStackId && other.stackId === excludeStackId) continue;
     const pointerInside =
       clientX >= other.x &&
       clientX <= other.x + other.w &&
@@ -813,17 +1021,19 @@ function createCardElement(stickyId) {
   ).join('');
 
   card.innerHTML = `
-    <header class="sticky-header" title="按住拖动便签位置，拖至边缘自动排布或重叠堆叠">
+    <header class="sticky-header" title="按住拖动便签位置，堆叠时整组同移（按住 Alt 拖出单卡）">
       <div class="sticky-header-left">
         <span class="sticky-grip" aria-hidden="true">⋮⋮</span>
         <span class="sticky-title">闪念卡</span>
         <button type="button" class="sticky-stack-badge hidden" data-sticky-action="toggle-stack" hidden></button>
+        <button type="button" class="sticky-detach-btn hidden" data-sticky-action="detach-stack" title="从堆叠中抽出此卡（或按住 Alt 拖出）" aria-label="从堆叠中抽出此卡" hidden>↗ 抽出</button>
       </div>
       <div class="sticky-win-actions">
         <div class="sticky-color-anchor">
           <button type="button" class="sticky-color-btn" data-sticky-action="toggle-color-popover" title="切换便签纸张颜色" aria-label="切换便签颜色"></button>
           <div class="sticky-color-popover hidden" role="menu" aria-label="选择便签颜色" hidden>
             ${swatchItemsHtml}
+            <label class="sticky-custom-color-btn" title="自定义任意颜色">🎨<input type="color" class="sticky-custom-color-input" data-sticky-action="custom-color" value="${STICKY_COLOR_SWATCHES.yellow}" aria-label="自定义任意颜色"></label>
           </div>
         </div>
         <button type="button" class="sticky-icon-btn sticky-pin-btn" data-sticky-action="toggle-pin" title="固定位置（免受自动整理和误拖影响）" aria-label="固定便签位置">
@@ -835,7 +1045,7 @@ function createCardElement(stickyId) {
     </header>
     <textarea class="sticky-textarea" placeholder="随手记下灵感、待办或引用，可拖入笔记…"></textarea>
     <footer class="sticky-footer">
-      <span class="sticky-action-pill" data-sticky-action="drag-to-note" draggable="true" title="按住拖入中间 Markdown 笔记或右侧暂存栏">
+      <span class="sticky-action-pill" data-sticky-action="drag-to-note" draggable="true" title="按住拖入中间 Markdown 笔记或灵感收纳岛（按住 Ctrl 复制）">
         ⠿ 拖入笔记
       </span>
       <button type="button" class="sticky-action-pill" data-sticky-action="ai-todo" title="让 AI 提炼为结构化待办">
@@ -856,18 +1066,37 @@ function bindCardInteractions(card, stickyId) {
   const resizeHandle = card.querySelector('.sticky-resize-handle');
   const colorBtn = card.querySelector('[data-sticky-action="toggle-color-popover"]');
   const colorPopover = card.querySelector('.sticky-color-popover');
+  const customColorInput = card.querySelector('.sticky-custom-color-input');
   const pinBtn = card.querySelector('[data-sticky-action="toggle-pin"]');
   const stackBadge = card.querySelector('[data-sticky-action="toggle-stack"]');
+  const detachBtn = card.querySelector('[data-sticky-action="detach-stack"]');
   const minBtn = card.querySelector('[data-sticky-action="minimize"]');
   const closeBtn = card.querySelector('[data-sticky-action="delete"]');
   const todoBtn = card.querySelector('[data-sticky-action="ai-todo"]');
 
-  card.addEventListener('pointerdown', () => {
+  card.addEventListener('pointerdown', (e) => {
+    // Ignore header action controls & color UI so underlying stacked cards never re-render/steal clicks before click fires
+    if (e.target.closest('.sticky-header button, .sticky-color-anchor, .sticky-color-popover, input')) {
+      return;
+    }
     const sticky = getCardById(stickyId);
     if (!sticky) return;
+
+    // Header drag handles stack focus/layout on pointerup so lockstep dragging never shifts mid-grab
+    if (e.target.closest('.sticky-header')) {
+      if (!sticky.stackId) {
+        bringStickyForward(sticky);
+        saveStickies();
+      }
+      return;
+    }
+
     bringStickyForward(sticky);
     if (sticky.stackId && !sticky.stackExpanded) {
-      layoutStack(sticky.stackId, sticky.x, sticky.y - (getStackGroups().get(sticky.stackId)?.indexOf(sticky) || 0) * STACK_CASCADE_STEP);
+      const group = getStackGroups().get(sticky.stackId);
+      const anchorX = group ? Math.min(...group.map((m) => m.x)) : sticky.x;
+      const anchorY = group ? Math.min(...group.map((m) => m.y)) : sticky.y;
+      layoutStack(sticky.stackId, anchorX, anchorY);
       saveStickies();
       renderStickies();
     } else {
@@ -875,7 +1104,7 @@ function bindCardInteractions(card, stickyId) {
     }
   });
 
-  // Free dragging with setPointerCapture + body.is-dragging-sticky + region/stack detection
+  // Free dragging with setPointerCapture + body.is-dragging-sticky + lockstep stack move + region/stack detection
   if (header) {
     let dragging = false;
     let rafId = 0;
@@ -892,20 +1121,48 @@ function bindCardInteractions(card, stickyId) {
     let activeOverlapTarget = null;
     let activeEdge = null;
     let origStackId = null;
+    let isGroupDrag = false;
+    let dragGroup = null;
+    let preDragSnapshot = null;
+    let altDetached = false;
+
+    const getGroupBBoxPending = () => {
+      if (!dragGroup || dragGroup.length === 0) {
+        const s = getCardById(stickyId);
+        return { x: pendingX, y: pendingY, w: s?.w || DEFAULT_W, h: s?.h || DEFAULT_H };
+      }
+      const minX = Math.min(...dragGroup.map((m) => m.pendingX));
+      const minY = Math.min(...dragGroup.map((m) => m.pendingY));
+      const maxR = Math.max(...dragGroup.map((m) => m.pendingX + m.sticky.w));
+      const maxB = Math.max(...dragGroup.map((m) => m.pendingY + m.sticky.h));
+      return { x: minX, y: minY, w: maxR - minX, h: maxB - minY };
+    };
 
     const flushDrag = () => {
       rafId = 0;
       const sticky = getCardById(stickyId);
       if (!sticky) return;
-      sticky.x = pendingX;
-      sticky.y = pendingY;
-      card.style.transform = `translate3d(${pendingX}px, ${pendingY}px, 0)`;
+
+      if (isGroupDrag && dragGroup && dragGroup.length >= 2) {
+        for (const m of dragGroup) {
+          m.sticky.x = m.pendingX;
+          m.sticky.y = m.pendingY;
+          if (m.card) {
+            m.card.style.transform = `translate3d(${m.pendingX}px, ${m.pendingY}px, 0)`;
+          }
+        }
+      } else {
+        sticky.x = pendingX;
+        sticky.y = pendingY;
+        card.style.transform = `translate3d(${pendingX}px, ${pendingY}px, 0)`;
+      }
 
       clearStackTargetHighlights();
-      activeOverlapTarget = findOverlapTarget(sticky, pendingX, pendingY, lastClientX, lastClientY);
+      const excludeSid = isGroupDrag ? origStackId : null;
+      activeOverlapTarget = findOverlapTarget(sticky, pendingX, pendingY, lastClientX, lastClientY, excludeSid);
       if (activeOverlapTarget) {
         activeEdge = null;
-        const targetEl = layerEl?.querySelector(`.sticky-card[data-sticky-id="${CSS.escape(activeOverlapTarget.id)}"]`);
+        const targetEl = getCardElementById(activeOverlapTarget.id);
         targetEl?.classList.add('is-stack-target');
         showSnapPreview(
           { x: activeOverlapTarget.x, y: activeOverlapTarget.y, w: activeOverlapTarget.w, h: activeOverlapTarget.h },
@@ -914,7 +1171,13 @@ function bindCardInteractions(card, stickyId) {
         return;
       }
 
-      activeEdge = detectEdgeZone(sticky, pendingX, pendingY, lastClientX, lastClientY);
+      if (isGroupDrag && dragGroup && dragGroup.length >= 2) {
+        const bbox = getGroupBBoxPending();
+        activeEdge = detectEdgeZone(bbox, bbox.x, bbox.y, lastClientX, lastClientY);
+      } else {
+        activeEdge = detectEdgeZone(sticky, pendingX, pendingY, lastClientX, lastClientY);
+      }
+
       if (activeEdge) {
         showSnapPreview(activeEdge.rect, activeEdge.label);
       } else {
@@ -947,51 +1210,202 @@ function bindCardInteractions(card, stickyId) {
 
       document.body.classList.remove('is-dragging-sticky');
       card.classList.remove('is-moving');
+      if (dragGroup) {
+        for (const m of dragGroup) {
+          m.card?.classList.remove('is-moving');
+        }
+      }
       clearStackTargetHighlights();
       hideSnapPreview();
 
       const sticky = getCardById(stickyId);
-      if (sticky) {
-        sticky.x = pendingX;
-        sticky.y = pendingY;
+      const isCancel = e?.type === 'pointercancel' || e?.type === 'blur';
 
-        const isCancel = e?.type === 'pointercancel' || e?.type === 'blur';
-        if (!isCancel && movedFar) {
+      if (sticky) {
+        if (isCancel) {
+          if (dragGroup && dragGroup.length > 0) {
+            for (const m of dragGroup) {
+              m.sticky.x = m.origX;
+              m.sticky.y = m.origY;
+              m.sticky.w = m.origW;
+              m.sticky.h = m.origH;
+              m.sticky.origW = m.origOrigW;
+              m.sticky.origH = m.origOrigH;
+              m.sticky.stackId = m.origStackId;
+              m.sticky.stackExpanded = m.origStackExpanded;
+              m.sticky.zone = m.origZone;
+            }
+          } else if (preDragSnapshot) {
+            sticky.x = preDragSnapshot.x;
+            sticky.y = preDragSnapshot.y;
+            sticky.w = preDragSnapshot.w;
+            sticky.h = preDragSnapshot.h;
+            sticky.origW = preDragSnapshot.origW;
+            sticky.origH = preDragSnapshot.origH;
+            sticky.stackId = preDragSnapshot.stackId;
+            sticky.stackExpanded = preDragSnapshot.stackExpanded;
+            sticky.zone = preDragSnapshot.zone;
+          }
+        } else if (!movedFar) {
+          if (isGroupDrag && origStackId) {
+            const anchorX = Math.min(...dragGroup.map((m) => m.origX));
+            const anchorY = Math.min(...dragGroup.map((m) => m.origY));
+            bringStickyForward(sticky);
+            if (!sticky.stackExpanded) {
+              layoutStack(origStackId, anchorX, anchorY);
+            }
+          } else if (origStackId) {
+            sticky.stackId = origStackId;
+            bringStickyForward(sticky);
+          }
+        } else if (isGroupDrag && dragGroup && dragGroup.length >= 2) {
+          for (const m of dragGroup) {
+            m.sticky.x = m.pendingX;
+            m.sticky.y = m.pendingY;
+          }
+
           if (activeOverlapTarget) {
             const target = getCardById(activeOverlapTarget.id);
             if (target && !target.pinned) {
+              const targetMembers = target.stackId
+                ? (getStackGroups().get(target.stackId) || [target])
+                : [target];
+              const targetAnchorX = Math.min(...targetMembers.map((m) => m.x));
+              const targetAnchorY = Math.min(...targetMembers.map((m) => m.y));
+
+              const undoItems = [
+                ...dragGroup.map((m) =>
+                  snapshotStickyState(m.sticky, {
+                    x: m.origX,
+                    y: m.origY,
+                    w: m.origW,
+                    h: m.origH,
+                    origW: m.origOrigW,
+                    origH: m.origOrigH,
+                    stackId: m.origStackId,
+                    stackExpanded: m.origStackExpanded,
+                    zone: m.origZone,
+                    z: m.origZ,
+                  })
+                ),
+                ...targetMembers.map((m) => snapshotStickyState(m)),
+              ];
+              pushMergeUndoSnapshot(undoItems);
+
+              const sid = target.stackId || origStackId || `stack_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+              for (const m of [...targetMembers, ...dragGroup.map((d) => d.sticky)]) {
+                if (!Number.isFinite(Number(m.origW)) || Number(m.origW) <= 0) m.origW = m.w;
+                if (!Number.isFinite(Number(m.origH)) || Number(m.origH) <= 0) m.origH = m.h;
+                m.stackId = sid;
+                m.stackExpanded = false;
+                m.zone = 'free';
+              }
+              for (const m of dragGroup) {
+                m.sticky.z = ++zCounter;
+              }
+              cleanupOrphanStacks();
+              applyUnifiedStackSize(sid);
+              layoutStack(sid, targetAnchorX, targetAnchorY);
+              showToast('已合并堆叠（按 Ctrl+Z 或点左下「撤销合并」可还原）', 'success', { duration: 3200 });
+            }
+          } else if (activeEdge) {
+            const { vw, vh } = getViewportSize();
+            const bbox = getGroupBBoxPending();
+            const maxCardW = Math.max(...dragGroup.map((m) => m.sticky.w));
+            let anchorX = bbox.x;
+            let anchorY = bbox.y;
+            if (activeEdge.zone === 'left') {
+              anchorX = VIEWPORT_PAD;
+            } else if (activeEdge.zone === 'right') {
+              anchorX = vw - maxCardW - VIEWPORT_PAD;
+            } else if (activeEdge.zone === 'top') {
+              anchorY = TOP_BAR_SAFE_Y + 4;
+            } else if (activeEdge.zone === 'bottom') {
+              anchorY = vh - bbox.h - VIEWPORT_PAD;
+            }
+            layoutStack(origStackId, anchorX, anchorY);
+          }
+        } else {
+          sticky.x = pendingX;
+          sticky.y = pendingY;
+
+          if (activeOverlapTarget) {
+            const target = getCardById(activeOverlapTarget.id);
+            if (target && !target.pinned) {
+              const targetMembers = target.stackId
+                ? (getStackGroups().get(target.stackId) || [target])
+                : [target];
+              const targetAnchorX = Math.min(...targetMembers.map((m) => m.x));
+              const targetAnchorY = Math.min(...targetMembers.map((m) => m.y));
+
+              const undoItems = [
+                preDragSnapshot || snapshotStickyState(sticky, { x: origX, y: origY }),
+                ...targetMembers.map((m) => snapshotStickyState(m)),
+              ];
+              pushMergeUndoSnapshot(undoItems);
+
               const sid = target.stackId || `stack_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
-              target.stackId = sid;
-              target.stackExpanded = false;
-              target.zone = 'free';
+              for (const m of targetMembers) {
+                if (!Number.isFinite(Number(m.origW)) || Number(m.origW) <= 0) m.origW = m.w;
+                if (!Number.isFinite(Number(m.origH)) || Number(m.origH) <= 0) m.origH = m.h;
+                m.stackId = sid;
+                m.stackExpanded = false;
+                m.zone = 'free';
+              }
+              if (!Number.isFinite(Number(sticky.origW)) || Number(sticky.origW) <= 0) sticky.origW = sticky.w;
+              if (!Number.isFinite(Number(sticky.origH)) || Number(sticky.origH) <= 0) sticky.origH = sticky.h;
               sticky.stackId = sid;
               sticky.stackExpanded = false;
               sticky.zone = 'free';
               sticky.z = ++zCounter;
               cleanupOrphanStacks();
-              layoutStack(sid, target.x, target.y);
+              applyUnifiedStackSize(sid);
+              layoutStack(sid, targetAnchorX, targetAnchorY);
+              showToast('已合并堆叠（按 Ctrl+Z 或点左下「撤销合并」可还原）', 'success', { duration: 3200 });
             }
           } else if (activeEdge) {
             sticky.stackId = null;
             sticky.stackExpanded = false;
             sticky.zone = activeEdge.zone;
+            restoreStickyOrigSize(sticky);
             cleanupOrphanStacks();
             arrangeZone(activeEdge.zone);
           } else {
             sticky.stackId = null;
             sticky.stackExpanded = false;
             sticky.zone = 'free';
+            restoreStickyOrigSize(sticky);
             cleanupOrphanStacks();
           }
-        } else if (origStackId && !movedFar) {
-          sticky.stackId = origStackId;
         }
       }
 
       activeOverlapTarget = null;
       activeEdge = null;
+      dragGroup = null;
+      preDragSnapshot = null;
+      isGroupDrag = false;
+      altDetached = false;
       saveStickies();
       renderStickies();
+    };
+
+    const detachDraggedSingleCard = (sticky) => {
+      const oldSid = sticky.stackId;
+      if (!oldSid) return;
+      sticky.stackId = null;
+      sticky.stackExpanded = false;
+      sticky.zone = 'free';
+      origStackId = null;
+      restoreStickyOrigSize(sticky);
+      card.style.width = `${sticky.w}px`;
+      card.style.height = `${sticky.h}px`;
+      bringStickyForward(sticky);
+      cleanupOrphanStacks();
+      if (getStackGroups().has(oldSid)) {
+        layoutStack(oldSid);
+        syncStackCardsDom(oldSid);
+      }
     };
 
     const onMove = (e) => {
@@ -1013,18 +1427,54 @@ function bindCardInteractions(card, stickyId) {
       }
 
       if (dist > 4) movedFar = true;
-      pendingX = clampPosX(origX + dx, sticky.w);
-      pendingY = clampPosY(origY + dy, sticky.h);
 
-      if (sticky.stackId && dist > STACK_DETACH_DIST) {
-        const oldSid = sticky.stackId;
-        sticky.stackId = null;
-        sticky.stackExpanded = false;
-        origStackId = null;
-        cleanupOrphanStacks();
-        if (getStackGroups().has(oldSid)) {
-          layoutStack(oldSid);
+      // Alt+drag detaches ONLY this single card out of the stack
+      if (isGroupDrag && e.altKey && dist > 4 && dragGroup) {
+        for (const m of dragGroup) {
+          if (m.sticky.id !== stickyId) {
+            m.sticky.x = m.origX;
+            m.sticky.y = m.origY;
+            if (m.card) {
+              m.card.style.transform = `translate3d(${m.origX}px, ${m.origY}px, 0)`;
+              m.card.classList.remove('is-moving');
+            }
+          }
         }
+        isGroupDrag = false;
+        dragGroup = null;
+        altDetached = true;
+        detachDraggedSingleCard(sticky);
+      } else if (!isGroupDrag && origStackId && !altDetached && dist > 4) {
+        altDetached = true;
+        detachDraggedSingleCard(sticky);
+      }
+
+      if (isGroupDrag && dragGroup && dragGroup.length >= 2) {
+        const { vw, vh } = getViewportSize();
+        const minOrigX = Math.min(...dragGroup.map((m) => m.origX));
+        const minOrigY = Math.min(...dragGroup.map((m) => m.origY));
+        const maxOrigR = Math.max(...dragGroup.map((m) => m.origX + m.sticky.w));
+        const maxOrigB = Math.max(...dragGroup.map((m) => m.origY + m.sticky.h));
+
+        const minDx = VIEWPORT_PAD - minOrigX;
+        const maxDx = Math.max(minDx, vw - VIEWPORT_PAD - maxOrigR);
+        const minDy = TOP_BAR_SAFE_Y - minOrigY;
+        const maxDy = Math.max(minDy, vh - VIEWPORT_PAD - maxOrigB);
+
+        const clampedDx = Math.round(Math.max(minDx, Math.min(maxDx, dx)));
+        const clampedDy = Math.round(Math.max(minDy, Math.min(maxDy, dy)));
+
+        for (const m of dragGroup) {
+          m.pendingX = clampPosX(m.origX + clampedDx, m.sticky.w);
+          m.pendingY = clampPosY(m.origY + clampedDy, m.sticky.h);
+          if (m.sticky.id === stickyId) {
+            pendingX = m.pendingX;
+            pendingY = m.pendingY;
+          }
+        }
+      } else {
+        pendingX = clampPosX(origX + dx, sticky.w);
+        pendingY = clampPosY(origY + dy, sticky.h);
       }
 
       if (!rafId) {
@@ -1033,7 +1483,7 @@ function bindCardInteractions(card, stickyId) {
     };
 
     header.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('button, .sticky-color-popover')) return;
+      if (e.target.closest('button, .sticky-color-anchor, .sticky-color-popover, input, label')) return;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
 
       const sticky = getCardById(stickyId);
@@ -1048,6 +1498,7 @@ function bindCardInteractions(card, stickyId) {
       e.preventDefault();
       dragging = true;
       movedFar = false;
+      altDetached = false;
       pointerId = e.pointerId ?? null;
       startX = e.clientX;
       startY = e.clientY;
@@ -1058,8 +1509,36 @@ function bindCardInteractions(card, stickyId) {
       pendingX = sticky.x;
       pendingY = sticky.y;
       origStackId = sticky.stackId;
+      preDragSnapshot = snapshotStickyState(sticky);
 
-      card.classList.add('is-moving');
+      const stackMembers = origStackId ? (getStackGroups().get(origStackId) || null) : null;
+      if (!e.altKey && stackMembers && stackMembers.length >= 2) {
+        isGroupDrag = true;
+        dragGroup = stackMembers.map((m) => ({
+          sticky: m,
+          card: getCardElementById(m.id),
+          origX: m.x,
+          origY: m.y,
+          pendingX: m.x,
+          pendingY: m.y,
+          origW: m.w,
+          origH: m.h,
+          origOrigW: m.origW ?? null,
+          origOrigH: m.origH ?? null,
+          origStackId: m.stackId ?? null,
+          origStackExpanded: Boolean(m.stackExpanded),
+          origZone: m.zone || 'free',
+          origZ: m.z,
+        }));
+        for (const m of dragGroup) {
+          m.card?.classList.add('is-moving');
+        }
+      } else {
+        isGroupDrag = false;
+        dragGroup = null;
+        card.classList.add('is-moving');
+      }
+
       document.body.classList.add('is-dragging-sticky');
       try {
         header.setPointerCapture?.(e.pointerId);
@@ -1073,7 +1552,7 @@ function bindCardInteractions(card, stickyId) {
     });
   }
 
-  // Smooth corner resizing with viewport clamping + setPointerCapture + body.is-dragging-sticky
+  // Smooth corner resizing with viewport clamping + adaptive stack sync
   if (resizeHandle) {
     let resizing = false;
     let rafId = 0;
@@ -1084,11 +1563,28 @@ function bindCardInteractions(card, stickyId) {
     let origH = DEFAULT_H;
     let pendingW = DEFAULT_W;
     let pendingH = DEFAULT_H;
+    let resizeStackId = null;
+    let resizeAnchorX = 0;
+    let resizeAnchorY = 0;
 
     const flushSize = () => {
       rafId = 0;
       const sticky = getCardById(stickyId);
       if (!sticky) return;
+
+      if (resizeStackId) {
+        const group = getStackGroups().get(resizeStackId);
+        if (group && group.length >= 2) {
+          for (const m of group) {
+            m.w = pendingW;
+            m.h = pendingH;
+          }
+          layoutStack(resizeStackId, resizeAnchorX, resizeAnchorY);
+          syncStackCardsDom(resizeStackId);
+          return;
+        }
+      }
+
       sticky.w = pendingW;
       sticky.h = pendingH;
       card.style.width = `${pendingW}px`;
@@ -1125,11 +1621,15 @@ function bindCardInteractions(card, stickyId) {
 
       if (rafId) {
         window.cancelAnimationFrame(rafId);
-        flushSize();
+        rafId = 0;
       }
+      flushSize();
+
       document.body.classList.remove('is-dragging-sticky');
       card.classList.remove('is-resizing');
+      resizeStackId = null;
       saveStickies();
+      renderStickies();
     };
 
     resizeHandle.addEventListener('pointerdown', (e) => {
@@ -1154,6 +1654,15 @@ function bindCardInteractions(card, stickyId) {
       pendingW = sticky.w;
       pendingH = sticky.h;
 
+      const group = sticky.stackId ? getStackGroups().get(sticky.stackId) : null;
+      if (group && group.length >= 2) {
+        resizeStackId = sticky.stackId;
+        resizeAnchorX = Math.min(...group.map((m) => m.x));
+        resizeAnchorY = Math.min(...group.map((m) => m.y));
+      } else {
+        resizeStackId = null;
+      }
+
       card.classList.add('is-resizing');
       document.body.classList.add('is-dragging-sticky');
       try {
@@ -1176,7 +1685,7 @@ function bindCardInteractions(card, stickyId) {
     saveStickies();
   });
 
-  // Rounded-square color swatch button -> toggle 4-swatch popover
+  // Rounded-square color swatch button -> toggle 6-swatch + custom color popover
   colorBtn?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1186,7 +1695,7 @@ function bindCardInteractions(card, stickyId) {
     setElementVisibility(colorPopover, willOpen);
   });
 
-  // 4-swatch selection inside popover
+  // 6-swatch selection inside popover
   colorPopover?.addEventListener('click', (e) => {
     const swatch = e.target.closest('[data-sticky-color]');
     if (!swatch) return;
@@ -1196,10 +1705,44 @@ function bindCardInteractions(card, stickyId) {
     const sticky = getCardById(stickyId);
     if (!sticky || !STICKY_COLORS.includes(nextColor)) return;
     sticky.color = nextColor;
+    sticky.customColor = '';
     setElementVisibility(colorPopover, false);
     saveStickies();
     renderStickies();
   });
+
+  // Custom color picker input (live preview on input, close & commit on change)
+  if (customColorInput) {
+    customColorInput.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+    customColorInput.addEventListener('input', () => {
+      const hex = normalizeCustomColor(customColorInput.value);
+      const sticky = getCardById(stickyId);
+      if (!sticky || !hex) return;
+      sticky.customColor = hex;
+      saveStickies();
+      card.style.setProperty('--sticky-accent', hex);
+      card.classList.add('has-custom-color');
+      if (colorBtn) {
+        colorBtn.style.backgroundColor = hex;
+        colorBtn.dataset.color = 'custom';
+        colorBtn.title = `当前颜色：自定义 (${hex})（点击切换）`;
+      }
+      card.querySelectorAll('.sticky-color-swatch').forEach((sw) => sw.classList.remove('is-active'));
+      card.querySelector('.sticky-custom-color-btn')?.classList.add('is-active');
+    });
+    customColorInput.addEventListener('change', () => {
+      const hex = normalizeCustomColor(customColorInput.value);
+      const sticky = getCardById(stickyId);
+      if (sticky && hex) {
+        sticky.customColor = hex;
+      }
+      setElementVisibility(colorPopover, false);
+      saveStickies();
+      renderStickies();
+    });
+  }
 
   // Pin lock toggle
   pinBtn?.addEventListener('click', (e) => {
@@ -1212,6 +1755,7 @@ function bindCardInteractions(card, stickyId) {
       sticky.stackId = null;
       sticky.stackExpanded = false;
       sticky.zone = 'free';
+      restoreStickyOrigSize(sticky);
       cleanupOrphanStacks();
       showToast('已固定位置（免受自动整理和拖拽影响）', 'success', { duration: 1800 });
     } else {
@@ -1239,6 +1783,13 @@ function bindCardInteractions(card, stickyId) {
     renderStickies();
   });
 
+  // Detach single card from stack
+  detachBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    detachStickyFromStack(stickyId, { offsetStep: true });
+  });
+
   // Minimize card
   minBtn?.addEventListener('click', (e) => {
     e.preventDefault();
@@ -1248,6 +1799,7 @@ function bindCardInteractions(card, stickyId) {
     sticky.minimized = true;
     sticky.stackId = null;
     sticky.stackExpanded = false;
+    restoreStickyOrigSize(sticky);
     cleanupOrphanStacks();
     saveStickies();
     renderStickies();
@@ -1279,7 +1831,7 @@ function bindCardInteractions(card, stickyId) {
     showToast('已发送便签内容至 AI 提取待办', 'info', { duration: 2000 });
   });
 
-  // Drag-to-Note & Shelf (<span draggable="true">)
+  // Drag-to-Note & Dynamic Island Shelf (<span draggable="true">)
   if (dragPill) {
     dragPill.addEventListener('dragstart', (e) => {
       const sticky = getCardById(stickyId);
@@ -1294,6 +1846,8 @@ function bindCardInteractions(card, stickyId) {
         type: 'sticky',
         label: firstLine || '闪念卡',
         markdown: sticky.content,
+        dragMode: e.ctrlKey ? 'copy' : 'move',
+        sourceStickyId: sticky.id,
       });
       store.emit('drag:active', true);
       card.classList.add('is-dragging');
@@ -1309,15 +1863,26 @@ function bindCardInteractions(card, stickyId) {
 
 function updateCardElement(card, sticky, stackInfo) {
   const color = migrateColor(sticky.color);
+  const customColor = normalizeCustomColor(sticky.customColor);
+  const accentHex = customColor || STICKY_COLOR_SWATCHES[color];
   const w = clampWidth(sticky.w, sticky.x);
   const h = clampHeight(sticky.h, sticky.y);
 
-  card.classList.remove('sticky-yellow', 'sticky-blue', 'sticky-green', 'sticky-pink');
+  card.classList.remove(
+    'sticky-yellow',
+    'sticky-blue',
+    'sticky-green',
+    'sticky-pink',
+    'sticky-purple',
+    'sticky-slate'
+  );
   card.classList.add(`sticky-${color}`);
+  card.classList.toggle('has-custom-color', Boolean(customColor));
   card.classList.toggle('is-pinned', Boolean(sticky.pinned));
   card.classList.toggle('is-stacked', Boolean(stackInfo));
   card.classList.toggle('is-stack-expanded', Boolean(stackInfo?.expanded));
 
+  card.style.setProperty('--sticky-accent', accentHex);
   card.style.width = `${w}px`;
   card.style.height = `${h}px`;
   card.style.transform = `translate3d(${sticky.x}px, ${sticky.y}px, 0)`;
@@ -1329,16 +1894,23 @@ function updateCardElement(card, sticky, stackInfo) {
     textarea.value = sticky.content;
   }
 
-  // Sync single rounded-square color swatch button
+  // Sync single rounded-square color swatch button, 6 swatches & custom color picker
   const colorBtn = card.querySelector('.sticky-color-btn');
   if (colorBtn) {
-    colorBtn.style.backgroundColor = STICKY_COLOR_SWATCHES[color];
-    colorBtn.dataset.color = color;
-    colorBtn.title = `当前颜色：${STICKY_COLOR_LABELS[color]}（点击切换）`;
+    colorBtn.style.backgroundColor = accentHex;
+    colorBtn.dataset.color = customColor ? 'custom' : color;
+    colorBtn.title = customColor
+      ? `当前颜色：自定义 (${customColor})（点击切换）`
+      : `当前颜色：${STICKY_COLOR_LABELS[color]}（点击切换）`;
   }
   card.querySelectorAll('.sticky-color-swatch').forEach((sw) => {
-    sw.classList.toggle('is-active', sw.dataset.stickyColor === color);
+    sw.classList.toggle('is-active', !customColor && sw.dataset.stickyColor === color);
   });
+  const customInput = card.querySelector('.sticky-custom-color-input');
+  if (customInput && document.activeElement !== customInput && customInput.value.toLowerCase() !== accentHex.toLowerCase()) {
+    customInput.value = accentHex;
+  }
+  card.querySelector('.sticky-custom-color-btn')?.classList.toggle('is-active', Boolean(customColor));
 
   // Sync Pin button state & tooltip
   const pinBtn = card.querySelector('.sticky-pin-btn');
@@ -1350,7 +1922,7 @@ function updateCardElement(card, sticky, stackInfo) {
       : '固定位置（免受自动整理和误拖影响）';
   }
 
-  // Sync Stack badge on top card of a stack
+  // Sync Stack badge on top card of a stack & detach button on all stacked cards
   const stackBadge = card.querySelector('.sticky-stack-badge');
   if (stackBadge) {
     if (stackInfo && stackInfo.isTop) {
@@ -1361,10 +1933,15 @@ function updateCardElement(card, sticky, stackInfo) {
       setElementVisibility(stackBadge, false);
     }
   }
+  const detachBtn = card.querySelector('[data-sticky-action="detach-stack"]');
+  if (detachBtn) {
+    setElementVisibility(detachBtn, Boolean(stackInfo));
+  }
 }
 
 function renderDockToolbar(dock, minimizedCount) {
-  const showDock = stickies.length >= 2 || minimizedCount > 0;
+  const undoVisible = hasActiveMergeUndo();
+  const showDock = stickies.length >= 2 || minimizedCount > 0 || undoVisible;
   if (!showDock) {
     setElementVisibility(dock, false);
     return;
@@ -1375,8 +1952,13 @@ function renderDockToolbar(dock, minimizedCount) {
       ? `<button type="button" class="sticky-dock-btn is-accent" data-dock-action="restore" title="恢复已最小化的便签">📌 恢复 (${minimizedCount})</button>`
       : `<span class="sticky-dock-count" title="当前便签数量">📌 闪念 (${stickies.length})</span>`;
 
+  const undoHtml = undoVisible
+    ? `<button type="button" class="sticky-dock-btn is-undo-merge" data-dock-action="undo-merge" title="撤销刚才的闪念卡合并 (Ctrl+Z)">↩ 撤销合并</button>`
+    : '';
+
   dock.innerHTML = `
     ${restoreHtml}
+    ${undoHtml}
     <button type="button" class="sticky-dock-btn" data-dock-action="tile" title="将未固定便签在右侧整齐平铺">⊞ 整理</button>
     <button type="button" class="sticky-dock-btn" data-dock-action="stack-all" title="将未固定便签合并堆叠或展开">📚 堆叠</button>
     <button type="button" class="sticky-dock-btn is-plus" data-dock-action="new" title="新建闪念卡 (Alt+N)" aria-label="新建闪念卡">+</button>
@@ -1433,7 +2015,7 @@ function renderStickies() {
  * @param {{ x?: number, y?: number, text?: string, content?: string, color?: string, accent?: string, pinned?: boolean }} [opts={}]
  * @returns {object} created sticky object
  */
-export function spawnStickyNote({ x, y, text, content, color, accent, pinned = false } = {}) {
+export function spawnStickyNote({ x, y, text, content, color, accent, customColor = '', pinned = false } = {}) {
   const { vw, vh } = getViewportSize();
   const offset = (stickies.length % 5) * 22;
   const w = DEFAULT_W;
@@ -1452,7 +2034,10 @@ export function spawnStickyNote({ x, y, text, content, color, accent, pinned = f
     y: targetY,
     w,
     h,
+    origW: null,
+    origH: null,
     color: pickedColor,
+    customColor: normalizeCustomColor(customColor),
     minimized: false,
     pinned: Boolean(pinned),
     z: zCounter,
@@ -1538,7 +2123,7 @@ export function initStickies() {
 
     if (
       target.closest(
-        '#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .sticky-card, .spark-card, .anchor-pill, .media-embed-card, #capsule-context-menu, #drag-shelf'
+        '#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .sticky-card, .spark-card, .anchor-pill, .media-embed-card, #capsule-context-menu, #drag-shelf, #island-shelf-drawer, #module-context-menu, #slash-command-menu, #hover-peek-card'
       )
     ) {
       hideContextMenu();
@@ -1546,7 +2131,7 @@ export function initStickies() {
     }
 
     // Preserve native copy/paste menu inside any editable element
-    if (target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])')) {
+    if (target.closest('input, textarea, [contenteditable="true"], [contenteditable]:not([contenteditable="false"])')) {
       hideContextMenu();
       return;
     }
@@ -1566,7 +2151,9 @@ export function initStickies() {
 
   window.addEventListener('blur', () => {
     hideContextMenu();
-    closeAllColorPopovers();
+    if (!document.activeElement?.classList?.contains('sticky-custom-color-input')) {
+      closeAllColorPopovers();
+    }
     document.body.classList.remove('is-dragging-sticky');
   });
 
@@ -1597,6 +2184,24 @@ export function initStickies() {
       closeAllColorPopovers();
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+      const latest = lastMergeUndo[lastMergeUndo.length - 1];
+      if (latest && Date.now() - latest.timestamp <= MERGE_UNDO_KEY_MS) {
+        const active = document.activeElement;
+        const isEditable =
+          active instanceof Element &&
+          Boolean(
+            active.matches('input, textarea, [contenteditable="true"]') ||
+              active.closest('input, textarea, [contenteditable="true"]') ||
+              active.isContentEditable
+          );
+        if (!isEditable) {
+          e.preventDefault();
+          undoLastStackMerge();
+          return;
+        }
+      }
+    }
     if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'n') {
       if (isSheetOpen()) return;
       e.preventDefault();
@@ -1607,5 +2212,23 @@ export function initStickies() {
 
   store.on('sticky:spawn', (opts) => {
     spawnStickyNote(opts || {});
+  });
+
+  store.on('sticky:consumed-by-drag', (payload) => {
+    const sid = payload?.sourceStickyId || payload?.stickyId;
+    if (!sid || payload?.dragMode === 'copy') return;
+    const sticky = getCardById(sid);
+    if (!sticky) return;
+    if (payload?.remove) {
+      stickies = stickies.filter((item) => item.id !== sid);
+    } else {
+      sticky.minimized = true;
+      sticky.stackId = null;
+      sticky.stackExpanded = false;
+      restoreStickyOrigSize(sticky);
+    }
+    cleanupOrphanStacks();
+    saveStickies();
+    renderStickies();
   });
 }

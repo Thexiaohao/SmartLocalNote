@@ -157,12 +157,12 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 
 def seed_test_suite(reset: bool = True) -> dict[str, Any]:
-    """Copy V5 all-format test fixtures into `<default_notes_dir>/V5_实测流程` without touching external user notes."""
+    """Copy V6 all-format test fixtures into `<default_notes_dir>/V6_实测流程` without touching external user notes."""
     if not DEMO_SEED_DIR.exists():
         raise FileNotFoundError(f"未找到测试套件模板目录：{DEMO_SEED_DIR}")
 
     notes_dir = get_default_notes_dir()
-    suite_dir = (notes_dir / "V5_实测流程").resolve()
+    suite_dir = (notes_dir / "V6_实测流程").resolve()
     suite_dir.mkdir(parents=True, exist_ok=True)
 
     synced_files: list[str] = []
@@ -174,7 +174,7 @@ def seed_test_suite(reset: bool = True) -> dict[str, Any]:
             shutil.copy2(src, dst)
         synced_files.append(str(dst))
 
-    entry_path = (suite_dir / "00_V5全流程实测清单.md").resolve()
+    entry_path = (suite_dir / "00_V6全流程实测清单.md").resolve()
     req_path = (suite_dir / "01_项目需求拆解.md").resolve()
     xlsx_path = (suite_dir / "05_迭代进度表.xlsx").resolve()
     pdf_path = (suite_dir / "06_产品方案简报.pdf").resolve()
@@ -198,8 +198,8 @@ def seed_test_suite(reset: bool = True) -> dict[str, Any]:
             ],
             "workspaces": [
                 {
-                    "id": "ws_demo_v5",
-                    "name": "V5 全功能体验场景",
+                    "id": "ws_demo_v6",
+                    "name": "V6 全功能体验场景",
                     "app_ids": ["app_demo_notepad"],
                     "file_paths": [str(p) for p in (entry_path, req_path, xlsx_path, pdf_path) if p.exists()],
                 }
@@ -214,8 +214,8 @@ def seed_test_suite(reset: bool = True) -> dict[str, Any]:
         atomic_write_json(TREE_FILE, {
             "nodes": [
                 {
-                    "id": "node_v5_root",
-                    "name": "V5 实测流程",
+                    "id": "node_v6_root",
+                    "name": "V6 实测流程",
                     "parent_id": None,
                     "files": [
                         {"path": str(p), "status": "进行中", "updated_at": now_iso}
@@ -223,9 +223,9 @@ def seed_test_suite(reset: bool = True) -> dict[str, Any]:
                     ],
                 },
                 {
-                    "id": "node_v5_docs",
+                    "id": "node_v6_docs",
                     "name": "核心文档与表格",
-                    "parent_id": "node_v5_root",
+                    "parent_id": "node_v6_root",
                     "files": [
                         {"path": str(p), "status": "待验收", "updated_at": now_iso}
                         for p in (xlsx_path, pdf_path, docx_path) if p.exists()
@@ -243,7 +243,7 @@ def seed_test_suite(reset: bool = True) -> dict[str, Any]:
 
 
 def _seed_demo_workspace_if_empty() -> None:
-    """On first launch of a fresh install/.exe, populate out-of-the-box V5 demo files & indexes."""
+    """On first launch of a fresh install/.exe, populate out-of-the-box V6 demo files & indexes."""
     marker = DATA_DIR / ".initialized"
     if marker.exists() or not DEMO_SEED_DIR.exists():
         return

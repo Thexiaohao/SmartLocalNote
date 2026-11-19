@@ -1,4 +1,4 @@
-"""Generate the compact V5 All-Format Test-Flow Fixture Pack into `assets/demo_seed/`.
+"""Generate the compact V6 All-Format Test-Flow Fixture Pack into `assets/demo_seed/`.
 
 Usage:
     python scripts/generate_test_fixture.py
@@ -423,13 +423,13 @@ def _make_docx_bytes() -> bytes:
         '</Relationships>'
     )
     paragraphs = [
-        "SmartLocalNote V5 接口契约文档",
+        "SmartLocalNote V6 接口契约文档",
         "1. 文档读取与内联展开接口",
         "GET /api/files/read?path=... 返回文档元信息、文本正文或伴生笔记路径。",
         "GET /api/files/expand-content?path=...&page=...&sheet=...&cell=...&member=... "
         "在本地安全白名单内将文本、表格、PDF 文字层、Office 与压缩包单文件转换为 Markdown 供一键填入笔记。",
         "2. 测试工作台重置接口",
-        "POST /api/system/seed-test-suite?reset=true 一键同步并重置 V5_实测流程 文件夹内的标准全格式实测包，不覆盖用户其它笔记。",
+        "POST /api/system/seed-test-suite?reset=true 一键同步并重置 V6_实测流程 文件夹内的标准全格式实测包，不覆盖用户其它笔记。",
         "3. 伴生笔记防冲突规则",
         "PDF 保持 <stem>_伴生笔记.md 向后兼容；DOCX/PPTX/图片/音视频默认采用 <stem>_<ext>_伴生笔记.md，避免同名前缀文件相互覆盖。",
     ]
@@ -513,18 +513,18 @@ def _make_pptx_bytes() -> bytes:
         )
 
     slide1 = _slide_xml(
-        "SmartLocalNote V5 评审幻灯片 · 第 1 页",
+        "SmartLocalNote V6 评审幻灯片 · 第 1 页",
         [
             "本地优先：Zero-Build ES6 模块 + FastAPI 安全文件网关",
             "全格式直达：MD / TXT / PY / JSON / XLSX / PDF / DOCX / PPTX / ZIP / 音视频",
         ],
     )
     slide2 = _slide_xml(
-        "第 2 页：V5 核心升级验收点",
+        "第 2 页：V6 核心升级验收点",
         [
-            "1. 一键展开填入：将引用文件直接转为干净 Markdown 插入笔记",
-            "2. 拖拽暂存栏 & 1 秒长按拖块：跨文档丝滑重组内容",
-            "3. 闪念卡自由贴边与叠放展开：轻量灵感随时记录",
+            "1. 所见即所得 WYSIWYG + Word 图标格式栏 + / 斜杠指令菜单",
+            "2. 灵动岛 NotchDrop 下拉暂存抽屉 & 0.5 秒长按剪切重排",
+            "3. 悬停速览 400ms + Ctrl+点击双栏分屏 + 禅模式 (Ctrl+\\)",
         ],
     )
 
@@ -551,16 +551,16 @@ def _make_xlsx_bytes() -> bytes:
     ws1.title = "任务进度"
     ws1.append(["模块", "任务项", "负责人", "状态", "进度", "耗时(分钟)", "备注"])
     ws1.append(["核心引擎", "路径安全网关与快照回滚", "Backend", "已完成", "100%", 45, "safe_io 校验通过"])
-    ws1.append(["核心引擎", "一键展开填入多格式解析", "Backend", "测试中", "90%", 35, "支持 MD/CSV/PY/XLSX/PDF/DOCX/ZIP"])
-    ws1.append(["编辑器", "拖拽暂存栏与长按块拖拽", "Frontend", "已完成", "100%", 50, "支持跨文档拖放"])
-    ws1.append(["闪念卡", "贴边磁吸与叠放展开交互", "Frontend", "待验收", "85%", 30, "无苹果球彩纸换色"])
-    ws1.append(["灵动岛", "专注计时结束自动回写进度表", "Fullstack", "待验收", "80%", 25, "目标表 05_迭代进度表.xlsx"])
+    ws1.append(["编辑器", "WYSIWYG 零语法编辑与 Word 图标格式栏", "Frontend", "已完成", "100%", 40, "支持 / 斜杠菜单与胶囊内联"])
+    ws1.append(["灵动岛", "NotchDrop 下拉暂存抽屉 & 后台 AI 胶囊", "Frontend", "测试中", "95%", 35, "0.5s 长按剪切拖块"])
+    ws1.append(["闪念卡", "V6 顶部彩条、自定义色盘、叠放联动与合并撤销", "Frontend", "待验收", "90%", 30, "自适应高度与↗拆出"])
+    ws1.append(["交互创新", "Hover Peek / Ctrl+Click 分屏 / 前进后退 / 禅模式", "Fullstack", "待验收", "90%", 25, "目标表 05_迭代进度表.xlsx"])
 
     ws2 = wb.create_sheet("验收记录")
     ws2.append(["日期", "测试项", "结果", "记录人"])
-    ws2.append(["2026-11-20", "全格式双括号跳转", "待执行", "QA"])
-    ws2.append(["2026-11-20", "PDF 第2页直达与文本展开", "待执行", "QA"])
-    ws2.append(["2026-11-20", "ZIP 压缩包内单文件读取", "待执行", "QA"])
+    ws2.append(["2026-11-20", "全格式双括号跳转与 Ctrl+Click 分屏", "待执行", "QA"])
+    ws2.append(["2026-11-20", "PDF 默认原生预览与第2页直达展开", "待执行", "QA"])
+    ws2.append(["2026-11-20", "ZIP 压缩包内单文件读取与暂存抽屉", "待执行", "QA"])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -574,23 +574,23 @@ def _make_pdf_bytes() -> bytes:
     doc = pymupdf.open()
     pages_content = [
         (
-            "SmartLocalNote V5 产品方案简报 (第 1 页)",
+            "SmartLocalNote V6 产品方案简报 (第 1 页)",
             [
                 "定位：纯本地、零构建、多格式一体化的个人知识工作台。",
                 "核心理念：",
                 "  1. 所有读写严格经过 safe_io.py 路径白名单与 .bak 快照保护。",
-                "  2. 双括号传送门 [[文件名#锚点]] 实现跨格式毫秒级跳转。",
-                "  3. 支持隐私锁：标记为私密的文件严禁发送给外部 AI 接口。",
+                "  2. 双括号传送门 [[文件名#锚点]] 支持悬停速览与 Ctrl+Click 分屏。",
+                "  3. PDF 默认优先原生预览，同时配备右侧独立伴生笔记。",
                 "提示：请尝试跳转到本文件第 2 页 [[06_产品方案简报.pdf#page=2]] 测试页码直达与展开。",
             ],
         ),
         (
-            "V5 核心亮点与实测要点 (第 2 页)",
+            "V6 核心亮点与实测要点 (第 2 页)",
             [
-                "1. 右键一键展开填入：",
+                "1. 所见即所得 WYSIWYG + Word 图标栏 + / 斜杠指令菜单：",
                 "   选中链接 [[06_产品方案简报.pdf#page=2]] 可直接抽取本页文字并插入笔记。",
-                "2. 代码与文本严格分离：",
-                "   .py / .json / .yaml 等代码文件默认以源码视图打开，不会误渲染为标题。",
+                "2. 灵动岛 NotchDrop 下拉暂存抽屉与 0.5 秒长按拖块：",
+                "   默认以剪切移动模式重排段落，拖入顶栏灵动岛即可跨文件暂存。",
                 "3. 伴生笔记防冲突：",
                 "   同前缀的 .pdf 与 .docx 自动映射到独立的伴生笔记文件，互不覆盖。",
             ],
@@ -598,9 +598,9 @@ def _make_pdf_bytes() -> bytes:
         (
             "扩展规划与验收总结 (第 3 页)",
             [
-                "1. 多文档联合 AI 问答：勾选多份资料后可跨格式总结要点并生成带锚点笔记。",
+                "1. 非阻塞后台 AI：AI 总结与问答可在灵动岛胶囊后台运行，切换文档不中断。",
                 "2. 灵动岛专注计时：计时结束可将任务耗时与备注一键写回 Excel 进度表。",
-                "3. 纯本地可移植：所有数据保存在 data/ 目录，支持一键重新生成 V5 实测流程包。",
+                "3. 纯本地可移植：所有数据保存在 data/ 目录，支持一键重新生成 V6 实测流程包。",
             ],
         ),
     ]
@@ -614,7 +614,7 @@ def _make_pdf_bytes() -> bytes:
         for line in lines:
             page.insert_text((48, y), line, fontname="china-s", fontsize=12, color=(0.12, 0.16, 0.22))
             y += 30
-        page.insert_text((48, 790), f"SmartLocalNote V5 Test Fixture - Page {idx} / 3", fontname="helv", fontsize=9, color=(0.45, 0.5, 0.58))
+        page.insert_text((48, 790), f"SmartLocalNote V6 Test Fixture - Page {idx} / 3", fontname="helv", fontsize=9, color=(0.45, 0.5, 0.58))
 
     return doc.tobytes()
 
@@ -624,36 +624,48 @@ def _make_pdf_bytes() -> bytes:
 # ---------------------------------------------------------------------------
 
 def _checklist_md() -> str:
-    return """# 00 · SmartLocalNote V5 全流程实测清单
+    return """# 00 · SmartLocalNote V6 全流程实测清单
 
-欢迎使用 **V5 全格式实测流程包**！按以下步骤逐项体验并勾选 `[ ]`，即可完成 V5 全功能端到端验收。
+欢迎使用 **V6 全格式实测流程包**！按以下步骤逐项体验并勾选 `[ ]`，即可完成 V6 全部核心升级、交互创新与 13 种格式端到端验收。
 
 ---
 
-## 步骤 1：Markdown 跨文件与边界标题直达
+## 步骤 1：WYSIWYG 零语法编辑 · Word 图标格式栏 · `/` 斜杠菜单
+
+- [ ] **所见即所得直接编辑**：点击任意段落直接输入或修改文字，无需看到 `**` / `#` / `>` 等原始 Markdown 符号
+- [ ] **顶部 Word 图标格式栏**：选中文字后点击顶部 32px 紧凑图标栏（加粗 / 斜体 / 下划线 / 删除线 / 高亮 / 标题 / 列表 / 引用 / 代码 / 任务 / 表格 / 撤销重做）
+- [ ] **`/` 斜杠指令菜单**：在段落开头或新行输入 `/` 唤醒指令菜单，用方向键或鼠标插入标题、待办、代码块、引用、分隔线或文件传送门
+
+---
+
+## 步骤 2：默认剪切拖拽 · 0.5 秒长按拖块 · 灵动岛 NotchDrop 暂存抽屉
+
+> 在当前编辑器中按住任意段落块 **0.5 秒（500ms）** 即可长按拖起：同文档内默认执行 **剪切移动**，拖至目标块下方会显示 **蓝色插入线**；拖入顶部 **灵动岛 NotchDrop 暂存抽屉** 即可跨文件收集与批量插入！
+
+- **[可拖拽测试块 A]** V6 剪切拖块实测段落 A：长按 0.5 秒拖动到测试块 B 下方（观察蓝色插入线），确认原位移除并插入新位置。
+- **[可拖拽测试块 B]** V6 灵动岛暂存测试段落 B：长按拖至顶栏灵动岛触发下拉暂存抽屉，再切换到 `[[01_项目需求拆解.md]]` 点击「插入」或拖回。
+- **[左树拖入文件]** 从左侧文件树直接拖入任意文件到编辑区，自动生成带坐标的 `[[...]]` 双括号传送门胶囊。
+
+---
+
+## 步骤 3：Hover Peek 悬停速览 · `Ctrl+Click` 分屏阅读 · 前进后退 · 禅模式
+
+- [ ] **Hover Peek 悬停速览（400ms）**：将鼠标悬停在 `[[01_项目需求拆解.md#Chapter1 架构设计]]` 胶囊上停留 400ms，观察浮现的玻璃预览卡及「直达 / 分屏」快捷按钮
+- [ ] **`Ctrl+Click` 双栏分屏阅读**：按住 `Ctrl` 并点击 [[01_项目需求拆解.md]] 或 [[05_迭代进度表.xlsx#任务进度!B3]]，在中间栏右侧开启 50/50 独立滚动分屏对照视图
+- [ ] **前进 / 后退导航**：点击中间栏顶部的 `←` / `→` 历史按钮（或按 `Alt+←` / `Alt+→`），验证跨文件与分屏历史栈回溯
+- [ ] **极简专注禅模式**：点击顶栏右侧展开图标或按 `Ctrl+\\` 切换禅模式，隐藏左右边栏并居中文档工作区
+
+---
+
+## 步骤 4：Markdown 跨文件锚点与右键「一键展开内容填入」
+
+请在编辑区右键以下传送门胶囊，选择 **「一键展开内容填入」**，或点击验证跨文件跳转：
 
 - [ ] **普通跨文件章节跳转**：[[01_项目需求拆解.md#Chapter1 架构设计]]
 - [ ] **下划线边界标题跳转**（验证 `_` 不被误解析为斜体）：[[01_项目需求拆解.md#_下划线_边界测试]]
 - [ ] **无后缀文件直达**：[[01_项目需求拆解]]
-- [ ] **同文件内锚点跳转**：[[#步骤 8：全格式直达验收]]
+- [ ] **同文件内锚点跳转**：[[#步骤 9：全格式直达验收（13 种格式）]]
 - [ ] **标准 Markdown 相对链接**：[标准MD链接测试](01_项目需求拆解.md)
-
----
-
-## 步骤 2：拖拽 & 1 秒长按拖块 & 拖拽暂存栏实测
-
-> 在默认「实时阅览」模式下，对下面任意段落块按住 **1 秒长按** 即可拖起重排，或直接拖入屏幕右侧边缘的 **「📥 暂存栏」**：
-
-- **[可拖拽测试块 A]** V5 拖拽暂存栏实测段落：将本段拖入右侧或顶部暂存栏，再跨文件拖回 `[[01_项目需求拆解.md]]` 任意位置！
-- **[可拖拽测试块 B]** 支持从左侧文件树直接拖入文件，自动生成带坐标的 `[[...]]` 双括号传送门胶囊。
-
----
-
-## 步骤 3：右键文件模块「一键展开内容填入」
-
-请在编辑区或预览区右键以下传送门胶囊，选择 **「一键展开内容填入」**：
-
-- [ ] **Markdown 展开**：[[01_项目需求拆解.md]]
 - [ ] **Python 源码展开**（自动包裹代码块）：[[03_核心脚本示例.py]]
 - [ ] **Excel 指定单元格窗口展开**：[[05_迭代进度表.xlsx#任务进度!B3]]
 - [ ] **PDF 指定页码展开**：[[06_产品方案简报.pdf#page=2]]
@@ -664,33 +676,34 @@ def _checklist_md() -> str:
 
 ---
 
-## 步骤 4：闪念卡实测指引
+## 步骤 5：闪念卡 V6 实测指引
 
 - [ ] 在工作台空白处或编辑器 **右键召唤闪念卡**
-- [ ] 点击卡片顶部 **V3 彩纸按钮** 切换卡片颜色（无苹果球样式）
-- [ ] 拖动卡片自由移动，并测试 **📌 钉子固定** 防止误关闭
-- [ ] 将闪念卡 **拖到屏幕边缘** 测试自动贴边收起与排布
-- [ ] 生成多张卡片互相 **重叠叠放**，点击卡片测试自动展开
+- [ ] 验证全新 **高对比度卡片主体 + 顶部彩条**，点击颜色块打开 **右侧对齐色盘 + 自定义取色器**（不裁切、不发灰）
+- [ ] 点击 **📌 钉子固定** 后再尝试拖动，验证仅钉子图标抖动且卡片脉冲提示（卡片本身不位移错乱）
+- [ ] 拖入多张卡片进行 **叠放合并**，测试 **整叠一起拖动**、顶部 **`↗` 拆出单卡**、底部 **撤销合并按钮** 与 **自适应卡片尺寸**
 
 ---
 
-## 步骤 5：未保存修改切换弹窗测试
+## 步骤 6：左侧文件树 · 置顶 · 混合排序 · 行内重命名与新建
 
-- [ ] 在本笔记任意位置输入几个字符（保持未保存红点状态），然后点击左侧任意其他文件
-- [ ] 验证弹窗按钮顺序：**「💾 保存并退出」最左**、「放弃修改」中间、「取消」最右
-
----
-
-## 步骤 6：左侧精简图标工具栏与排序测试
-
-- [ ] 验证左侧工具栏图标精简美观、无文字挤压溢出
-- [ ] 切换文件列表排序方式：**名称 / 修改时间 / 类型 / 大小**，确认顺序立即生效
+- [ ] 验证排序按钮右下角 **语义角标小图标**（已移除旧版小蓝点），打开排序菜单测试 **`🧹 一键整理`**
+- [ ] 对重要文件右键 **置顶（📌）**，测试 **置顶文件与自定义拖拽排序（上下蓝色插入线）**
+- [ ] 选中文件按 `F2` / 双击 / 右键重命名，验证 **行内输入框直接改名** 与顶部 **行内快捷新建**
+- [ ] 对左侧或右侧模块标题栏 **右键** 打开 **模块级布局记忆与预设菜单**（折叠 / 高度 / 恢复默认布局）
 
 ---
 
-## 步骤 7：媒体内联显示与右下角缩放
+## 步骤 7：未保存修改弹窗与非阻塞后台 AI
 
-以下媒体胶囊支持直接在阅读视图内联渲染，可拖动媒体右下角手柄调整显示宽度：
+- [ ] 在本笔记任意位置输入几个字符（保持未保存状态），然后点击左侧其他文件，验证紧凑 **「💾 保存并退出 / 放弃修改 / 取消」** 弹窗（无异常拉伸）
+- [ ] 在右侧勾选多份文件触发 **AI 总结或联合问答**，切换到其他文档时观察顶栏 **灵动岛后台 AI 运行胶囊**，完成后点击 `[查看结果]` 直达
+
+---
+
+## 步骤 8：媒体内联显示与右下角缩放
+
+以下媒体胶囊支持直接在编辑/阅读视图内联渲染，可拖动媒体右下角手柄调整显示宽度：
 
 [[10_架构示意.png|w=360]]
 
@@ -700,9 +713,9 @@ def _checklist_md() -> str:
 
 ---
 
-## 步骤 8：全格式直达验收
+## 步骤 9：全格式直达验收（13 种格式）
 
-请逐一点击以下所有格式链接，验证打开视图、跳转定位与伴生笔记是否正常：
+请逐一点击以下所有格式链接，验证打开视图（含 **PDF 默认原生预览**）、跳转定位与伴生笔记是否正常：
 
 - [ ] `.md` 标题锚点：[[01_项目需求拆解.md#2. 核心接口列表]]
 - [ ] `.txt` 纯文本：[[02_纯文本备忘.txt]]
@@ -710,7 +723,7 @@ def _checklist_md() -> str:
 - [ ] `.json` 配置视图：[[04_配置清单.json]]
 - [ ] `.xlsx` 无坐标打开：[[05_迭代进度表.xlsx]]
 - [ ] `.xlsx` 带坐标定位：[[05_迭代进度表.xlsx#任务进度!B3]]
-- [ ] `.pdf` 无页码打开：[[06_产品方案简报.pdf]]
+- [ ] `.pdf` 无页码打开（默认原生 PDF 预览）：[[06_产品方案简报.pdf]]
 - [ ] `.pdf` 指定第 2 页：[[06_产品方案简报.pdf#page=2]]
 - [ ] `.docx` 文档预览：[[07_接口文档.docx]]
 - [ ] `.pptx` 幻灯片第 2 页：[[08_评审幻灯片.pptx#Slide 2]]
@@ -724,9 +737,8 @@ def _checklist_md() -> str:
 
 ---
 
-## 步骤 9：AI 总结 / 多文档联合问答 / 灵动岛专注回写
+## 步骤 10：灵动岛专注计时回写 Excel
 
-- [ ] 在左侧勾选多份文件（如 `01_项目需求拆解.md`、`05_迭代进度表.xlsx`、`06_产品方案简报.pdf`、`07_接口文档.docx`）进行 **联合 AI 问答**
 - [ ] 点击顶部 **灵动岛专注计时**，完成或提前结束一次专注，测试将记录自动回写到 [[05_迭代进度表.xlsx]]
 """
 
@@ -734,13 +746,13 @@ def _checklist_md() -> str:
 def _req_breakdown_md() -> str:
     return """# 01 · 项目需求拆解
 
-本文件用于配合 [[00_V5全流程实测清单.md]] 验证跨文件标题锚点、下划线边界标题与反向链接识别。
+本文件用于配合 [[00_V6全流程实测清单.md]] 验证跨文件标题锚点、下划线边界标题、Hover Peek 悬停速览与 Ctrl+Click 分屏阅读。
 
 ---
 
 ## Chapter1 架构设计
 
-SmartLocalNote V5 采用 **Thin Routes + Thick Core** 架构：
+SmartLocalNote V6 采用 **Thin Routes + Thick Core** 架构：
 
 1. **后端网关 (`api/*.py`)**：单路由严格控制在 15 行以内，只负责参数校验与统一 `{ ok, data, message }` 封装。
 2. **核心引擎 (`core/*.py`)**：零 FastAPI 依赖，全部本地读写经由 `core/safe_io.py` 路径白名单与 `.bak` 快照保护。
@@ -765,7 +777,7 @@ SmartLocalNote V5 采用 **Thin Routes + Thick Core** 架构：
 | --- | --- | --- |
 | `/api/files/read` | GET | 读取多格式文档与伴生笔记 |
 | `/api/files/expand-content` | GET | 抽取文件片段为 Markdown 供一键填入 |
-| `/api/system/seed-test-suite` | POST | 一键初始化/重置 V5 全格式实测流程包 |
+| `/api/system/seed-test-suite` | POST | 一键初始化/重置 V6 全格式实测流程包 |
 """
 
 
@@ -777,7 +789,7 @@ def _plain_txt() -> str:
         "   - 验证 .txt 文件打开速度与 UTF-8 中文显示。\n"
         "   - 验证编辑后自动生成 data/.snapshots/ 备份快照。\n\n"
         "2. 关联文档提示：\n"
-        "   - 返回总清单：[[00_V5全流程实测清单.md]]\n"
+        "   - 返回总清单：[[00_V6全流程实测清单.md]]\n"
         "   - 查看接口文档：[[07_接口文档.docx]]\n"
     )
 
@@ -798,7 +810,7 @@ def summarize_tasks(config_path: str) -> dict:
     modules = data.get("supported_formats", [])
     return {
         "project": data.get("project", "SmartLocalNote"),
-        "version": data.get("version", "5.0.0"),
+        "version": data.get("version", "6.0.0"),
         "format_count": len(modules),
     }
 
@@ -811,14 +823,14 @@ def calc_completion_rate(done: int, total: int) -> float:
 
 
 if __name__ == "__main__":
-    print("SmartLocalNote V5 Source Code Preview OK ->", calc_completion_rate(8, 9))
+    print("SmartLocalNote V6 Source Code Preview OK ->", calc_completion_rate(12, 13))
 '''
 
 
 def _config_json() -> str:
     payload = {
         "project": "SmartLocalNote",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "architecture": {
             "backend": "FastAPI + Thick Core (zero FastAPI in core/)",
             "frontend": "Vanilla ES6 Modules + CSS Design Tokens",
@@ -828,14 +840,14 @@ def _config_json() -> str:
             ".md", ".txt", ".py", ".json", ".xlsx", ".pdf",
             ".docx", ".pptx", ".zip", ".png", ".wav", ".mp4",
         ],
-        "test_entry": "00_V5全流程实测清单.md",
+        "test_entry": "00_V6全流程实测清单.md",
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def _make_zip_bytes(preview_png: bytes) -> bytes:
     readme = (
-        "SmartLocalNote V5 发布资源包 (README.txt)\n"
+        "SmartLocalNote V6 发布资源包 (README.txt)\n"
         "==========================================\n\n"
         "本压缩包用于测试虚拟压缩包浏览、包内单文件跳转 [[09_发布资源包.zip!README.txt]]\n"
         "以及右键「一键展开内容填入」功能。\n\n"
@@ -845,11 +857,12 @@ def _make_zip_bytes(preview_png: bytes) -> bytes:
         "3. preview.png - 内嵌预览缩略图\n"
     )
     config_yaml = (
-        "suite: smartlocalnote-v5\n"
+        "suite: smartlocalnote-v6\n"
         "mode: local-first\n"
         "features:\n"
-        "  - inline_expand\n"
-        "  - sticky_notes\n"
+        "  - wysiwyg_editor\n"
+        "  - notchdrop_shelf\n"
+        "  - sticky_notes_v6\n"
         "  - archive_virtual_tree\n"
     )
     buf = io.BytesIO()
@@ -862,7 +875,7 @@ def _make_zip_bytes(preview_png: bytes) -> bytes:
 
 def generate_all(output_dir: Path = SEED_DIR) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Remove legacy 高数* seed files (or any stale seed files) before regenerating
+    # Remove stale seed files before regenerating
     for existing in output_dir.iterdir():
         if existing.is_file():
             existing.unlink()
@@ -871,7 +884,7 @@ def generate_all(output_dir: Path = SEED_DIR) -> list[Path]:
     thumb_png = _make_png_bytes(96, 64, variant=1)
 
     files_map: dict[str, bytes] = {
-        "00_V5全流程实测清单.md": _checklist_md().encode("utf-8"),
+        "00_V6全流程实测清单.md": _checklist_md().encode("utf-8"),
         "01_项目需求拆解.md": _req_breakdown_md().encode("utf-8"),
         "02_纯文本备忘.txt": _plain_txt().encode("utf-8"),
         "03_核心脚本示例.py": _sample_py().encode("utf-8"),
@@ -897,6 +910,6 @@ def generate_all(output_dir: Path = SEED_DIR) -> list[Path]:
 if __name__ == "__main__":
     created = generate_all()
     total_size = sum(p.stat().st_size for p in created)
-    print(f"Generated {len(created)} V5 test fixtures in {SEED_DIR} (total {total_size} bytes):")
+    print(f"Generated {len(created)} V6 test fixtures in {SEED_DIR} (total {total_size} bytes):")
     for p in created:
         print(f"  - {p.name} ({p.stat().st_size} bytes)")

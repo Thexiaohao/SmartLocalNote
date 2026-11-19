@@ -488,16 +488,75 @@ async function submitFocusDoneToExcel(islandEl) {
 }
 
 /* --------------------------------------------------------------------------
- * 3. Dynamic Island 5-Mode Renderer
+ * 3. Dynamic Island 5-Mode Renderer + Shelf Trigger + Background AI Pill
  * -------------------------------------------------------------------------- */
+
+function setBgAiTaskSafe(task) {
+  if (typeof store.setBgAiTask === 'function') {
+    store.setBgAiTask(task);
+    return;
+  }
+  if (typeof storeMod.setBgAiTask === 'function') {
+    storeMod.setBgAiTask(task);
+    return;
+  }
+  store.state.bgAiTask = task && typeof task === 'object' ? { ...task } : null;
+  store.emit('ai:bg-task', store.state.bgAiTask);
+}
+
+function toggleZenModeSafe(force) {
+  if (typeof store.toggleZenMode === 'function') {
+    return store.toggleZenMode(force);
+  }
+  if (typeof storeMod.toggleZenMode === 'function') {
+    return storeMod.toggleZenMode(force);
+  }
+  const next = typeof force === 'boolean' ? force : !Boolean(store.state.zenMode);
+  store.state.zenMode = next;
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.toggle('is-zen-mode', next);
+  }
+  store.emit('zen:changed', next);
+  return next;
+}
+
+function renderIslandShelfTrigger() {
+  const shelfCount = Array.isArray(store.state.shelfItems) ? store.state.shelfItems.length : 0;
+  const drawerOpen = Boolean(document.getElementById('island-shelf-drawer')?.classList.contains('is-open'));
+  return `
+    <button type="button" class="island-shelf-trigger ${shelfCount > 0 ? 'has-items' : ''} ${drawerOpen ? 'is-open' : ''}" data-island-action="toggle-shelf" title="灵动岛暂存栏（拖拽任意内容至此暂存）" aria-expanded="${drawerOpen ? 'true' : 'false'}">
+      ${icon('inbox', 13)}${shelfCount > 0 ? `<span class="island-shelf-count">${shelfCount}</span>` : ''}
+    </button>
+  `;
+}
+
+function refreshIslandShelfTriggerOnly(islandEl) {
+  const trigger = islandEl?.querySelector('.island-shelf-trigger');
+  if (!trigger) return false;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderIslandShelfTrigger().trim();
+  const nextTrigger = tpl.content.firstElementChild;
+  if (nextTrigger) {
+    trigger.replaceWith(nextTrigger);
+    return true;
+  }
+  return false;
+}
 
 function renderDynamicIsland(islandEl, islandState) {
   if (!islandEl) return;
   const mode = islandState?.mode || 'idle';
   const data = islandState?.data || {};
+  const bgTask = store.state.bgAiTask;
 
   islandEl.className = 'dynamic-island';
   islandEl.dataset.mode = mode;
+  if (mode === 'idle' && bgTask?.status) {
+    islandEl.dataset.bgAi = bgTask.status;
+    islandEl.classList.toggle('is-bg-ai-done', bgTask.status === 'done');
+  } else {
+    delete islandEl.dataset.bgAi;
+  }
 
   if (mode === 'sniff') {
     const rawText = String(data.text || '').trim();
@@ -509,6 +568,7 @@ function renderDynamicIsland(islandEl, islandState) {
         <button type="button" class="island-pill-btn" data-island-action="sniff-note">📝 存为笔记</button>
         <button type="button" class="island-pill-btn" data-island-action="dismiss" aria-label="关闭">✕</button>
       </div>
+      ${renderIslandShelfTrigger()}
     `;
     scheduleSniffAutoHide(sniffRemainingMs || 4000);
     return;
@@ -544,6 +604,7 @@ function renderDynamicIsland(islandEl, islandState) {
           <button type="button" class="island-pill-btn is-primary" data-island-action="focus-finish">✓ 结束</button>
         </div>
       </div>
+      ${renderIslandShelfTrigger()}
     `;
     return;
   }
@@ -573,6 +634,7 @@ function renderDynamicIsland(islandEl, islandState) {
         <button type="button" class="island-pill-btn is-primary" data-island-action="focus-done-submit">✓ 写入</button>
         <button type="button" class="island-pill-btn" data-island-action="dismiss">跳过</button>
       </div>
+      ${renderIslandShelfTrigger()}
     `;
 
     window.requestAnimationFrame(() => {
@@ -597,6 +659,58 @@ function renderDynamicIsland(islandEl, islandState) {
         <button type="button" class="island-pill-btn is-primary" data-island-action="alert-focus">▶ 专注</button>
         <button type="button" class="island-pill-btn" data-island-action="dismiss" aria-label="关闭">✕</button>
       </div>
+      ${renderIslandShelfTrigger()}
+    `;
+    return;
+  }
+
+  if (bgTask && (bgTask.status === 'running' || bgTask.status === 'done' || bgTask.status === 'error')) {
+    const label = String(
+      bgTask.label ||
+        (bgTask.status === 'running'
+          ? 'AI 正在后台处理…'
+          : bgTask.status === 'done'
+            ? 'AI 后台任务已完成'
+            : 'AI 后台处理失败')
+    );
+
+    if (bgTask.status === 'running') {
+      islandEl.innerHTML = `
+        <div class="island-idle-view">
+          <div class="island-bg-ai-pill is-running">
+            <span class="ai-spin-icon" aria-hidden="true">${icon('sparkles', 13)}</span>
+            <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+          </div>
+        </div>
+        ${renderIslandShelfTrigger()}
+      `;
+      return;
+    }
+
+    if (bgTask.status === 'done') {
+      islandEl.innerHTML = `
+        <div class="island-idle-view">
+          <div class="island-bg-ai-pill is-done">
+            <span aria-hidden="true">${icon('sparkles', 13)}</span>
+            <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+            <button type="button" class="island-pill-btn is-primary" data-island-action="open-bg-ai">查看结果</button>
+            <button type="button" class="island-pill-btn" data-island-action="dismiss-bg-ai" aria-label="关闭">×</button>
+          </div>
+        </div>
+        ${renderIslandShelfTrigger()}
+      `;
+      return;
+    }
+
+    islandEl.innerHTML = `
+      <div class="island-idle-view">
+        <div class="island-bg-ai-pill is-error">
+          <span aria-hidden="true">${icon('sparkles', 13)}</span>
+          <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+          <button type="button" class="island-pill-btn" data-island-action="dismiss-bg-ai" aria-label="关闭">×</button>
+        </div>
+      </div>
+      ${renderIslandShelfTrigger()}
     `;
     return;
   }
@@ -607,10 +721,33 @@ function renderDynamicIsland(islandEl, islandState) {
       <span class="island-status-dot" aria-hidden="true"></span>
       <span class="island-label">${escapeHtml(activeName)}</span>
     </div>
+    ${renderIslandShelfTrigger()}
   `;
 }
 
-async function handleIslandAction(islandEl, action) {
+async function handleIslandAction(islandEl, action, event) {
+  if (action === 'toggle-shelf') {
+    event?.stopPropagation?.();
+    store.emit('shelf:toggle');
+    return;
+  }
+
+  if (action === 'open-bg-ai') {
+    event?.stopPropagation?.();
+    const task = store.state.bgAiTask;
+    setBgAiTaskSafe(null);
+    if (typeof task?.onOpen === 'function') {
+      task.onOpen();
+    }
+    return;
+  }
+
+  if (action === 'dismiss-bg-ai') {
+    event?.stopPropagation?.();
+    setBgAiTaskSafe(null);
+    return;
+  }
+
   if (action === 'dismiss') {
     clearSniffTimer();
     stopFocusTimer();
@@ -1005,6 +1142,14 @@ function buildQuickCommands() {
     },
     {
       type: 'cmd',
+      id: 'cmd-toggle-zen',
+      icon: 'expand',
+      label: '切换极简专注禅模式 (Ctrl+\\)',
+      sub: '命令 · 收起左右栏进入沉浸式读写',
+      keywords: 'zen chanmoshi 禅模式 专注 极简 沉浸',
+    },
+    {
+      type: 'cmd',
       id: 'cmd-shortcuts-cheatsheet',
       icon: 'zap',
       label: '查看全部快捷键速查表',
@@ -1022,6 +1167,7 @@ function openShortcutsCheatsheetSheet() {
     { key: 'Ctrl+B / Ctrl+I / Ctrl+/', desc: '加粗 / 斜体 / 引用块' },
     { key: 'Ctrl+K', desc: 'Spotlight 全局与 AI 语义描述检索' },
     { key: 'Ctrl+N', desc: '新建笔记' },
+    { key: 'Ctrl+\\', desc: '切换极简专注禅模式' },
     { key: 'Alt+N', desc: '在当前位置召唤悬浮闪念卡' },
     { key: '右键中间文档', desc: '召唤闪念卡 / 插入网址 / AI 润色 / 脑图' },
     { key: '右键左侧文件', desc: '重命名 / 隐私锁 / 系统打开 / 移出列表' },
@@ -1474,6 +1620,9 @@ async function executeSpotlightItem(item) {
           resetUiLayout();
         }
         showToast('已恢复默认三栏宽度与模块尺寸', 'success');
+        break;
+      case 'cmd-toggle-zen':
+        toggleZenModeSafe();
         break;
       case 'cmd-shortcuts-cheatsheet':
         openShortcutsCheatsheetSheet();
@@ -1967,10 +2116,10 @@ async function openSettingsSheet() {
 
         <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;flex-wrap:wrap;">
           <div>
-            <div style="font-size:12.5px;font-weight:600;color:var(--text-primary);">🧪 V5 全格式实测流程包</div>
+            <div style="font-size:12.5px;font-weight:600;color:var(--text-primary);">🧪 V6 全格式实测流程包</div>
             <div style="font-size:11.5px;color:var(--text-secondary);">一键加载全格式测试文档并打开实测流程清单</div>
           </div>
-          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="cfg-seed-test-btn">${icon('flask', 13)} 一键加载</button>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="cfg-seed-test-btn">${icon('flask', 13)} 加载 V6 全格式实测流程包</button>
         </div>
       </div>
     `,
@@ -2117,19 +2266,25 @@ async function openSettingsSheet() {
           }
           store.emit('files:updated', filesData);
           closeSheet();
-          const checklist =
-            (filesData?.items || store.state.files?.items || []).find(
-              (f) => f.name === '00_V5全流程实测清单.md' || String(f.path || '').endsWith('00_V5全流程实测清单.md')
-            ) ||
-            (res?.checklist_path
-              ? { path: res.checklist_path, name: '00_V5全流程实测清单.md', ext: '.md' }
-              : null);
-          if (checklist?.path) {
-            openFileObject(checklist);
+          const entryPath = res?.entry_path || res?.checklist_path || '';
+          const items = filesData?.items || store.state.files?.items || [];
+          const matched =
+            (entryPath && items.find((f) => f.path === entryPath)) ||
+            items.find(
+              (f) =>
+                f.name === '00_V6全流程实测清单.md' ||
+                f.name === '00_V5全流程实测清单.md' ||
+                String(f.path || '').endsWith('00_V6全流程实测清单.md') ||
+                String(f.path || '').endsWith('00_V5全流程实测清单.md')
+            );
+          if (matched?.path) {
+            openFileObject(matched);
+          } else if (entryPath) {
+            openFileByPath(entryPath);
           } else {
             openFileByPath('00_V5全流程实测清单.md');
           }
-          showToast('已加载 V5 全格式实测流程包', 'success');
+          showToast('已加载 V6 全格式实测流程包', 'success');
         } catch (err) {
           showToast(`加载实测流程包失败：${err?.message || '未知错误'}`, 'error');
         } finally {
@@ -2218,6 +2373,21 @@ export function initSpotlight() {
       }
     });
 
+    store.on('shelf:changed', () => {
+      if (store.state.island?.mode === 'focus-done' && document.activeElement?.id === 'island-done-input') {
+        refreshIslandShelfTriggerOnly(islandEl);
+        return;
+      }
+      renderDynamicIsland(islandEl, store.state.island);
+    });
+
+    store.on('ai:bg-task', () => {
+      if (store.state.island?.mode === 'focus-done' && document.activeElement?.id === 'island-done-input') {
+        return;
+      }
+      renderDynamicIsland(islandEl, store.state.island);
+    });
+
     islandEl.addEventListener('mouseenter', () => {
       sniffHovered = true;
       if (store.state.island?.mode === 'sniff') {
@@ -2244,7 +2414,7 @@ export function initSpotlight() {
         }
         return;
       }
-      handleIslandAction(islandEl, actionBtn.dataset.islandAction);
+      handleIslandAction(islandEl, actionBtn.dataset.islandAction, e);
     });
 
     islandEl.addEventListener('keydown', (e) => {
@@ -2277,6 +2447,21 @@ export function initSpotlight() {
   document.getElementById('btn-spotlight')?.addEventListener('click', () => openSpotlight());
   document.getElementById('btn-voice-quick')?.addEventListener('click', openVoiceSheet);
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsSheet);
+
+  const btnZenMode = document.getElementById('btn-zen-mode');
+  const syncZenBtn = (isZen) => {
+    if (!btnZenMode) return;
+    const active = Boolean(isZen);
+    btnZenMode.classList.toggle('is-active', active);
+    btnZenMode.setAttribute('aria-pressed', active ? 'true' : 'false');
+  };
+  syncZenBtn(store.state.zenMode);
+  btnZenMode?.addEventListener('click', () => {
+    toggleZenModeSafe();
+  });
+  store.on('zen:changed', (isZen) => {
+    syncZenBtn(isZen);
+  });
 
   store.on('spotlight:open', (opts) => openSpotlight(opts?.mode || opts));
   store.on('voice:open', openVoiceSheet);
