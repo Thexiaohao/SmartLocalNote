@@ -1,0 +1,6 @@
+#include <windows.h>
+
+#define IDI_TRAY 101
+
+IDI_TRAY ICON "tray.ico"
+1 RT_MANIFEST "daemon.manifest"

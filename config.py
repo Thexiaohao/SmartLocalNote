@@ -14,7 +14,21 @@ from typing import Any
 
 IS_FROZEN: bool = bool(getattr(sys, "frozen", False))
 RESOURCE_DIR: Path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
-BASE_DIR: Path = Path(sys.executable).resolve().parent if IS_FROZEN else Path(__file__).resolve().parent
+
+
+def _resolve_base_dir() -> Path:
+    env_base = os.environ.get("SMARTLOCALNOTE_BASE_DIR", "").strip()
+    if env_base:
+        return Path(env_base).resolve()
+    if IS_FROZEN:
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir.name.lower() == "app-ui":
+            return exe_dir.parent
+        return exe_dir
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR: Path = _resolve_base_dir()
 DATA_DIR: Path = BASE_DIR / "data"
 SNAPSHOTS_DIR: Path = DATA_DIR / ".snapshots"
 DEFAULT_NOTES_DIR: Path = DATA_DIR / "notes"
@@ -25,6 +39,7 @@ FILES_INDEX_FILE: Path = DATA_DIR / "files.json"
 APPS_FILE: Path = DATA_DIR / "apps.json"
 TREE_FILE: Path = DATA_DIR / "knowledge_tree.json"
 TASKS_FILE: Path = DATA_DIR / "tasks.json"
+WINDOW_STATE_FILE: Path = DATA_DIR / "window_state.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "port": 8765,

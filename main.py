@@ -52,6 +52,7 @@ from config import (
     load_config,
     update_config,
 )
+from core.daemon_bridge import DaemonBridge, load_window_state, save_window_state
 
 # Explicit router imports so PyInstaller static analysis always bundles all API & core modules
 from api import ai_api, excel_api, files_api, system_api, tools_api  # noqa: F401
@@ -201,12 +202,19 @@ async def serve_manifest():
 
 
 def _pick_available_port(preferred_port: int, span: int = 20) -> int:
-    """Return preferred_port if free on localhost, else scan next `span` ports."""
+    """Return preferred_port if genuinely free on all interfaces, else scan next `span` ports."""
     for candidate in range(preferred_port, preferred_port + span + 1):
+        # 1. Active probe: if anything already accepts connections on loopback, port is occupied
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.15)
+            if probe.connect_ex(("127.0.0.1", candidate)) == 0:
+                continue
+        # 2. Exclusive bind probe on 0.0.0.0 (avoid Windows SO_REUSEADDR false positives)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             try:
-                sock.bind(("127.0.0.1", candidate))
+                sock.bind(("0.0.0.0", candidate))
                 return candidate
             except OSError:
                 continue
@@ -294,7 +302,16 @@ def main() -> None:
     parser.add_argument("--web-only", action="store_true", help="Run HTTP server only without desktop window")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=default_port, help=f"Bind port (default: {default_port})")
+    parser.add_argument("--daemon-hwnd", default="", help="Parent native daemon HWND (hex) for IPC")
+    parser.add_argument("--idle-timeout", type=int, default=180, help="Idle seconds before destroying hidden UI")
     args = parser.parse_args()
+
+    daemon_hwnd = 0
+    if args.daemon_hwnd:
+        try:
+            daemon_hwnd = int(str(args.daemon_hwnd).strip(), 0)
+        except ValueError:
+            daemon_hwnd = 0
 
     port = _pick_available_port(args.port)
     if port != cfg.get("port"):
@@ -324,26 +341,51 @@ def main() -> None:
     _wait_for_port(port)
 
     url = f"http://127.0.0.1:{port}"
+    win_geom = load_window_state()
+    bridge = DaemonBridge(daemon_hwnd, idle_timeout_sec=args.idle_timeout) if daemon_hwnd else None
+    win = None
     try:
-        webview.create_window(
-            "SmartLocalNote",
-            url,
-            width=1360,
-            height=840,
-            min_size=(960, 640),
-        )
+        if bridge is not None:
+            bridge.start()
+        create_kwargs: dict[str, Any] = {
+            "width": int(win_geom.get("width", 1360)),
+            "height": int(win_geom.get("height", 840)),
+            "min_size": (960, 640),
+        }
+        if "x" in win_geom and "y" in win_geom:
+            create_kwargs["x"] = int(win_geom["x"])
+            create_kwargs["y"] = int(win_geom["y"])
+
+        win = webview.create_window("SmartLocalNote", url, **create_kwargs)
+        if bridge is not None:
+            bridge.attach_window(win)
+            win.events.shown += lambda: bridge.notify_ready(win)
+            win.events.loaded += lambda: bridge.notify_ready(win)
+            win.events.closing += bridge.on_closing
+        else:
+            win.events.closing += lambda: (save_window_state(win), True)[1]
+
+        wv_storage = str((DATA_DIR / "webview_cache").resolve())
         if sys.platform == "win32":
             try:
-                webview.start(gui="edgechromium")
+                webview.start(gui="edgechromium", private_mode=False, storage_path=wv_storage)
             except Exception:
-                webview.start()
+                webview.start(private_mode=False, storage_path=wv_storage)
         else:
-            webview.start()
+            webview.start(private_mode=False, storage_path=wv_storage)
     except Exception:
         # Ultimate fallback: open system default browser so user is never stuck
         webbrowser.open(url)
         while server_thread.is_alive():
             time.sleep(1.0)
+    finally:
+        if win is not None and (bridge is None or not bridge.hidden):
+            save_window_state(win, bridge.main_hwnd if bridge is not None else 0)
+        if bridge is not None:
+            bridge.close()
+        _try_scheduler_hook("stop_scheduler")
+        if daemon_hwnd:
+            os._exit(0)
 
 
 if __name__ == "__main__":

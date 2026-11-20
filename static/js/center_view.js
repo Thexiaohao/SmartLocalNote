@@ -706,6 +706,64 @@ export function initCenterView(containerEl) {
     });
   }
 
+  const LAST_SESSION_KEY = 'sln_last_session_v1';
+  let lastSessionSaveTimer = null;
+
+  function persistLastSessionNow() {
+    if (!state.activeDoc?.path) return;
+    try {
+      const scrollEl = getActiveMainScrollEl();
+      localStorage.setItem(
+        LAST_SESSION_KEY,
+        JSON.stringify({
+          path: state.activeDoc.path,
+          scrollTop: scrollEl ? Math.max(0, Math.round(scrollEl.scrollTop || 0)) : 0,
+        })
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
+  function schedulePersistLastSession() {
+    if (lastSessionSaveTimer) window.clearTimeout(lastSessionSaveTimer);
+    lastSessionSaveTimer = window.setTimeout(() => {
+      lastSessionSaveTimer = null;
+      persistLastSessionNow();
+    }, 350);
+  }
+
+  function readLastSession() {
+    try {
+      const raw = localStorage.getItem(LAST_SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed.path === 'string' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function openInitialStartupDoc(items) {
+    if (!Array.isArray(items) || items.length === 0) return false;
+    const saved = readLastSession();
+    const matched = saved?.path ? items.find((f) => isSamePath(f.path, saved.path)) : null;
+    const target =
+      matched ||
+      items.find(
+        (f) => String(f.ext || '').toLowerCase() === '.md' || String(f.name || '').toLowerCase().endsWith('.md')
+      );
+    if (!target?.path) return false;
+    const doc = await openFile(target.path);
+    if (doc && matched && Number.isFinite(saved?.scrollTop) && saved.scrollTop > 0) {
+      window.requestAnimationFrame(() => {
+        const scrollEl = getActiveMainScrollEl();
+        if (scrollEl) scrollEl.scrollTop = saved.scrollTop;
+      });
+    }
+    return Boolean(doc);
+  }
+
   // =========================================================================
   // Floating Selection Format Bar & Precision Drop Line Helpers
   // =========================================================================
@@ -4184,6 +4242,7 @@ export function initCenterView(containerEl) {
       ext: doc.ext,
       type: doc.type,
     });
+    persistLastSessionNow();
   }
 
   async function navigateHistory(dir) {
@@ -4827,14 +4886,11 @@ export function initCenterView(containerEl) {
     }
 
     if (!state.hasOpenedOnce && !state.loading && items.length > 0) {
-      const firstMd = items.find(
-        (f) => String(f.ext || '').toLowerCase() === '.md' || String(f.name || '').toLowerCase().endsWith('.md')
-      );
-      if (firstMd?.path) {
-        openFile(firstMd.path);
-      } else {
-        renderWelcome();
-      }
+      openInitialStartupDoc(items).then((ok) => {
+        if (!ok && !state.activeDoc && !state.loading) {
+          renderWelcome();
+        }
+      });
     } else if (!state.activeDoc && !state.loading) {
       renderWelcome();
     }
@@ -9090,19 +9146,21 @@ export function initCenterView(containerEl) {
     }
   });
 
-  // Initial render (and auto-open first .md if files are already populated)
+  containerEl.addEventListener('scroll', schedulePersistLastSession, true);
+  window.addEventListener('beforeunload', persistLastSessionNow);
+
+  // Initial render (restore last session file+scroll or open first .md)
   if (store.state.splitDoc) {
     renderSplitPane(store.state.splitDoc);
   }
   const initialItems = store.state.files?.items || [];
   if (initialItems.length > 0) {
-    const firstMd = initialItems.find(
-      (f) => String(f.ext || '').toLowerCase() === '.md' || String(f.name || '').toLowerCase().endsWith('.md')
-    );
-    if (firstMd?.path) {
-      openFile(firstMd.path);
-      return;
-    }
+    openInitialStartupDoc(initialItems).then((ok) => {
+      if (!ok && !state.activeDoc && !state.loading) {
+        renderWelcome();
+      }
+    });
+    return;
   }
   renderWelcome();
 }

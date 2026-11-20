@@ -11,6 +11,7 @@ import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 BUILD_MODE = os.environ.get("SLN_BUILD_MODE", "onefile").strip().lower()
+EXE_NAME = os.environ.get("SLN_EXE_NAME", "SmartLocalNote").strip() or "SmartLocalNote"
 ICON_PATH = os.path.join("assets", "icon.ico")
 
 datas = [
@@ -37,6 +38,7 @@ hiddenimports = [
     "core.ai_service",
     "core.search_engine",
     "core.scheduler",
+    "core.daemon_bridge",
     # Uvicorn / FastAPI / Starlette dynamic imports
     "uvicorn.logging",
     "uvicorn.loops",
@@ -127,7 +129,7 @@ if BUILD_MODE == "onedir":
         a.scripts,
         [],
         exclude_binaries=True,
-        name="SmartLocalNote",
+        name=EXE_NAME,
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -142,7 +144,7 @@ if BUILD_MODE == "onedir":
         a.datas,
         strip=False,
         upx=False,
-        name="SmartLocalNote",
+        name=EXE_NAME,
     )
 else:
     exe = EXE(
@@ -151,7 +153,7 @@ else:
         a.binaries,
         a.datas,
         [],
-        name="SmartLocalNote",
+        name=EXE_NAME,
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
