@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 import threading
 from typing import Any
 import uuid
@@ -118,18 +119,27 @@ def get_tree() -> dict[str, Any]:
         }
 
 
-def create_node(name: str, parent_id: str | None = None) -> dict[str, Any]:
-    """Create a new virtual knowledge tree node."""
-    clean_name = str(name or "").strip()
-    if not clean_name:
-        raise ValueError("知识树节点名称不能为空")
+def _next_sequential_category_name(nodes: list[dict[str, Any]], prefix: str = "新建分类") -> str:
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_num = 0
+    for node in nodes:
+        name = str(node.get("name") or "").strip()
+        m = pattern.fullmatch(name)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return f"{prefix}{max_num + 1}"
 
+
+def create_node(name: str = "", parent_id: str | None = None) -> dict[str, Any]:
+    """Create a new virtual knowledge tree node (auto-naming when `name` is empty)."""
+    raw_name = str(name or "").strip()
     clean_parent = str(parent_id).strip() if parent_id else None
     with _LOCK:
         data = _load_tree_data()
         if clean_parent and _find_node(data["nodes"], clean_parent) is None:
             raise FileNotFoundError(f"父节点不存在：{clean_parent}")
 
+        clean_name = raw_name or _next_sequential_category_name(data["nodes"])
         node = {
             "id": f"node_{uuid.uuid4().hex[:8]}",
             "name": clean_name,

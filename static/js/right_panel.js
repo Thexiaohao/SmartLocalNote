@@ -13,7 +13,7 @@
 
 import * as storeMod from './store.js';
 import { api, streamPostSSE } from './api_client.js';
-import { icon } from './icons.js';
+import { icon, getFileTypeStyle } from './icons.js';
 
 const {
   store,
@@ -27,6 +27,12 @@ const {
   setModuleHeight,
   resetUiLayout,
   updateUiLayout,
+  nextSequentialName,
+  setModuleSizePreset,
+  toggleModuleFloat,
+  openFocusDurationPopover,
+  setCenterView,
+  applyPaneWidths,
 } = storeMod;
 
 const UI_LAYOUT_STORAGE_KEY = 'sln_ui_layout';
@@ -56,13 +62,13 @@ const DEFAULT_SUMMARY_MODULES = [
   { id: 'input', visible: true },
   { id: 'summary_card', visible: true },
   { id: 'reminders', visible: true },
-  { id: 'ai_templates', visible: true },
+  { id: 'ai_templates', visible: false },
 ];
 const DEFAULT_TOOL_MODULES = [
   { id: 'quick_excel', visible: true },
   { id: 'knowledge_tree', visible: true },
   { id: 'apps_workspaces', visible: true },
-  { id: 'ai_templates', visible: true },
+  { id: 'ai_templates', visible: false },
 ];
 
 const AI_PROMPT_TEMPLATES = [
@@ -243,9 +249,68 @@ function renderModuleResizerHtml(id) {
   return `<div class="module-height-resizer" data-resize-module="right_${escapeHtml(id)}" title="上下拖动调节卡片高度（双击恢复自动）" role="separator" aria-orientation="horizontal"></div>`;
 }
 
-function buildScrollBodyStyle(id) {
+function buildScrollBodyStyle(id, isEmpty = false) {
   const savedH = getModuleHeight(`right_${id}`);
-  return savedH ? `height:${savedH}px;max-height:${savedH}px;` : '';
+  if (savedH) return `height:${savedH}px;max-height:${savedH}px;overflow-y:auto;`;
+  return isEmpty ? 'min-height:0;' : '';
+}
+
+function buildScrollBodyClasses(id, isEmpty = false, baseClass = 'module-scroll-body') {
+  const savedH = getModuleHeight(`right_${id}`);
+  const parts = [baseClass];
+  if (!savedH) parts.push('is-auto-height');
+  if (isEmpty) parts.push('is-empty-compact');
+  return parts.join(' ');
+}
+
+function getRightModuleSizePreset(modId) {
+  const presetKey = `right:${modId}`;
+  const raw = store.state.uiLayout?.moduleSizePresets?.[presetKey];
+  if (raw === 's' || raw === 'm' || raw === 'l' || raw === 'auto') {
+    return raw;
+  }
+  const h = getModuleHeight(`right_${modId}`);
+  if (!h) return 'auto';
+  if (h <= 170) return 's';
+  if (h <= 320) return 'm';
+  return 'l';
+}
+
+function isRightModuleFloating(modId) {
+  return Boolean(store.state.uiLayout?.floatingModules?.[modId]?.open);
+}
+
+function renderRightModuleControlsHtml(modId, title) {
+  const curPreset = getRightModuleSizePreset(modId);
+  const floated = isRightModuleFloating(modId);
+  const presets = [
+    { key: 's', label: 'S', title: '小尺寸 (150px)' },
+    { key: 'm', label: 'M', title: '中尺寸 (280px)' },
+    { key: 'l', label: 'L', title: '大尺寸 (460px)' },
+    { key: 'auto', label: 'Auto', title: '自适应高度' },
+  ];
+  return `
+    <span class="module-hover-controls" style="display:inline-flex;align-items:center;gap:3px;flex-shrink:0;">
+      <span class="module-size-controls" role="group" aria-label="模块高度">
+        ${presets
+          .map(
+            (p) => `<button type="button" class="module-size-pill ${curPreset === p.key ? 'is-active' : ''}" data-action="set-module-size" data-panel="right" data-mod-id="${escapeHtml(modId)}" data-preset="${p.key}" title="${p.title}">${p.label}</button>`
+          )
+          .join('')}
+      </span>
+      <button type="button" class="left-icon-btn is-xs module-float-btn ${floated ? 'is-active' : ''}" data-action="toggle-module-float" data-panel="right" data-mod-id="${escapeHtml(modId)}" data-mod-title="${escapeHtml(title)}" title="${floated ? '吸回侧栏' : '弹出为独立浮窗'}" aria-label="${floated ? '吸回侧栏' : '弹出为独立浮窗'}">⧉</button>
+    </span>
+  `;
+}
+
+function renderFileTypeIconHtml(nameOrExt, size = 14) {
+  const ft = getFileTypeStyle(nameOrExt);
+  return `<span class="ft-icon ${escapeHtml(ft.cssClass)}" style="--ft-color:${ft.color};--ft-bg:${ft.bg};--ft-border:${ft.border}">${icon(ft.iconName, size)}</span>`;
+}
+
+function renderFileTypeBadgeHtml(nameOrExt) {
+  const ft = getFileTypeStyle(nameOrExt);
+  return `<span class="file-ext-badge ft-badge ${escapeHtml(ft.cssClass)}" style="--ft-color:${ft.color};--ft-bg:${ft.bg};--ft-border:${ft.border}">${escapeHtml(ft.label)}</span>`;
 }
 
 function getUiLayout() {
@@ -492,9 +557,9 @@ export function initRightPanel(containerEl) {
   let isResizingRightModule = false;
   const toolOpenStateById = new Map([
     ['quick_excel', true],
-    ['knowledge_tree', true],
-    ['apps_workspaces', true],
-    ['ai_templates', true],
+    ['knowledge_tree', false],
+    ['apps_workspaces', false],
+    ['ai_templates', false],
   ]);
 
   function getTabsOrder() {
@@ -773,6 +838,22 @@ export function initRightPanel(containerEl) {
         const renderCustomizeBody = () => {
           if (!root) return;
           const layout = getUiLayout();
+          const curRightW = Math.round(Number(store.state.paneWidths?.right) || 360);
+
+          const widthHtml = `
+            <div class="glass-card" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <span style="font-size:12.5px;font-weight:600;color:var(--text-primary);">右侧栏整体宽度 (280~560px)</span>
+                <span id="right-pane-width-val" style="font-size:12px;font-weight:600;color:var(--accent);">${curRightW}px</span>
+              </div>
+              <input type="range" id="right-pane-width-range" min="280" max="560" step="2" value="${curRightW}" style="width:100%;" />
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="pill-btn pill-btn-sm ${Math.abs(curRightW - 300) <= 15 ? 'pill-btn-primary' : ''}" data-right-w="300">窄 300</button>
+                <button type="button" class="pill-btn pill-btn-sm ${Math.abs(curRightW - 360) <= 20 ? 'pill-btn-primary' : ''}" data-right-w="360">标准 360</button>
+                <button type="button" class="pill-btn pill-btn-sm ${Math.abs(curRightW - 460) <= 25 ? 'pill-btn-primary' : ''}" data-right-w="460">宽 460</button>
+              </div>
+            </div>
+          `;
 
           const tabsHtml = layout.rightTabsOrder
             .map((tabId, idx) => {
@@ -793,15 +874,47 @@ export function initRightPanel(containerEl) {
             list
               .map((mod, idx) => {
                 const label = metaMap[mod.id]?.label || mod.id;
+                const runtimeModId =
+                  groupKey === 'rightSummaryModules' && mod.id === 'ai_templates'
+                    ? 'ai_templates_summary'
+                    : mod.id;
+                const curPreset = getRightModuleSizePreset(runtimeModId);
+                const floated = isRightModuleFloating(runtimeModId);
                 return `
-                  <div class="glass-card" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 11px;">
-                    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;min-width:0;flex:1;">
-                      <input type="checkbox" class="file-check" data-cust-toggle="${groupKey}" data-idx="${idx}" ${mod.visible ? 'checked' : ''} />
-                      <span style="font-size:13px;font-weight:500;${mod.visible ? '' : 'color:var(--text-tertiary);text-decoration:line-through;'}">${escapeHtml(label)}</span>
-                    </label>
-                    <div style="display:inline-flex;gap:4px;flex-shrink:0;">
-                      <button type="button" class="icon-pill" data-cust-mod-move="${groupKey}" data-idx="${idx}" data-delta="-1" ${idx === 0 ? 'disabled' : ''} title="上移" style="width:26px;height:26px;font-size:12px;">↑</button>
-                      <button type="button" class="icon-pill" data-cust-mod-move="${groupKey}" data-idx="${idx}" data-delta="1" ${idx === list.length - 1 ? 'disabled' : ''} title="下移" style="width:26px;height:26px;font-size:12px;">↓</button>
+                  <div class="glass-card" style="display:flex;flex-direction:column;gap:8px;padding:8px 11px;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;min-width:0;flex:1;">
+                        <input type="checkbox" class="file-check" data-cust-toggle="${groupKey}" data-idx="${idx}" ${mod.visible ? 'checked' : ''} />
+                        <span style="font-size:13px;font-weight:500;${mod.visible ? '' : 'color:var(--text-tertiary);text-decoration:line-through;'}">${escapeHtml(label)}</span>
+                      </label>
+                      <div style="display:inline-flex;gap:4px;flex-shrink:0;">
+                        <button type="button" class="icon-pill" data-cust-mod-move="${groupKey}" data-idx="${idx}" data-delta="-1" ${idx === 0 ? 'disabled' : ''} title="上移" style="width:26px;height:26px;font-size:12px;">↑</button>
+                        <button type="button" class="icon-pill" data-cust-mod-move="${groupKey}" data-idx="${idx}" data-delta="1" ${idx === list.length - 1 ? 'disabled' : ''} title="下移" style="width:26px;height:26px;font-size:12px;">↓</button>
+                      </div>
+                    </div>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding-left:24px;flex-wrap:wrap;">
+                      <div style="display:inline-flex;align-items:center;gap:4px;">
+                        <span style="font-size:11px;color:var(--text-tertiary);margin-right:2px;">高度：</span>
+                        ${[
+                          { key: 's', label: 'S' },
+                          { key: 'm', label: 'M' },
+                          { key: 'l', label: 'L' },
+                          { key: 'auto', label: 'Auto' },
+                        ]
+                          .map(
+                            (p) => `<button type="button" class="pill-btn pill-btn-sm ${curPreset === p.key ? 'pill-btn-primary' : ''}" data-cust-mod-size="${p.key}" data-runtime-mod-id="${escapeHtml(runtimeModId)}" style="height:22px;padding:0 8px;font-size:11px;">${p.label}</button>`
+                          )
+                          .join('')}
+                      </div>
+                      <button
+                        type="button"
+                        class="pill-btn pill-btn-sm ${floated ? 'pill-btn-primary' : ''}"
+                        data-cust-mod-float="${escapeHtml(runtimeModId)}"
+                        data-cust-mod-title="${escapeHtml(label)}"
+                        style="height:22px;padding:0 9px;font-size:11px;"
+                      >
+                        ⧉ ${floated ? '已浮窗（点此吸回）' : '弹出浮窗'}
+                      </button>
                     </div>
                   </div>
                 `;
@@ -809,6 +922,7 @@ export function initRightPanel(containerEl) {
               .join('');
 
           root.innerHTML = `
+            ${widthHtml}
             <div>
               <div class="section-heading" style="margin-top:0;">顶部 3 个标签页顺序</div>
               <div style="display:flex;flex-direction:column;gap:6px;">${tabsHtml}</div>
@@ -830,7 +944,20 @@ export function initRightPanel(containerEl) {
 
         renderCustomizeBody();
 
+        root?.addEventListener('input', (e) => {
+          const range = e.target.closest('#right-pane-width-range');
+          if (!range) return;
+          const nextW = Number(range.value) || 360;
+          applyPaneWidths?.(store.state.paneWidths?.left ?? 260, nextW);
+          const valEl = root.querySelector('#right-pane-width-val');
+          if (valEl) valEl.textContent = `${nextW}px`;
+        });
+
         root?.addEventListener('change', (e) => {
+          if (e.target.closest('#right-pane-width-range')) {
+            renderCustomizeBody();
+            return;
+          }
           const chk = e.target.closest('[data-cust-toggle]');
           if (!chk) return;
           const groupKey = chk.dataset.custToggle;
@@ -844,6 +971,36 @@ export function initRightPanel(containerEl) {
         });
 
         root?.addEventListener('click', (e) => {
+          const widthBtn = e.target.closest('[data-right-w]');
+          if (widthBtn) {
+            const w = Number(widthBtn.dataset.rightW) || 360;
+            applyPaneWidths?.(store.state.paneWidths?.left ?? 260, w);
+            renderCustomizeBody();
+            return;
+          }
+
+          const sizeBtn = e.target.closest('[data-cust-mod-size]');
+          if (sizeBtn) {
+            const modId = sizeBtn.dataset.runtimeModId;
+            const preset = sizeBtn.dataset.custModSize;
+            if (modId && preset) {
+              setModuleSizePreset?.('right', modId, preset);
+              renderCustomizeBody();
+            }
+            return;
+          }
+
+          const floatBtn = e.target.closest('[data-cust-mod-float]');
+          if (floatBtn) {
+            const modId = floatBtn.dataset.custModFloat;
+            const title = floatBtn.dataset.custModTitle || modId;
+            if (modId) {
+              toggleModuleFloat?.(modId, { title, panel: 'right' });
+              renderCustomizeBody();
+            }
+            return;
+          }
+
           const tabBtn = e.target.closest('[data-cust-tab-move]');
           if (tabBtn) {
             const idx = Number(tabBtn.dataset.custTabMove);
@@ -1011,39 +1168,50 @@ export function initRightPanel(containerEl) {
     const summaryModulesMap = new Map(getUiLayout().rightSummaryModules.map((m) => [m.id, m]));
     const isCollapsedMod = (id) => Boolean(summaryModulesMap.get(id)?.collapsed);
 
+    const inputScrollCls = buildScrollBodyClasses('input', false);
+    const inputScrollStyle = buildScrollBodyStyle('input', false);
     const inputHtml = `
-      <div class="glass-card module-block ${isCollapsedMod('input') ? 'is-collapsed' : ''}" data-module-id="input" data-summary-module-id="input" style="margin-bottom:10px;padding:10px 12px;">
+      <div class="glass-card module-block ${isCollapsedMod('input') ? 'is-collapsed' : ''}" data-module-id="input" data-summary-module-id="input" style="margin-bottom:10px;padding:10px 12px 4px;">
         <div class="module-header" style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
-          <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">速记与智能提炼</span>
-          <span style="font-size:11px;color:var(--text-tertiary);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(activeLabel)}">${escapeHtml(activeLabel)}</span>
+          <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">速记与智能提炼</span>
+          <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+            <span style="font-size:10.5px;color:var(--text-tertiary);max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(activeLabel)}">${escapeHtml(activeFile?.name || '草稿')}</span>
+            ${renderRightModuleControlsHtml('input', '速记与智能提炼')}
+          </div>
         </div>
         <div class="module-content">
-          <textarea
-            id="right-summary-input"
-            class="apple-textarea"
-            rows="3"
-            style="min-height:74px;font-size:13px;"
-            placeholder="随时记下一段想法、会议记录或复习安排，点击 AI 自动提炼待办与软件直达..."
-          >${escapeHtml(state.summaryInputText)}</textarea>
-          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
-            <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="summarize-doc" ${state.summaryLoading ? 'disabled' : ''}>
-              ${icon('sparkles', 13)} ${state.summaryLoading ? '提炼中...' : '总结当前文档'}
-            </button>
-            <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" ${state.summaryLoading ? 'disabled' : ''}>
-              ${icon('sparkles', 13)} 总结上方文本
-            </button>
-            <button type="button" class="pill-btn pill-btn-sm" data-action="ai-generate-mindmap" title="生成当前文档脑图或切换脑图视图">
-              🧠 AI 生成当前文档脑图
-            </button>
-            <button type="button" class="pill-btn pill-btn-sm" data-action="ai-polish-fragments" title="将碎片内容智能润色成文（保留 [[...]] 锚点）">
-              ✨ AI 碎片润色成文
-            </button>
+          <div class="${inputScrollCls}" data-scroll-module="right_input" ${inputScrollStyle ? `style="${inputScrollStyle}"` : 'style="min-height:0;"'}>
+            <textarea
+              id="right-summary-input"
+              class="apple-textarea"
+              rows="3"
+              style="min-height:68px;font-size:13px;"
+              placeholder="随时记下一段想法、会议记录或复习安排，点击 AI 自动提炼待办与软件直达..."
+            >${escapeHtml(state.summaryInputText)}</textarea>
+            <div style="display:flex;gap:6px;margin-top:8px;">
+              <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="summarize-doc" style="flex:1;justify-content:center;" ${state.summaryLoading ? 'disabled' : ''}>
+                ${icon('sparkles', 13)} ${state.summaryLoading ? '提炼中...' : '总结当前文档'}
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-action="summarize-text" style="flex:1;justify-content:center;" ${state.summaryLoading ? 'disabled' : ''}>
+                提炼上方文本
+              </button>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
+              <button type="button" class="pill-btn pill-btn-sm right-micro-chip" data-action="ai-generate-mindmap" title="生成当前文档脑图或切换脑图视图" style="height:24px;padding:0 9px;font-size:11px;">
+                🧠 生成脑图
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm right-micro-chip" data-action="ai-polish-fragments" title="将碎片内容智能润色成文（保留 [[...]] 锚点）" style="height:24px;padding:0 9px;font-size:11px;">
+                🪄 润色成文
+              </button>
+            </div>
           </div>
+          ${renderModuleResizerHtml('input')}
         </div>
       </div>
     `;
 
     let resultHtml = '';
+    const isSummaryEmpty = !state.summaryError && !res;
     if (state.summaryError) {
       resultHtml = `
         <div class="summary-card" style="border-color: var(--warning); background: var(--warning-soft);">
@@ -1109,9 +1277,11 @@ export function initRightPanel(containerEl) {
           }
         </div>
 
-        <div class="section-heading">
+        <div class="section-heading" style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
           <span>需要做什么 (${todos.length})</span>
-          <span style="font-size:10.5px;font-weight:400;text-transform:none;letter-spacing:0;">可拖拽单条待办至中间笔记</span>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="open-global-todos" title="前往中心全库待办整理面板" style="height:22px;padding:0 7px;font-size:11px;">
+            ↗ 全局待办
+          </button>
         </div>
 
         ${
@@ -1120,49 +1290,40 @@ export function initRightPanel(containerEl) {
                 .map((td, idx) => {
                   const prioBadge =
                     td.priority === 'high'
-                      ? `<span style="padding:1px 6px;border-radius:9999px;background:var(--danger-soft);color:var(--danger);font-size:10.5px;font-weight:600;flex-shrink:0;">优先</span>`
+                      ? `<span class="todo-prio-badge" style="padding:0 6px;border-radius:9999px;background:var(--danger-soft);color:var(--danger);font-size:10px;font-weight:600;flex-shrink:0;">优先</span>`
                       : '';
+                  const timeBadge = td.suggested_time
+                    ? `<span class="todo-time-badge" style="font-size:10.5px;color:var(--text-tertiary);white-space:nowrap;">${escapeHtml(td.suggested_time)}</span>`
+                    : '';
                   return `
-                    <div class="todo-item draggable-card" draggable="true" data-drag-type="ai-todo" data-todo-idx="${idx}">
-                      <div class="todo-item-row">
-                        <div style="min-width:0;flex:1 1 auto;">
-                          <div class="todo-title">${escapeHtml(td.title)}</div>
-                          ${
-                            td.suggested_time
-                              ? `<div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">建议时间：${escapeHtml(td.suggested_time)}</div>`
-                              : ''
-                          }
-                        </div>
-                        <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
-                          ${prioBadge}
-                          <span class="drag-pill-hint" title="按住直接拖进中间笔记栏" style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10.5px;color:var(--text-tertiary);background:var(--bg-island);border:1px dashed var(--border-hairline);cursor:grab;">⠿ 拖入</span>
-                        </div>
+                    <div class="todo-item todo-item-compact draggable-card" draggable="true" data-drag-type="ai-todo" data-todo-idx="${idx}">
+                      <span class="todo-drag-grip" title="按住拖进中间笔记栏" aria-hidden="true" style="color:var(--text-tertiary);display:inline-flex;flex-shrink:0;cursor:grab;">
+                        ${icon('grip-vertical', 12)}
+                      </span>
+                      <div class="todo-compact-main" style="min-width:0;flex:1 1 auto;">
+                        <div class="todo-title">${escapeHtml(td.title)}</div>
+                        ${
+                          prioBadge || timeBadge
+                            ? `<div class="todo-compact-meta" style="display:flex;align-items:center;gap:5px;margin-top:2px;">${prioBadge}${timeBadge}</div>`
+                            : ''
+                        }
                       </div>
-                      <div class="todo-actions">
-                        <button type="button" class="pill-btn pill-btn-sm" data-action="open-reminder-sheet" data-todo-idx="${idx}">
-                          ${icon('bell', 12)} 设提醒
+                      <div class="todo-hover-actions" style="display:inline-flex;align-items:center;gap:3px;flex-shrink:0;">
+                        <button type="button" class="left-icon-btn is-xs" data-action="todo-insert-note" data-todo-idx="${idx}" title="插入当前笔记" aria-label="插入当前笔记">
+                          ${icon('plus', 12)}
                         </button>
-                        <button type="button" class="pill-btn pill-btn-sm" data-action="test-reminder-10s" data-todo-idx="${idx}" title="10秒后弹出桌面通知与灵动岛提醒">
-                          ${icon('zap', 12)} 10秒测试
+                        <button type="button" class="left-icon-btn is-xs" data-action="open-reminder-sheet" data-todo-idx="${idx}" title="设提醒" aria-label="设提醒">
+                          ${icon('bell', 12)}
                         </button>
-                        <select class="apple-select" data-role="focus-duration" aria-label="专注时长" style="width:auto;height:28px;padding:0 8px;font-size:11.5px;border-radius:9999px;">
-                          <option value="1500" selected>25分</option>
-                          <option value="900">15分</option>
-                          <option value="2700">45分</option>
-                          <option value="15">15秒演示</option>
-                        </select>
-                        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="start-todo-focus" data-todo-idx="${idx}">
-                          ${icon('play', 11)} 专注
-                        </button>
-                        <button type="button" class="pill-btn pill-btn-sm" data-action="start-todo-focus-15s" data-todo-idx="${idx}" title="一键 15 秒专注演示闭环" style="background:var(--success-soft);color:var(--success);border-color:transparent;">
-                          15s演示
+                        <button type="button" class="left-icon-btn is-xs" data-action="start-todo-focus" data-todo-idx="${idx}" title="选择专注时长" aria-label="选择专注时长">
+                          ${icon('clock', 12)}
                         </button>
                       </div>
                     </div>
                   `;
                 })
                 .join('')
-            : `<div class="glass-card" style="font-size:12.5px;color:var(--text-secondary);">暂无具体待办项</div>`
+            : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无具体待办项</div>`
         }
 
         ${
@@ -1187,7 +1348,7 @@ export function initRightPanel(containerEl) {
                   .map(
                     (fp) => `
                     <button type="button" class="app-launcher-pill matched-file-pill" draggable="true" data-action="open-matched-file" data-path="${escapeHtml(fp)}" data-name="${escapeHtml(getBaseName(fp))}" title="点击打开，或直接拖进中间笔记生成锚点" style="background:var(--accent-soft);color:var(--accent);border-color:transparent;">
-                      <span>${getFormatEmoji(fp)}</span>
+                      ${renderFileTypeIconHtml(getBaseName(fp), 13)}
                       <span>${escapeHtml(getBaseName(fp))}</span>
                     </button>
                   `
@@ -1200,26 +1361,19 @@ export function initRightPanel(containerEl) {
         }
       `;
     } else {
-      resultHtml = `
-        <div class="glass-card" style="margin-bottom:10px;">
-          <div style="font-size:12.5px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:6px;">
-            ${icon('sparkles', 14)} <span>AI 总结与待办提炼就绪</span>
-          </div>
-          <p style="margin:0;font-size:12px;color:var(--text-secondary);line-height:1.55;">
-            在上方输入想法，或点击「总结当前文档」自动生成核心摘要、提炼“需要做什么”待办清单，并一键设置定时提醒、拉起本地软件或开启灵动岛专注。
-          </p>
-        </div>
-      `;
+      resultHtml = `<div class="compact-empty-hint" style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无 AI 摘要与待办，点击上方「总结当前文档」或「提炼上方文本」即可生成</div>`;
     }
 
-    const sumCardStyle = buildScrollBodyStyle('summary_card');
+    const sumCardCls = buildScrollBodyClasses('summary_card', isSummaryEmpty);
+    const sumCardStyle = buildScrollBodyStyle('summary_card', isSummaryEmpty);
     const summaryCardModuleHtml = `
       <div class="module-block ${isCollapsedMod('summary_card') ? 'is-collapsed' : ''}" data-module-id="summary_card" data-summary-module-id="summary_card" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
         <div class="module-header" style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:2px 2px 6px;">
           <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">AI 摘要与待办</span>
+          ${renderRightModuleControlsHtml('summary_card', 'AI 摘要与待办')}
         </div>
         <div class="module-content">
-          <div class="module-scroll-body" data-scroll-module="right_summary_card" style="${sumCardStyle}min-height:0;">
+          <div class="${sumCardCls}" data-scroll-module="right_summary_card" style="${sumCardStyle}min-height:0;">
             ${resultHtml}
           </div>
           ${renderModuleResizerHtml('summary_card')}
@@ -1227,17 +1381,22 @@ export function initRightPanel(containerEl) {
       </div>
     `;
 
-    const remStyle = buildScrollBodyStyle('reminders');
+    const isRemEmpty = pendingAndFired.length === 0;
+    const remCls = buildScrollBodyClasses('reminders', isRemEmpty);
+    const remStyle = buildScrollBodyStyle('reminders', isRemEmpty);
     const remindersHtml = `
       <div class="module-block ${isCollapsedMod('reminders') ? 'is-collapsed' : ''}" data-module-id="reminders" data-summary-module-id="reminders" style="padding:0;background:transparent;border:none;margin-bottom:10px;">
         <div class="section-heading module-header" style="margin-top:8px;">
           <span>定时提醒 (${pendingAndFired.length})</span>
-          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
-            ${icon('rotate-ccw', 11)} 刷新
-          </button>
+          <div style="display:inline-flex;align-items:center;gap:4px;">
+            <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" data-action="refresh-reminders" style="height:22px;padding:0 8px;font-size:11px;">
+              ${icon('rotate-ccw', 11)} 刷新
+            </button>
+            ${renderRightModuleControlsHtml('reminders', '定时提醒')}
+          </div>
         </div>
         <div class="module-content">
-          <div class="module-scroll-body" data-scroll-module="right_reminders" style="${remStyle}min-height:0;">
+          <div class="${remCls}" data-scroll-module="right_reminders" style="${remStyle}min-height:0;">
             ${
               pendingAndFired.length
                 ? pendingAndFired
@@ -1261,7 +1420,7 @@ export function initRightPanel(containerEl) {
                       `;
                     })
                     .join('')
-                : `<div style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在提炼待办中点击「设提醒」或「10秒测试」</div>`
+                : `<div class="compact-empty-hint" style="font-size:12px;color:var(--text-tertiary);padding:4px 2px;">暂无定时提醒，可在待办中点击「⏰」设置</div>`
             }
           </div>
           ${renderModuleResizerHtml('reminders')}
@@ -1269,16 +1428,18 @@ export function initRightPanel(containerEl) {
       </div>
     `;
 
-    const tplSumStyle = buildScrollBodyStyle('ai_templates_summary');
+    const tplSumCls = buildScrollBodyClasses('ai_templates_summary', false);
+    const tplSumStyle = buildScrollBodyStyle('ai_templates_summary', false);
     const aiTemplatesSummaryHtml = `
       <div class="glass-card module-block ${isCollapsedMod('ai_templates') ? 'is-collapsed' : ''}" data-module-id="ai_templates_summary" data-summary-module-id="ai_templates" style="margin-top:10px;padding:10px 12px 4px;">
         <div class="module-header" style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
           <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-primary);">
             ${icon('zap', 13)} AI 常用指令模板
           </span>
+          ${renderRightModuleControlsHtml('ai_templates_summary', 'AI 常用指令模板')}
         </div>
         <div class="module-content">
-          <div class="module-scroll-body" data-scroll-module="right_ai_templates_summary" style="${tplSumStyle}min-height:0;">
+          <div class="${tplSumCls}" data-scroll-module="right_ai_templates_summary" style="${tplSumStyle}min-height:0;">
             ${renderAiTemplatesCardContentHtml()}
           </div>
           ${renderModuleResizerHtml('ai_templates_summary')}
@@ -1349,6 +1510,7 @@ export function initRightPanel(containerEl) {
     const res = state.summaryResult;
     const matchedApps = resolveMatchedApps(res);
     const matchedFiles = Array.isArray(res?.matched_files) ? res.matched_files : [];
+    const defaultRemTitle = nextSequentialName('新建提醒', (state.reminders || []).map((r) => r?.title || ''));
 
     const defaultDt = new Date(Date.now() + 15 * 60 * 1000);
     const localIso = new Date(defaultDt.getTime() - defaultDt.getTimezoneOffset() * 60000)
@@ -1361,7 +1523,7 @@ export function initRightPanel(containerEl) {
         <div style="display:flex;flex-direction:column;gap:12px;">
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">提醒内容</label>
-            <input type="text" class="apple-input" id="rem-title-input" value="${escapeHtml(todo?.title || '')}" placeholder="输入提醒事项..." />
+            <input type="text" class="apple-input" id="rem-title-input" value="${escapeHtml(todo?.title || '')}" placeholder="留空自动命名：${escapeHtml(defaultRemTitle)}" />
           </div>
 
           <div>
@@ -1423,11 +1585,7 @@ export function initRightPanel(containerEl) {
 
         card.querySelector('#rem-cancel-btn')?.addEventListener('click', closeSheet);
         card.querySelector('#rem-submit-btn')?.addEventListener('click', async () => {
-          const title = card.querySelector('#rem-title-input')?.value?.trim();
-          if (!title) {
-            showToast('请输入提醒内容', 'warning');
-            return;
-          }
+          const title = card.querySelector('#rem-title-input')?.value?.trim() || defaultRemTitle;
           const body = {
             title,
             app_ids: res?.matched_app_ids || [],
@@ -1500,7 +1658,7 @@ export function initRightPanel(containerEl) {
         const name = getBaseName(p);
         return `
           <span class="context-file-pill" title="${escapeHtml(p)}">
-            <span>${getFormatEmoji(p)}</span>
+            ${renderFileTypeIconHtml(name, 12)}
             <span>${escapeHtml(name)}</span>
             <button type="button" data-action="remove-context" data-path="${escapeHtml(p)}" aria-label="移除 ${escapeHtml(name)}" style="display:inline-flex;align-items:center;color:inherit;">
               ${icon('x', 11)}
@@ -2090,11 +2248,13 @@ export function initRightPanel(containerEl) {
       await fetchTree();
     }
     const nodes = state.treeData.nodes || [];
+    const existingNotes = (store.state.files?.items || []).map((f) => f.name || getBaseName(f.path));
+    const fallbackTitle = nextSequentialName('新建笔记', existingNotes);
     const firstLine = String(msg.content || '')
       .split('\n')
       .map((l) => l.replace(/^[#>\s*-]+/, '').trim())
       .find((l) => l.length >= 2);
-    const defaultTitle = (firstLine || 'AI 问答笔记').slice(0, 28);
+    const defaultTitle = (firstLine || fallbackTitle).slice(0, 28);
 
     openSheet({
       title: '存入本地 Markdown 笔记',
@@ -2102,7 +2262,7 @@ export function initRightPanel(containerEl) {
         <div style="display:flex;flex-direction:column;gap:12px;">
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">笔记标题</label>
-            <input type="text" class="apple-input" id="note-save-title" value="${escapeHtml(defaultTitle)}" placeholder="输入笔记文件名..." />
+            <input type="text" class="apple-input" id="note-save-title" value="${escapeHtml(defaultTitle)}" placeholder="留空自动命名：${escapeHtml(fallbackTitle)}" />
           </div>
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">挂载到虚拟知识树节点（可选）</label>
@@ -2123,12 +2283,8 @@ export function initRightPanel(containerEl) {
       onMount(card) {
         card.querySelector('#note-save-cancel')?.addEventListener('click', closeSheet);
         card.querySelector('#note-save-ok')?.addEventListener('click', async () => {
-          const title = card.querySelector('#note-save-title')?.value?.trim();
+          const title = card.querySelector('#note-save-title')?.value?.trim() || fallbackTitle;
           const nodeId = card.querySelector('#note-save-node')?.value || null;
-          if (!title) {
-            showToast('请输入笔记标题', 'warning');
-            return;
-          }
           try {
             const created = await api.post('/api/files/create-note', {
               title,
@@ -2400,17 +2556,22 @@ export function initRightPanel(containerEl) {
       return toolOpenStateById.get(id) !== false;
     };
 
-    const quickExcelScrollStyle = buildScrollBodyStyle('quick_excel');
+    const quickExcelEmpty = excelFiles.length === 0;
+    const quickExcelScrollCls = buildScrollBodyClasses('quick_excel', quickExcelEmpty, 'tool-card-body module-scroll-body');
+    const quickExcelScrollStyle = buildScrollBodyStyle('quick_excel', quickExcelEmpty);
     const card1Html = `
       <details class="tool-card module-block" data-module-id="quick_excel" draggable="true" ${isToolOpen('quick_excel') ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
-            ${icon('table', 14)} 快捷表单填表与表格操作
+            ${icon('table', 14)} <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">快捷表单填表与表格操作</span>
           </span>
-          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${excelFiles.length} 份表格</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${excelFiles.length} 份</span>
+            ${renderRightModuleControlsHtml('quick_excel', '快捷表单填表与表格操作')}
+          </span>
         </summary>
-        <div class="tool-card-body module-scroll-body" data-scroll-module="right_quick_excel" ${quickExcelScrollStyle ? `style="${quickExcelScrollStyle}"` : ''}>
+        <div class="${quickExcelScrollCls}" data-scroll-module="right_quick_excel" ${quickExcelScrollStyle ? `style="${quickExcelScrollStyle}"` : ''}>
           ${
             excelFiles.length
               ? `
@@ -2488,7 +2649,10 @@ export function initRightPanel(containerEl) {
     `;
 
     const treeIsTable = state.treeViewMode === 'table';
-    const treeScrollStyle = buildScrollBodyStyle('knowledge_tree');
+    const defaultInlineNodeName = nextSequentialName('新建分类', nodes.map((n) => n?.name || ''));
+    const treeEmpty = nodes.length === 0 && !state.inlineTreeCreateOpen && !state.classifyResult;
+    const treeScrollCls = buildScrollBodyClasses('knowledge_tree', treeEmpty, 'tool-card-body module-scroll-body');
+    const treeScrollStyle = buildScrollBodyStyle('knowledge_tree', treeEmpty);
     const inlineTreeCreateHtml = state.inlineTreeCreateOpen
       ? `
         <div class="inline-quick-create-row" data-role="inline-tree-create-row" style="margin-bottom:8px;">
@@ -2497,7 +2661,7 @@ export function initRightPanel(containerEl) {
             class="inline-rename-input"
             data-role="inline-tree-node-input"
             value="${escapeHtml(state.inlineTreeCreateDraft || '')}"
-            placeholder="输入分类名称，回车创建…"
+            placeholder="分类名（留空回车：${escapeHtml(defaultInlineNodeName)}）"
             autocomplete="off"
           />
           <button type="button" class="icon-pill" data-action="tree-inline-create-submit" title="创建节点" aria-label="确认创建" style="width:24px;height:24px;flex-shrink:0;">
@@ -2512,13 +2676,16 @@ export function initRightPanel(containerEl) {
     const card2Html = `
       <details class="tool-card module-block" data-module-id="knowledge_tree" draggable="true" ${isToolOpen('knowledge_tree') ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
-            ${icon('git-branch', 14)} 虚拟知识树分类与总览
+            ${icon('git-branch', 14)} <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">虚拟知识树分类与总览</span>
           </span>
-          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${nodes.length} 节点</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${nodes.length} 节点</span>
+            ${renderRightModuleControlsHtml('knowledge_tree', '虚拟知识树分类与总览')}
+          </span>
         </summary>
-        <div class="tool-card-body module-scroll-body" data-scroll-module="right_knowledge_tree" ${treeScrollStyle ? `style="${treeScrollStyle}"` : ''}>
+        <div class="${treeScrollCls}" data-scroll-module="right_knowledge_tree" ${treeScrollStyle ? `style="${treeScrollStyle}"` : ''}>
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
             <div class="segmented-pill" data-seg="tree-view" style="width:168px;">
               <div class="segmented-thumb" style="width: calc((100% - 6px) / 2); transform: translateX(${treeIsTable ? 100 : 0}%);"></div>
@@ -2575,9 +2742,10 @@ export function initRightPanel(containerEl) {
                             const statusOpts = Array.from(new Set([...TREE_STATUS_OPTIONS, row.status || '待开始']));
                             return `
                               <tr>
-                                <td style="padding:5px 8px;border-bottom:1px solid var(--border-hairline);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                  <button type="button" draggable="true" data-action="tree-open-file" data-path="${escapeHtml(row.path)}" data-name="${escapeHtml(row.file_name)}" title="点击打开，或拖入笔记生成锚点" style="color:var(--accent);font-weight:500;text-align:left;">
-                                    ${escapeHtml(row.file_name)}
+                                <td style="padding:5px 8px;border-bottom:1px solid var(--border-hairline);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                  <button type="button" draggable="true" data-action="tree-open-file" data-path="${escapeHtml(row.path)}" data-name="${escapeHtml(row.file_name)}" title="点击打开，或拖入笔记生成锚点" style="display:inline-flex;align-items:center;gap:5px;max-width:100%;color:var(--accent);font-weight:500;text-align:left;">
+                                    ${renderFileTypeIconHtml(row.file_name, 13)}
+                                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(row.file_name)}</span>
                                   </button>
                                 </td>
                                 <td style="padding:5px 8px;border-bottom:1px solid var(--border-hairline);color:var(--text-secondary);">${escapeHtml(row.node_name)}</td>
@@ -2629,8 +2797,10 @@ export function initRightPanel(containerEl) {
                                       const statusOpts = Array.from(new Set([...TREE_STATUS_OPTIONS, curStatus]));
                                       return `
                                         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 6px;border-radius:8px;background:var(--bg-island);">
-                                          <button type="button" draggable="true" data-action="tree-open-file" data-path="${escapeHtml(f.path)}" data-name="${escapeHtml(fname)}" title="点击打开，或拖入笔记生成锚点" style="min-width:0;flex:1 1 auto;text-align:left;font-size:12px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                                            ${getFormatEmoji(f.path)} ${escapeHtml(fname)}
+                                          <button type="button" draggable="true" data-action="tree-open-file" data-path="${escapeHtml(f.path)}" data-name="${escapeHtml(fname)}" title="点击打开，或拖入笔记生成锚点" style="min-width:0;flex:1 1 auto;display:inline-flex;align-items:center;gap:5px;text-align:left;font-size:12px;color:var(--accent);overflow:hidden;">
+                                            ${renderFileTypeIconHtml(fname, 13)}
+                                            <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(fname)}</span>
+                                            ${renderFileTypeBadgeHtml(fname)}
                                           </button>
                                           <select class="apple-select" data-action="tree-status-change" data-node-id="${escapeHtml(node.id)}" data-path="${escapeHtml(f.path)}" style="width:auto;padding:2px 5px;font-size:11px;height:22px;">
                                             ${statusOpts
@@ -2658,17 +2828,22 @@ export function initRightPanel(containerEl) {
       </details>
     `;
 
-    const appsWsScrollStyle = buildScrollBodyStyle('apps_workspaces');
+    const appsWsEmpty = apps.length === 0 && workspaces.length === 0;
+    const appsWsScrollCls = buildScrollBodyClasses('apps_workspaces', appsWsEmpty, 'tool-card-body module-scroll-body');
+    const appsWsScrollStyle = buildScrollBodyStyle('apps_workspaces', appsWsEmpty);
     const card3Html = `
       <details class="tool-card module-block" data-module-id="apps_workspaces" draggable="true" ${isToolOpen('apps_workspaces') ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
-            ${icon('rocket', 14)} 本地软件库与一键场景包
+            ${icon('rocket', 14)} <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">本地软件库与一键场景包</span>
           </span>
-          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${apps.length} 应用 · ${workspaces.length} 场景包</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${apps.length}·${workspaces.length}</span>
+            ${renderRightModuleControlsHtml('apps_workspaces', '本地软件库与一键场景包')}
+          </span>
         </summary>
-        <div class="tool-card-body module-scroll-body" data-scroll-module="right_apps_workspaces" ${appsWsScrollStyle ? `style="${appsWsScrollStyle}"` : ''}>
+        <div class="${appsWsScrollCls}" data-scroll-module="right_apps_workspaces" ${appsWsScrollStyle ? `style="${appsWsScrollStyle}"` : ''}>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
             <button type="button" class="pill-btn pill-btn-primary pill-btn-sm" data-action="open-capture">
               ${icon('camera', 13)} 捕获当前桌面现场
@@ -2701,32 +2876,30 @@ export function initRightPanel(containerEl) {
               : `<div style="font-size:12px;color:var(--text-tertiary);margin-bottom:10px;">暂未登记本地软件</div>`
           }
 
-          <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:2px;">一键场景包</div>
-          <div style="font-size:11.5px;color:var(--text-tertiary);margin-bottom:8px;">打包常用文件+本地软件，一键联启进入学习/办公模式</div>
+          <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">一键场景包</div>
           ${
             workspaces.length
               ? workspaces
                   .map((ws) => {
-                    const appNames = (ws.app_ids || []).map((id) => appsById.get(String(id))?.name || id);
+                    const appCount = (ws.app_ids || []).length;
                     const fileCount = (ws.file_paths || []).length;
+                    const badgeLabel = `${appCount}软件${fileCount ? `·${fileCount}档` : ''}`;
                     return `
-                      <div class="workspace-card" style="background:var(--bg-island);">
-                        <div class="workspace-card-head">
-                          <span class="workspace-name">${escapeHtml(ws.name)}</span>
-                          <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
-                            <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="launch-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" style="height:24px;padding:0 9px;font-size:11px;">
-                              🚀 联启
-                            </button>
-                            <button type="button" class="pill-btn pill-btn-sm" data-action="focus-workspace" data-name="${escapeHtml(ws.name)}" style="height:24px;padding:0 9px;font-size:11px;">
-                              ▶ 专注
-                            </button>
-                            <button type="button" class="icon-pill" data-action="delete-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" title="删除一键场景包" style="width:24px;height:24px;">
-                              ${icon('trash', 11)}
-                            </button>
-                          </div>
+                      <div class="workspace-card workspace-row-compact" style="background:var(--bg-island);">
+                        <div class="workspace-row-main" style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
+                          <span class="workspace-name" title="${escapeHtml(ws.name)}" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ws.name)}</span>
+                          <span class="file-ext-badge workspace-count-badge">${escapeHtml(badgeLabel)}</span>
                         </div>
-                        <div class="workspace-meta">
-                          ${appNames.length ? `软件：${escapeHtml(appNames.join('、'))}` : '暂无关联软件'} · ${fileCount} 份文档
+                        <div class="workspace-row-actions" style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+                          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="launch-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" style="height:24px;padding:0 8px;font-size:11px;">
+                            🚀 联启
+                          </button>
+                          <button type="button" class="pill-btn pill-btn-sm" data-action="focus-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" style="height:24px;padding:0 8px;font-size:11px;">
+                            ⏱ 专注
+                          </button>
+                          <button type="button" class="icon-pill" data-action="delete-workspace" data-ws-id="${escapeHtml(ws.id)}" data-name="${escapeHtml(ws.name)}" title="删除一键场景包" style="width:24px;height:24px;">
+                            ${icon('trash', 11)}
+                          </button>
                         </div>
                       </div>
                     `;
@@ -2739,17 +2912,21 @@ export function initRightPanel(containerEl) {
       </details>
     `;
 
-    const aiTplScrollStyle = buildScrollBodyStyle('ai_templates');
+    const aiTplCls = buildScrollBodyClasses('ai_templates', false, 'tool-card-body module-scroll-body');
+    const aiTplScrollStyle = buildScrollBodyStyle('ai_templates', false);
     const card4Html = `
       <details class="tool-card module-block" data-module-id="ai_templates" draggable="true" ${isToolOpen('ai_templates') ? 'open' : ''}>
         <summary class="tool-card-summary">
-          <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
             <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
-            ${icon('zap', 14)} AI 常用指令模板
+            ${icon('zap', 14)} <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">AI 常用指令模板</span>
           </span>
-          <span style="font-size:11.5px;color:var(--text-tertiary);font-weight:500;">${AI_PROMPT_TEMPLATES.length} 模板</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${AI_PROMPT_TEMPLATES.length} 模板</span>
+            ${renderRightModuleControlsHtml('ai_templates', 'AI 常用指令模板')}
+          </span>
         </summary>
-        <div class="tool-card-body module-scroll-body" data-scroll-module="right_ai_templates" ${aiTplScrollStyle ? `style="${aiTplScrollStyle}"` : ''}>
+        <div class="${aiTplCls}" data-scroll-module="right_ai_templates" ${aiTplScrollStyle ? `style="${aiTplScrollStyle}"` : ''}>
           ${renderAiTemplatesCardContentHtml()}
         </div>
         ${renderModuleResizerHtml('ai_templates')}
@@ -2781,13 +2958,14 @@ export function initRightPanel(containerEl) {
     if (!state.selectedExcelPath) return;
     const sheetInfo = state.excelSheets.find((s) => s.name === state.selectedSheet);
     const nextIdx = (sheetInfo?.headers?.length || 0) + 1;
+    const defaultColName = nextSequentialName('新建列', sheetInfo?.headers || []);
     openSheet({
       title: '新增 Excel 列',
       bodyHtml: `
         <div style="display:flex;flex-direction:column;gap:10px;">
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">新列表头名称</label>
-            <input type="text" class="apple-input" id="add-col-name" placeholder="例如：备注 / 错题原因" />
+            <input type="text" class="apple-input" id="add-col-name" placeholder="留空自动命名：${escapeHtml(defaultColName)}" />
           </div>
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">插入列序号（1 为首列，默认末尾第 ${nextIdx} 列）</label>
@@ -2802,12 +2980,8 @@ export function initRightPanel(containerEl) {
       onMount(card) {
         card.querySelector('#add-col-cancel')?.addEventListener('click', closeSheet);
         card.querySelector('#add-col-ok')?.addEventListener('click', async () => {
-          const name = card.querySelector('#add-col-name')?.value?.trim();
+          const name = card.querySelector('#add-col-name')?.value?.trim() || defaultColName;
           const index = Math.max(1, Number(card.querySelector('#add-col-index')?.value) || nextIdx);
-          if (!name) {
-            showToast('请输入新列表头名称', 'warning');
-            return;
-          }
           try {
             await api.post('/api/excel/structure', {
               path: state.selectedExcelPath,
@@ -2874,13 +3048,14 @@ export function initRightPanel(containerEl) {
 
   function openCreateTreeNodeSheet() {
     const nodes = state.treeData.nodes || [];
+    const defaultNodeName = nextSequentialName('新建分类', nodes.map((n) => n?.name || ''));
     openSheet({
       title: '新建知识树分类节点',
       bodyHtml: `
         <div style="display:flex;flex-direction:column;gap:12px;">
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">分类节点名称</label>
-            <input type="text" class="apple-input" id="tree-node-name" placeholder="例如：高等数学 / 错题集" />
+            <input type="text" class="apple-input" id="tree-node-name" placeholder="留空自动命名：${escapeHtml(defaultNodeName)}" />
           </div>
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">父级节点（可选）</label>
@@ -2898,12 +3073,8 @@ export function initRightPanel(containerEl) {
       onMount(card) {
         card.querySelector('#tree-node-cancel')?.addEventListener('click', closeSheet);
         card.querySelector('#tree-node-ok')?.addEventListener('click', async () => {
-          const name = card.querySelector('#tree-node-name')?.value?.trim();
+          const name = card.querySelector('#tree-node-name')?.value?.trim() || defaultNodeName;
           const parentId = card.querySelector('#tree-node-parent')?.value || null;
-          if (!name) {
-            showToast('节点名称不能为空', 'warning');
-            return;
-          }
           try {
             await api.post('/api/tree', { name, parent_id: parentId });
             closeSheet();
@@ -2919,13 +3090,14 @@ export function initRightPanel(containerEl) {
   }
 
   function openAddAppSheet() {
+    const defaultAppName = nextSequentialName('新建软件', (store.state.apps || []).map((a) => a?.name || ''));
     openSheet({
       title: '添加本地软件直达',
       bodyHtml: `
         <div style="display:flex;flex-direction:column;gap:10px;">
           <div>
-            <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">软件名称</label>
-            <input type="text" class="apple-input" id="add-app-name" placeholder="例如：WPS Office" />
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">软件名称（可留空）</label>
+            <input type="text" class="apple-input" id="add-app-name" placeholder="留空自动取程序文件名或 ${escapeHtml(defaultAppName)}" />
           </div>
           <div>
             <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">可执行路径 (.exe / .lnk / 命令名)</label>
@@ -2944,15 +3116,16 @@ export function initRightPanel(containerEl) {
       onMount(card) {
         card.querySelector('#add-app-cancel')?.addEventListener('click', closeSheet);
         card.querySelector('#add-app-ok')?.addEventListener('click', async () => {
-          const name = card.querySelector('#add-app-name')?.value?.trim();
           const path = card.querySelector('#add-app-path')?.value?.trim();
+          const derivedName = path ? getBaseName(path).replace(/\.(exe|lnk|bat|cmd)$/i, '').trim() : '';
+          const name = card.querySelector('#add-app-name')?.value?.trim() || derivedName || defaultAppName;
           const aliasesRaw = card.querySelector('#add-app-aliases')?.value || '';
           const aliases = aliasesRaw
             .split(/[,，]/)
             .map((s) => s.trim())
             .filter(Boolean);
-          if (!name || !path) {
-            showToast('请填写软件名称与路径', 'warning');
+          if (!path) {
+            showToast('请填写软件可执行路径', 'warning');
             return;
           }
           try {
@@ -3034,14 +3207,19 @@ export function initRightPanel(containerEl) {
     const appPill = e.target.closest('.app-launcher-pill[data-app-id]');
     if (appPill) {
       e.stopPropagation();
+      const appId = appPill.dataset.appId || '';
       const appName = (appPill.dataset.name || appPill.textContent || '').trim();
+      const appObj = (store.state.apps || []).find((a) => String(a.id) === String(appId)) || null;
       if (!appName) {
         e.preventDefault();
         return;
       }
       setDragPayload(e, {
         type: 'app-portal',
+        appId,
+        id: appId,
         label: appName,
+        app: appObj ? { name: appObj.name, path: appObj.path, aliases: appObj.aliases || [], args: appObj.args || '' } : null,
         markdown: '[[app:' + appName + ']]',
       });
       store.emit('drag:active', true);
@@ -3280,12 +3458,8 @@ export function initRightPanel(containerEl) {
 
   async function submitInlineTreeNode() {
     const input = toolsEl?.querySelector('[data-role="inline-tree-node-input"]');
-    const name = String(input?.value ?? state.inlineTreeCreateDraft ?? '').trim();
-    if (!name) {
-      showToast('节点名称不能为空', 'warning');
-      input?.focus();
-      return;
-    }
+    const defaultName = nextSequentialName('新建分类', (state.treeData.nodes || []).map((n) => n?.name || ''));
+    const name = String(input?.value ?? state.inlineTreeCreateDraft ?? '').trim() || defaultName;
     try {
       await api.post('/api/tree', { name, parent_id: null });
       state.inlineTreeCreateOpen = false;
@@ -3422,6 +3596,40 @@ export function initRightPanel(containerEl) {
     const action = actionEl.dataset.action;
 
     // --- V2/V3 Global Right Panel Actions ---
+    if (action === 'set-module-size') {
+      e.preventDefault();
+      e.stopPropagation();
+      const modId = actionEl.dataset.modId;
+      const preset = actionEl.dataset.preset || 'auto';
+      if (modId) {
+        setModuleSizePreset?.('right', modId, preset);
+      }
+      return;
+    }
+
+    if (action === 'toggle-module-float') {
+      e.preventDefault();
+      e.stopPropagation();
+      const modId = actionEl.dataset.modId;
+      const modTitle = actionEl.dataset.modTitle || modId;
+      if (modId) {
+        toggleModuleFloat?.(modId, { title: modTitle, panel: 'right' });
+      }
+      return;
+    }
+
+    if (action === 'open-global-todos') {
+      if (typeof setCenterView === 'function') {
+        setCenterView('explorer');
+      } else {
+        store.setCenterView?.('explorer');
+      }
+      if (typeof window !== 'undefined' && window.innerWidth <= 767) {
+        store.setState({ mobileTab: 'doc' }, 'layout:changed');
+      }
+      return;
+    }
+
     if (action === 'open-right-customize') {
       openRightCustomizeSheet();
       return;
@@ -3479,6 +3687,18 @@ export function initRightPanel(containerEl) {
       return;
     }
 
+    if (action === 'todo-insert-note') {
+      const idx = Number(actionEl.dataset.todoIdx);
+      const todo = state.summaryResult?.todos?.[idx];
+      if (todo) {
+        const timeHint = todo.suggested_time ? ` *(${todo.suggested_time})*` : '';
+        const md = `- [ ] ${todo.title}${timeHint}\n`;
+        store.emit('doc:append', { content: md });
+        showToast('已将待办插入当前笔记', 'success');
+      }
+      return;
+    }
+
     if (action === 'open-reminder-sheet') {
       const idx = Number(actionEl.dataset.todoIdx);
       const todo = state.summaryResult?.todos?.[idx];
@@ -3496,12 +3716,8 @@ export function initRightPanel(containerEl) {
     if (action === 'start-todo-focus') {
       const idx = Number(actionEl.dataset.todoIdx);
       const todo = state.summaryResult?.todos?.[idx];
-      const itemEl = actionEl.closest('.todo-item');
-      const durSelect = itemEl?.querySelector('[data-role="focus-duration"]');
-      const seconds = Math.max(5, Number(durSelect?.value) || 1500);
-      store.emit('focus:start', {
+      openFocusDurationPopover?.(actionEl, {
         title: todo?.title || '专注任务',
-        seconds,
       });
       return;
     }
@@ -3835,8 +4051,12 @@ export function initRightPanel(containerEl) {
     }
 
     if (action === 'focus-workspace') {
+      const wsId = actionEl.dataset.wsId || '';
       const wsName = actionEl.dataset.name || '工作区专注';
-      store.emit('focus:start', { title: wsName, seconds: 1500 });
+      openFocusDurationPopover?.(actionEl, {
+        title: wsName,
+        workspaceId: wsId,
+      });
       return;
     }
 
@@ -3952,11 +4172,35 @@ export function initRightPanel(containerEl) {
 
   function bindRightModuleHeightResizers() {
     let activeDrag = null;
+    let tooltipEl = null;
+
+    const showResizeTooltip = (x, y, px) => {
+      if (typeof document === 'undefined') return;
+      if (!tooltipEl) {
+        tooltipEl = document.createElement('div');
+        tooltipEl.className = 'resize-pixel-tooltip';
+        tooltipEl.style.cssText =
+          'position:fixed;z-index:1600;pointer-events:none;padding:3px 8px;border-radius:9999px;font-size:11px;font-weight:600;color:#fff;background:rgba(28,28,30,0.88);backdrop-filter:blur(8px);box-shadow:0 4px 12px rgba(0,0,0,0.18);white-space:nowrap;';
+        document.body.appendChild(tooltipEl);
+      }
+      tooltipEl.textContent = `高 ${px}px`;
+      tooltipEl.style.left = `${Math.min(window.innerWidth - 90, Math.round(x + 12))}px`;
+      tooltipEl.style.top = `${Math.max(8, Math.round(y - 14))}px`;
+      tooltipEl.hidden = false;
+    };
+
+    const hideResizeTooltip = () => {
+      if (tooltipEl) {
+        tooltipEl.remove();
+        tooltipEl = null;
+      }
+    };
 
     const stopResize = (e) => {
       if (!activeDrag) return;
       const { resizer, modId, currentH } = activeDrag;
       activeDrag = null;
+      hideResizeTooltip();
       resizer.classList.remove('is-dragging');
       document.body.style.cursor = '';
       if (e?.pointerId != null) {
@@ -4000,6 +4244,7 @@ export function initRightPanel(containerEl) {
 
       resizer.classList.add('is-dragging');
       document.body.style.cursor = 'row-resize';
+      showResizeTooltip(e.clientX, e.clientY, startH);
       try {
         resizer.setPointerCapture?.(e.pointerId);
       } catch {
@@ -4015,9 +4260,11 @@ export function initRightPanel(containerEl) {
         Math.min(RIGHT_MODULE_MAX_HEIGHT, Math.round(activeDrag.startH + dy))
       );
       activeDrag.currentH = nextH;
+      activeDrag.scrollBody.classList.remove('is-auto-height');
       activeDrag.scrollBody.style.height = `${nextH}px`;
       activeDrag.scrollBody.style.maxHeight = `${nextH}px`;
       activeDrag.scrollBody.style.overflowY = 'auto';
+      showResizeTooltip(e.clientX, e.clientY, nextH);
     });
 
     window.addEventListener('pointerup', stopResize);
@@ -4028,22 +4275,29 @@ export function initRightPanel(containerEl) {
       if (!resizer) return;
       e.preventDefault();
       e.stopPropagation();
+      hideResizeTooltip();
       const modId = resizer.dataset.resizeModule;
       const block = resizer.closest('.module-block');
       const scrollBody = block?.querySelector('.module-scroll-body');
       if (scrollBody) {
+        scrollBody.classList.add('is-auto-height');
         scrollBody.style.height = '';
         scrollBody.style.maxHeight = '';
         scrollBody.style.overflowY = '';
       }
       if (modId) {
+        const rawModId = modId.replace(/^right_/, '');
         isResizingRightModule = true;
         try {
-          setModuleHeightSafe(modId, null);
+          if (typeof setModuleSizePreset === 'function') {
+            setModuleSizePreset('right', rawModId, 'auto');
+          } else {
+            setModuleHeightSafe(modId, null);
+          }
         } finally {
           isResizingRightModule = false;
         }
-        showToast('已恢复模块自动高度', 'info', { duration: 1600 });
+        showToast('已恢复模块自适应高度', 'info', { duration: 1600 });
       }
     });
   }

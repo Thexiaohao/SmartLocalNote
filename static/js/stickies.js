@@ -17,6 +17,7 @@ import {
   showToast,
   openSheet,
   closeSheet,
+  copyInternal,
   setDragPayload,
   clearDragPayload,
 } from './store.js';
@@ -63,13 +64,86 @@ const MERGE_UNDO_KEY_MS = 12000;
 let initialized = false;
 let stickies = [];
 let layerEl = null;
-let dockEl = null;
 let menuEl = null;
 let snapPreviewEl = null;
 let zCounter = 1;
 let lastPinToastAt = 0;
 let lastMergeUndo = [];
 let mergeUndoDockTimer = 0;
+const trashingStickyIds = new Set();
+
+function ensureV72StickiesStyles() {
+  if (typeof document === 'undefined' || document.getElementById('sln-v72-stickies-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'sln-v72-stickies-styles';
+  style.textContent = `
+    .island-stickies-toolbar {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      padding: 10px 12px 8px; border-bottom: 1px solid var(--border-hairline); flex-shrink: 0;
+    }
+    .island-stickies-toolbar .pill-btn.is-undo-active {
+      background: var(--accent-soft); color: var(--accent); border-color: rgba(0,122,255,0.3);
+    }
+    .island-stickies-list {
+      flex: 1 1 auto; min-height: 80px; overflow-y: auto; padding: 8px 10px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .island-sticky-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 7px 10px; border-radius: 11px; background: var(--bg-subtle);
+      border: 1px solid var(--border-hairline); cursor: pointer;
+      transition: background-color 0.16s ease, border-color 0.16s ease;
+    }
+    .island-sticky-row:hover { background: var(--bg-hover); border-color: rgba(0,122,255,0.28); }
+    .island-sticky-row-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
+    .island-sticky-dot { width: 9px; height: 9px; border-radius: 9999px; flex-shrink: 0; }
+    .island-sticky-text-wrap { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+    .island-sticky-title {
+      font-size: 12px; font-weight: 600; color: var(--text-primary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .island-sticky-sub {
+      font-size: 10.5px; color: var(--text-tertiary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .island-sticky-badges { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+    .island-sticky-badge {
+      padding: 1px 6px; border-radius: 9999px; font-size: 10px; font-weight: 600;
+      background: var(--bg-island); border: 1px solid var(--border-hairline); color: var(--text-secondary);
+    }
+    .sticky-ctx-color-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 6px 10px; font-size: 12.5px; color: var(--text-primary);
+    }
+    .sticky-ctx-color-dots { display: inline-flex; align-items: center; gap: 5px; }
+    .sticky-ctx-dot {
+      width: 15px; height: 15px; border-radius: 9999px; border: 1.5px solid rgba(255,255,255,0.6);
+      cursor: pointer; transition: transform 0.14s ease;
+    }
+    .sticky-ctx-dot:hover { transform: scale(1.18); }
+    .sticky-ctx-dot.is-active { box-shadow: 0 0 0 2px var(--accent); }
+  `;
+  if (document.head.firstChild) {
+    document.head.insertBefore(style, document.head.firstChild);
+  } else {
+    document.head.appendChild(style);
+  }
+}
+
+function getStickyTitle(sticky) {
+  if (!sticky) return '闪念卡';
+  const raw = String(sticky.content || '').trim();
+  if (raw) {
+    const first = raw.split(/\r?\n/).map((l) => l.replace(/^[#>*\-\s]+/, '').trim()).find(Boolean) || raw;
+    return first.slice(0, 26);
+  }
+  return String(sticky.title || '').trim() || '空白闪念';
+}
+
+function syncStickiesCount() {
+  store.state.stickiesCount = stickies.length;
+  store.emit('stickies:count-change', stickies.length);
+}
 
 function writeDragPayload(event, payload) {
   if (typeof store.setDragPayload === 'function') {
@@ -208,6 +282,7 @@ function saveStickies() {
   } catch {
     // ignore storage quota errors
   }
+  syncStickiesCount();
 }
 
 function ensureLayer() {
@@ -353,10 +428,7 @@ function hasActiveMergeUndo() {
 }
 
 function renderDockOnly() {
-  const dock = ensureDockPill();
-  if (!dock) return;
-  const minimizedCount = stickies.filter((s) => s.minimized).length;
-  renderDockToolbar(dock, minimizedCount);
+  renderStickiesControlPanel();
 }
 
 function pushMergeUndoSnapshot(snapshots) {
@@ -383,7 +455,7 @@ function pushMergeUndoSnapshot(snapshots) {
   }
   mergeUndoDockTimer = window.setTimeout(() => {
     mergeUndoDockTimer = 0;
-    renderDockOnly();
+    renderStickiesControlPanel();
   }, MERGE_UNDO_DOCK_MS);
 }
 
@@ -703,61 +775,177 @@ function stackAllUnpinned() {
   layoutStack(sid, deckX, deckY);
   saveStickies();
   renderStickies();
-  showToast('已合并堆叠（按 Ctrl+Z 或点左下「撤销合并」可还原）', 'success', { duration: 3200 });
+  showToast('已合并堆叠（按 Ctrl+Z 或在灵动岛闪念控制点「撤销合并」可还原）', 'success', { duration: 3200 });
 }
 
-function ensureDockPill() {
-  if (typeof document === 'undefined') return null;
-  if (!dockEl || !document.body.contains(dockEl)) {
-    dockEl = document.getElementById('sticky-dock-pill');
-    if (dockEl && dockEl.tagName === 'BUTTON') {
-      dockEl.remove();
-      dockEl = null;
-    }
-    if (!dockEl) {
-      dockEl = document.createElement('div');
-      dockEl.id = 'sticky-dock-pill';
-      dockEl.className = 'sticky-dock-pill hidden';
-      dockEl.setAttribute('role', 'toolbar');
-      dockEl.setAttribute('aria-label', '闪念便签工具条');
-      setElementVisibility(dockEl, false);
-      document.body.appendChild(dockEl);
-    } else {
-      dockEl.setAttribute('role', 'toolbar');
-      dockEl.setAttribute('aria-label', '闪念便签工具条');
-    }
-    if (!dockEl.dataset.dockBound) {
-      dockEl.dataset.dockBound = '1';
-      dockEl.addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-dock-action]');
-        if (!btn) return;
-        const action = btn.dataset.dockAction;
-        if (action === 'restore') {
-          let changed = false;
-          stickies = stickies.map((s) => {
-            if (s.minimized) {
-              changed = true;
-              return { ...s, minimized: false };
-            }
-            return s;
-          });
-          if (changed) {
-            saveStickies();
-            renderStickies();
-          }
-        } else if (action === 'undo-merge') {
-          undoLastStackMerge();
-        } else if (action === 'tile') {
-          tileAllUnpinned();
-        } else if (action === 'stack-all') {
-          stackAllUnpinned();
-        } else if (action === 'new') {
-          spawnStickyNote();
-        }
+async function trashStickyById(stickyId) {
+  const sticky = getCardById(stickyId);
+  if (!sticky || trashingStickyIds.has(stickyId)) return false;
+  trashingStickyIds.add(stickyId);
+  const stickyCopy = { ...sticky };
+  const title = getStickyTitle(sticky);
+  try {
+    if (typeof store.trashVirtualItem === 'function') {
+      await store.trashVirtualItem({
+        kind: 'sticky',
+        title,
+        payload: stickyCopy,
       });
     }
+    stickies = stickies.filter((item) => item.id !== stickyId);
+    cleanupOrphanStacks();
+    saveStickies();
+    renderStickies();
+    showToast('已移入内置回收站，可在灵动岛回收站还原', 'info', { duration: 2400 });
+    return true;
+  } catch (err) {
+    showToast(`移入回收站失败：${err?.message || '未知错误'}`, 'error');
+    return false;
+  } finally {
+    trashingStickyIds.delete(stickyId);
   }
-  return dockEl;
+}
+
+function focusOrRestoreSticky(stickyId) {
+  const sticky = getCardById(stickyId);
+  if (!sticky) return;
+  if (sticky.minimized) {
+    sticky.minimized = false;
+  }
+  bringStickyForward(sticky);
+  saveStickies();
+  renderStickies();
+  window.requestAnimationFrame(() => {
+    const cardEl = getCardElementById(sticky.id);
+    if (cardEl) {
+      cardEl.classList.remove('is-pin-pulse');
+      void cardEl.offsetWidth;
+      cardEl.classList.add('is-pin-pulse');
+      window.setTimeout(() => cardEl.classList.remove('is-pin-pulse'), 550);
+      cardEl.querySelector('.sticky-textarea')?.focus();
+    }
+  });
+}
+
+function renderStickiesControlPanel() {
+  const panel = document.getElementById('island-stickies-panel');
+  if (!panel) return;
+
+  const visibleCount = stickies.filter((s) => !s.minimized).length;
+  const minimizedCount = stickies.length - visibleCount;
+  const undoAvailable = hasActiveMergeUndo();
+
+  const toggleAllBtnHtml = minimizedCount > 0
+    ? `<button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-stickies-action="restore-all" title="恢复全部已收起闪念">👁 恢复全部 (${minimizedCount})</button>`
+    : `<button type="button" class="pill-btn pill-btn-sm" data-stickies-action="minimize-all" title="全部收起到灵动岛" ${visibleCount === 0 ? 'disabled' : ''}>📦 全部收起</button>`;
+
+  const listHtml = stickies.length === 0
+    ? `<div class="island-stickies-empty">暂无闪念卡，点击上方「+ 新建闪念」或按 Alt+N / 文档空白处右键召唤</div>`
+    : stickies
+        .map((s) => {
+          const accentHex = normalizeCustomColor(s.customColor) || STICKY_COLOR_SWATCHES[migrateColor(s.color)];
+          const title = getStickyTitle(s);
+          const rawBody = String(s.content || '').trim().replace(/\s+/g, ' ');
+          const subText = rawBody && rawBody !== title ? rawBody.slice(0, 48) : (s.minimized ? '已收起到灵动岛' : '桌面悬浮中');
+          return `
+            <div class="island-sticky-row" data-stickies-action="focus-one" data-sticky-id="${escapeHtml(s.id)}" role="listitem" title="点击定位并展开">
+              <div class="island-sticky-row-main">
+                <span class="island-sticky-dot" style="background:${escapeHtml(accentHex)};" aria-hidden="true"></span>
+                <div class="island-sticky-text-wrap">
+                  <span class="island-sticky-title">${escapeHtml(title)}</span>
+                  <span class="island-sticky-sub">${escapeHtml(subText)}</span>
+                </div>
+              </div>
+              <div class="island-sticky-badges">
+                ${s.pinned ? '<span class="island-sticky-badge">📌 置顶</span>' : ''}
+                ${s.minimized ? '<span class="island-sticky-badge">📦 收起</span>' : ''}
+                <button type="button" class="pill-btn pill-btn-sm is-danger" data-stickies-action="trash-one" data-sticky-id="${escapeHtml(s.id)}" title="移入内置回收站" aria-label="移入回收站">🗑</button>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+
+  panel.innerHTML = `
+    <div class="island-stickies-toolbar" role="toolbar" aria-label="闪念便签控制">
+      <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-stickies-action="new" title="新建闪念卡 (Alt+N)">+ 新建闪念 (Alt+N)</button>
+      ${toggleAllBtnHtml}
+      <button type="button" class="pill-btn pill-btn-sm" data-stickies-action="tile" title="将未固定便签整齐平铺" ${visibleCount === 0 ? 'disabled' : ''}>⊞ 平铺整理</button>
+      <button type="button" class="pill-btn pill-btn-sm" data-stickies-action="stack-all" title="将未固定便签合并堆叠或展开" ${visibleCount < 2 ? 'disabled' : ''}>📚 一键堆叠</button>
+      <button type="button" class="pill-btn pill-btn-sm ${undoAvailable ? 'is-undo-active' : ''}" data-stickies-action="undo-merge" title="撤销最近一次合并 (Ctrl+Z)" ${undoAvailable ? '' : 'disabled'}>↩ 撤销合并</button>
+    </div>
+    <div class="island-stickies-list" role="list">${listHtml}</div>
+  `;
+}
+
+function bindStickiesPanelEvents() {
+  const panel = document.getElementById('island-stickies-panel');
+  if (!panel || panel.dataset.stickiesBound === '1') return;
+  panel.dataset.stickiesBound = '1';
+
+  panel.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-stickies-action]');
+    if (!btn) return;
+    e.stopPropagation();
+    const action = btn.dataset.stickiesAction;
+    const sid = btn.dataset.stickyId;
+
+    if (action === 'new') {
+      spawnStickyNote();
+      return;
+    }
+    if (action === 'restore-all') {
+      let changed = false;
+      stickies = stickies.map((s) => {
+        if (s.minimized) {
+          changed = true;
+          return { ...s, minimized: false };
+        }
+        return s;
+      });
+      if (changed) {
+        saveStickies();
+        renderStickies();
+      }
+      return;
+    }
+    if (action === 'minimize-all') {
+      let changed = false;
+      stickies = stickies.map((s) => {
+        if (!s.minimized) {
+          changed = true;
+          restoreStickyOrigSize(s);
+          return { ...s, minimized: true, stackId: null, stackExpanded: false };
+        }
+        return s;
+      });
+      if (changed) {
+        cleanupOrphanStacks();
+        saveStickies();
+        renderStickies();
+      }
+      return;
+    }
+    if (action === 'tile') {
+      tileAllUnpinned();
+      return;
+    }
+    if (action === 'stack-all') {
+      stackAllUnpinned();
+      return;
+    }
+    if (action === 'undo-merge') {
+      undoLastStackMerge();
+      return;
+    }
+    if (action === 'trash-one' && sid) {
+      trashStickyById(sid);
+      return;
+    }
+    if (action === 'focus-one' && sid) {
+      focusOrRestoreSticky(sid);
+    }
+  });
 }
 
 function ensureContextMenu() {
@@ -860,21 +1048,44 @@ function openUrlCapsuleSheet() {
   });
 }
 
+function positionAndOpenMenu(menu, clientX, clientY) {
+  menu.classList.remove('is-open');
+  setElementVisibility(menu, true);
+
+  // Measure layout width/height (unaffected by pre-open transform scale(0.95))
+  const menuW = menu.offsetWidth || Math.ceil(menu.getBoundingClientRect().width) || 240;
+  const menuH = menu.offsetHeight || Math.ceil(menu.getBoundingClientRect().height) || 220;
+  const { vw, vh } = getViewportSize();
+  const left = Math.max(8, Math.min(clientX, vw - menuW - 8));
+  const top = Math.max(8, Math.min(clientY, vh - menuH - 8));
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  window.requestAnimationFrame(() => {
+    menu.classList.add('is-open');
+  });
+}
+
 function showContextMenu(clientX, clientY) {
   const menu = ensureContextMenu();
   if (!menu) return;
 
+  delete menu.dataset.targetStickyId;
   menu.innerHTML = `
     <button type="button" class="context-menu-item" data-ctx-action="spawn-sticky" role="menuitem">
-      <span class="ctx-item-left"><span>📝</span><span>在此处召唤闪念卡</span></span>
+      <span class="ctx-item-left"><span>📌</span><span>在此处召唤闪念卡</span></span>
       <kbd class="ctx-kbd">Alt+N</kbd>
     </button>
     <button type="button" class="context-menu-item" data-ctx-action="insert-url" role="menuitem">
-      <span class="ctx-item-left"><span>🌐</span><span>插入网址直达胶囊</span></span>
+      <span class="ctx-item-left"><span>🔗</span><span>插入网址直达胶囊</span></span>
     </button>
     <div class="context-menu-sep" role="separator"></div>
+    <button type="button" class="context-menu-item" data-ctx-action="ai-summarize" role="menuitem">
+      <span class="ctx-item-left"><span>✨</span><span>AI 总结当前文档</span></span>
+    </button>
     <button type="button" class="context-menu-item" data-ctx-action="ai-polish" role="menuitem">
-      <span class="ctx-item-left"><span>✨</span><span>AI 润色当前笔记</span></span>
+      <span class="ctx-item-left"><span>🪄</span><span>AI 润色当前笔记</span></span>
     </button>
     <button type="button" class="context-menu-item" data-ctx-action="toggle-mindmap" role="menuitem">
       <span class="ctx-item-left"><span>🧠</span><span>切换脑图视图</span></span>
@@ -887,22 +1098,45 @@ function showContextMenu(clientX, clientY) {
 
   menu.dataset.spawnX = String(clientX);
   menu.dataset.spawnY = String(clientY);
-  menu.classList.remove('is-open');
-  setElementVisibility(menu, true);
+  positionAndOpenMenu(menu, clientX, clientY);
+}
 
-  // Measure layout width/height (unaffected by pre-open transform scale(0.95))
-  const menuW = menu.offsetWidth || Math.ceil(menu.getBoundingClientRect().width) || 230;
-  const menuH = menu.offsetHeight || Math.ceil(menu.getBoundingClientRect().height) || 200;
-  const { vw, vh } = getViewportSize();
-  const left = Math.max(8, Math.min(clientX, vw - menuW - 8));
-  const top = Math.max(8, Math.min(clientY, vh - menuH - 8));
+function showStickyCardContextMenu(stickyId, clientX, clientY) {
+  const sticky = getCardById(stickyId);
+  const menu = ensureContextMenu();
+  if (!sticky || !menu) return;
 
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
+  menu.dataset.targetStickyId = sticky.id;
+  const curColor = migrateColor(sticky.color);
+  const dotsHtml = STICKY_COLORS.map((c) => {
+    const active = !sticky.customColor && curColor === c;
+    return `<button type="button" class="sticky-ctx-dot ${active ? 'is-active' : ''}" data-sticky-ctx-color="${c}" title="${STICKY_COLOR_LABELS[c]}" aria-label="${STICKY_COLOR_LABELS[c]}" style="background:${STICKY_COLOR_SWATCHES[c]};"></button>`;
+  }).join('');
 
-  window.requestAnimationFrame(() => {
-    menu.classList.add('is-open');
-  });
+  menu.innerHTML = `
+    <button type="button" class="context-menu-item" data-sticky-ctx="copy" role="menuitem">
+      <span class="ctx-item-left"><span>📋</span><span>复制闪念内容</span></span>
+    </button>
+    <button type="button" class="context-menu-item" data-sticky-ctx="toggle-pin" role="menuitem">
+      <span class="ctx-item-left"><span>📌</span><span>${sticky.pinned ? '取消置顶' : '置顶闪念'}</span></span>
+    </button>
+    <div class="sticky-ctx-color-row" role="group" aria-label="切换颜色">
+      <span>🎨 切换颜色</span>
+      <span class="sticky-ctx-color-dots">${dotsHtml}</span>
+    </div>
+    <button type="button" class="context-menu-item" data-sticky-ctx="minimize" role="menuitem">
+      <span class="ctx-item-left"><span>📦</span><span>收起到灵动岛</span></span>
+    </button>
+    <button type="button" class="context-menu-item" data-sticky-ctx="to-shelf" role="menuitem">
+      <span class="ctx-item-left"><span>📥</span><span>暂存到灵动岛</span></span>
+    </button>
+    <div class="context-menu-sep" role="separator"></div>
+    <button type="button" class="context-menu-item" data-sticky-ctx="trash" role="menuitem" style="color:var(--danger, #FF3B30);">
+      <span class="ctx-item-left"><span>🗑</span><span>移入内置回收站</span></span>
+    </button>
+  `;
+
+  positionAndOpenMenu(menu, clientX, clientY);
 }
 
 function findOverlapTarget(dragged, pendingX, pendingY, clientX, clientY, excludeStackId = null) {
@@ -1039,8 +1273,8 @@ function createCardElement(stickyId) {
         <button type="button" class="sticky-icon-btn sticky-pin-btn" data-sticky-action="toggle-pin" title="固定位置（免受自动整理和误拖影响）" aria-label="固定便签位置">
           ${icon('pin', 13)}
         </button>
-        <button type="button" class="sticky-icon-btn" data-sticky-action="minimize" title="最小化到底部工具条" aria-label="最小化便签">—</button>
-        <button type="button" class="sticky-icon-btn sticky-close-btn" data-sticky-action="delete" title="关闭并删除便签" aria-label="删除便签">✕</button>
+        <button type="button" class="sticky-icon-btn" data-sticky-action="minimize" title="收起到灵动岛闪念控制" aria-label="收起便签">—</button>
+        <button type="button" class="sticky-icon-btn sticky-close-btn" data-sticky-action="delete" title="移入内置回收站" aria-label="移入回收站">✕</button>
       </div>
     </header>
     <textarea class="sticky-textarea" placeholder="随手记下灵感、待办或引用，可拖入笔记…"></textarea>
@@ -1125,6 +1359,27 @@ function bindCardInteractions(card, stickyId) {
     let dragGroup = null;
     let preDragSnapshot = null;
     let altDetached = false;
+    let globalDragStarted = false;
+
+    const clearStickyGlobalDropHighlights = () => {
+      document
+        .querySelectorAll('#portable-trash-dock.is-drag-over, [data-drop-zone="trash"].is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #dynamic-island.is-drag-over')
+        .forEach((el) => el.classList.remove('is-drag-over'));
+    };
+
+    const hitTestGlobalDropTargets = (cx, cy) => {
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) return { trashTarget: null, shelfTarget: null };
+      const hitEls = document.elementsFromPoint(cx, cy);
+      const trashTarget = hitEls.find((el) => el.matches?.('#portable-trash-dock, [data-drop-zone="trash"]'))
+        || hitEls.map((el) => el.closest?.('#portable-trash-dock, [data-drop-zone="trash"]')).find(Boolean)
+        || null;
+      const shelfTarget = !trashTarget
+        ? (hitEls.find((el) => el.matches?.('[data-drop-zone="drag-shelf"], #dynamic-island'))
+          || hitEls.map((el) => el.closest?.('[data-drop-zone="drag-shelf"], #dynamic-island')).find(Boolean)
+          || null)
+        : null;
+      return { trashTarget, shelfTarget };
+    };
 
     const getGroupBBoxPending = () => {
       if (!dragGroup || dragGroup.length === 0) {
@@ -1158,6 +1413,25 @@ function bindCardInteractions(card, stickyId) {
       }
 
       clearStackTargetHighlights();
+      clearStickyGlobalDropHighlights();
+      if (globalDragStarted) {
+        const { trashTarget, shelfTarget } = hitTestGlobalDropTargets(lastClientX, lastClientY);
+        if (trashTarget) {
+          trashTarget.classList.add('is-drag-over');
+          activeOverlapTarget = null;
+          activeEdge = null;
+          hideSnapPreview();
+          return;
+        }
+        if (shelfTarget) {
+          shelfTarget.classList.add('is-drag-over');
+          activeOverlapTarget = null;
+          activeEdge = null;
+          hideSnapPreview();
+          return;
+        }
+      }
+
       const excludeSid = isGroupDrag ? origStackId : null;
       activeOverlapTarget = findOverlapTarget(sticky, pendingX, pendingY, lastClientX, lastClientY, excludeSid);
       if (activeOverlapTarget) {
@@ -1216,36 +1490,90 @@ function bindCardInteractions(card, stickyId) {
         }
       }
       clearStackTargetHighlights();
+      clearStickyGlobalDropHighlights();
       hideSnapPreview();
 
       const sticky = getCardById(stickyId);
       const isCancel = e?.type === 'pointercancel' || e?.type === 'blur';
+      const dropX = Number.isFinite(e?.clientX) && e.clientX !== 0 ? e.clientX : lastClientX;
+      const dropY = Number.isFinite(e?.clientY) && e.clientY !== 0 ? e.clientY : lastClientY;
+      const hitResult = !isCancel && movedFar && globalDragStarted
+        ? hitTestGlobalDropTargets(dropX, dropY)
+        : { trashTarget: null, shelfTarget: null };
+
+      if (globalDragStarted) {
+        globalDragStarted = false;
+        store.endGlobalDrag?.();
+      }
+
+      const restorePreDragGeometry = () => {
+        if (dragGroup && dragGroup.length > 0) {
+          for (const m of dragGroup) {
+            m.sticky.x = m.origX;
+            m.sticky.y = m.origY;
+            m.sticky.w = m.origW;
+            m.sticky.h = m.origH;
+            m.sticky.origW = m.origOrigW;
+            m.sticky.origH = m.origOrigH;
+            m.sticky.stackId = m.origStackId;
+            m.sticky.stackExpanded = m.origStackExpanded;
+            m.sticky.zone = m.origZone;
+          }
+        } else if (sticky && preDragSnapshot) {
+          sticky.x = preDragSnapshot.x;
+          sticky.y = preDragSnapshot.y;
+          sticky.w = preDragSnapshot.w;
+          sticky.h = preDragSnapshot.h;
+          sticky.origW = preDragSnapshot.origW;
+          sticky.origH = preDragSnapshot.origH;
+          sticky.stackId = preDragSnapshot.stackId;
+          sticky.stackExpanded = preDragSnapshot.stackExpanded;
+          sticky.zone = preDragSnapshot.zone;
+        }
+      };
+
+      if (sticky && hitResult.trashTarget) {
+        restorePreDragGeometry();
+        activeOverlapTarget = null;
+        activeEdge = null;
+        dragGroup = null;
+        preDragSnapshot = null;
+        isGroupDrag = false;
+        altDetached = false;
+        trashStickyById(sticky.id);
+        return;
+      }
+
+      if (sticky && hitResult.shelfTarget) {
+        restorePreDragGeometry();
+        const text = String(sticky.content || '').trim();
+        if (text) {
+          store.emit('shelf:add-item', {
+            type: 'sticky',
+            kind: 'sticky',
+            title: getStickyTitle(sticky),
+            label: getStickyTitle(sticky),
+            markdown: sticky.content,
+            content: sticky.content,
+            sourceStickyId: sticky.id,
+          });
+        } else {
+          showToast('空白闪念无法暂存，请先输入内容', 'warning');
+        }
+        activeOverlapTarget = null;
+        activeEdge = null;
+        dragGroup = null;
+        preDragSnapshot = null;
+        isGroupDrag = false;
+        altDetached = false;
+        saveStickies();
+        renderStickies();
+        return;
+      }
 
       if (sticky) {
         if (isCancel) {
-          if (dragGroup && dragGroup.length > 0) {
-            for (const m of dragGroup) {
-              m.sticky.x = m.origX;
-              m.sticky.y = m.origY;
-              m.sticky.w = m.origW;
-              m.sticky.h = m.origH;
-              m.sticky.origW = m.origOrigW;
-              m.sticky.origH = m.origOrigH;
-              m.sticky.stackId = m.origStackId;
-              m.sticky.stackExpanded = m.origStackExpanded;
-              m.sticky.zone = m.origZone;
-            }
-          } else if (preDragSnapshot) {
-            sticky.x = preDragSnapshot.x;
-            sticky.y = preDragSnapshot.y;
-            sticky.w = preDragSnapshot.w;
-            sticky.h = preDragSnapshot.h;
-            sticky.origW = preDragSnapshot.origW;
-            sticky.origH = preDragSnapshot.origH;
-            sticky.stackId = preDragSnapshot.stackId;
-            sticky.stackExpanded = preDragSnapshot.stackExpanded;
-            sticky.zone = preDragSnapshot.zone;
-          }
+          restorePreDragGeometry();
         } else if (!movedFar) {
           if (isGroupDrag && origStackId) {
             const anchorX = Math.min(...dragGroup.map((m) => m.origX));
@@ -1306,7 +1634,7 @@ function bindCardInteractions(card, stickyId) {
               cleanupOrphanStacks();
               applyUnifiedStackSize(sid);
               layoutStack(sid, targetAnchorX, targetAnchorY);
-              showToast('已合并堆叠（按 Ctrl+Z 或点左下「撤销合并」可还原）', 'success', { duration: 3200 });
+              showToast('已合并堆叠（按 Ctrl+Z 或在灵动岛闪念控制点「撤销合并」可还原）', 'success', { duration: 3200 });
             }
           } else if (activeEdge) {
             const { vw, vh } = getViewportSize();
@@ -1361,7 +1689,7 @@ function bindCardInteractions(card, stickyId) {
               cleanupOrphanStacks();
               applyUnifiedStackSize(sid);
               layoutStack(sid, targetAnchorX, targetAnchorY);
-              showToast('已合并堆叠（按 Ctrl+Z 或点左下「撤销合并」可还原）', 'success', { duration: 3200 });
+              showToast('已合并堆叠（按 Ctrl+Z 或在灵动岛闪念控制点「撤销合并」可还原）', 'success', { duration: 3200 });
             }
           } else if (activeEdge) {
             sticky.stackId = null;
@@ -1426,7 +1754,21 @@ function bindCardInteractions(card, stickyId) {
         return;
       }
 
-      if (dist > 4) movedFar = true;
+      if (dist > 4) {
+        movedFar = true;
+        if (!globalDragStarted) {
+          globalDragStarted = true;
+          store.beginGlobalDrag?.({
+            type: 'sticky',
+            kind: 'sticky',
+            id: sticky.id,
+            sourceStickyId: sticky.id,
+            title: getStickyTitle(sticky),
+            content: sticky.content,
+            sticky: { ...sticky },
+          });
+        }
+      }
 
       // Alt+drag detaches ONLY this single card out of the stack
       if (isGroupDrag && e.altKey && dist > 4 && dragGroup) {
@@ -1805,14 +2147,11 @@ function bindCardInteractions(card, stickyId) {
     renderStickies();
   });
 
-  // Strict close / delete
+  // Move sticky into built-in recycle bin
   closeBtn?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    stickies = stickies.filter((item) => item.id !== stickyId);
-    cleanupOrphanStacks();
-    saveStickies();
-    renderStickies();
+    trashStickyById(stickyId);
   });
 
   // Send card content to AI Todo extraction
@@ -1831,7 +2170,7 @@ function bindCardInteractions(card, stickyId) {
     showToast('已发送便签内容至 AI 提取待办', 'info', { duration: 2000 });
   });
 
-  // Drag-to-Note & Dynamic Island Shelf (<span draggable="true">)
+  // Drag-to-Note & Dynamic Island Dual Drop (<span draggable="true">)
   if (dragPill) {
     dragPill.addEventListener('dragstart', (e) => {
       const sticky = getCardById(stickyId);
@@ -1841,14 +2180,21 @@ function bindCardInteractions(card, stickyId) {
         showToast('空便签无法拖入笔记，请先写点内容', 'warning');
         return;
       }
-      const firstLine = text.split(/\r?\n/)[0].replace(/^#+\s*/, '').trim().slice(0, 24);
-      writeDragPayload(e, {
+      const title = getStickyTitle(sticky);
+      const payload = {
         type: 'sticky',
-        label: firstLine || '闪念卡',
+        kind: 'sticky',
+        id: sticky.id,
+        label: title,
+        title,
         markdown: sticky.content,
+        content: sticky.content,
         dragMode: e.ctrlKey ? 'copy' : 'move',
         sourceStickyId: sticky.id,
-      });
+        sticky: { ...sticky },
+      };
+      writeDragPayload(e, payload);
+      store.beginGlobalDrag?.(payload);
       store.emit('drag:active', true);
       card.classList.add('is-dragging');
     });
@@ -1856,6 +2202,7 @@ function bindCardInteractions(card, stickyId) {
     dragPill.addEventListener('dragend', () => {
       card.classList.remove('is-dragging');
       resetDragPayload();
+      store.endGlobalDrag?.();
       store.emit('drag:active', false);
     });
   }
@@ -1939,45 +2286,16 @@ function updateCardElement(card, sticky, stackInfo) {
   }
 }
 
-function renderDockToolbar(dock, minimizedCount) {
-  const undoVisible = hasActiveMergeUndo();
-  const showDock = stickies.length >= 2 || minimizedCount > 0 || undoVisible;
-  if (!showDock) {
-    setElementVisibility(dock, false);
-    return;
-  }
-
-  const restoreHtml =
-    minimizedCount > 0
-      ? `<button type="button" class="sticky-dock-btn is-accent" data-dock-action="restore" title="恢复已最小化的便签">📌 恢复 (${minimizedCount})</button>`
-      : `<span class="sticky-dock-count" title="当前便签数量">📌 闪念 (${stickies.length})</span>`;
-
-  const undoHtml = undoVisible
-    ? `<button type="button" class="sticky-dock-btn is-undo-merge" data-dock-action="undo-merge" title="撤销刚才的闪念卡合并 (Ctrl+Z)">↩ 撤销合并</button>`
-    : '';
-
-  dock.innerHTML = `
-    ${restoreHtml}
-    ${undoHtml}
-    <button type="button" class="sticky-dock-btn" data-dock-action="tile" title="将未固定便签在右侧整齐平铺">⊞ 整理</button>
-    <button type="button" class="sticky-dock-btn" data-dock-action="stack-all" title="将未固定便签合并堆叠或展开">📚 堆叠</button>
-    <button type="button" class="sticky-dock-btn is-plus" data-dock-action="new" title="新建闪念卡 (Alt+N)" aria-label="新建闪念卡">+</button>
-  `;
-  setElementVisibility(dock, true);
-}
-
 /**
- * Incremental DOM reconciliation for visible sticky cards & dock toolbar.
+ * Incremental DOM reconciliation for visible sticky cards & Island stickies control panel.
  */
 function renderStickies() {
   const layer = ensureLayer();
-  const dock = ensureDockPill();
-  if (!layer || !dock) return;
+  if (!layer) return;
 
   cleanupOrphanStacks();
   const stackGroups = getStackGroups();
   const visibleStickies = stickies.filter((s) => !s.minimized);
-  const minimizedCount = stickies.length - visibleStickies.length;
   const visibleIds = new Set(visibleStickies.map((s) => s.id));
 
   // Remove cards that are no longer visible
@@ -2007,15 +2325,20 @@ function renderStickies() {
     updateCardElement(card, sticky, stackInfo);
   }
 
-  renderDockToolbar(dock, minimizedCount);
+  renderStickiesControlPanel();
+  syncStickiesCount();
+}
+
+export function spawnStickyAt(x, y, opts = {}) {
+  return spawnStickyNote({ ...(opts || {}), x, y });
 }
 
 /**
  * Spawn a new floating tinted-paper sticky note at (x, y) and persist in localStorage.
- * @param {{ x?: number, y?: number, text?: string, content?: string, color?: string, accent?: string, pinned?: boolean }} [opts={}]
+ * @param {{ x?: number, y?: number, text?: string, content?: string, title?: string, color?: string, accent?: string, pinned?: boolean }} [opts={}]
  * @returns {object} created sticky object
  */
-export function spawnStickyNote({ x, y, text, content, color, accent, customColor = '', pinned = false } = {}) {
+export function spawnStickyNote({ x, y, text, content, title = '', color, accent, customColor = '', pinned = false } = {}) {
   const { vw, vh } = getViewportSize();
   const offset = (stickies.length % 5) * 22;
   const w = DEFAULT_W;
@@ -2029,6 +2352,7 @@ export function spawnStickyNote({ x, y, text, content, color, accent, customColo
   zCounter += 1;
   const sticky = {
     id: `sticky_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    title: String(title || '').trim(),
     content: String(content ?? text ?? ''),
     x: targetX,
     y: targetY,
@@ -2064,9 +2388,27 @@ function handleContextMenuAction(action) {
   hideContextMenu();
 
   if (action === 'spawn-sticky') {
-    spawnStickyNote({ x: spawnX, y: spawnY });
+    spawnStickyAt(spawnX, spawnY);
   } else if (action === 'insert-url') {
     openUrlCapsuleSheet();
+  } else if (action === 'ai-summarize') {
+    const activeFile = store.state.activeFile;
+    const text = store.state.activeDocumentText || '';
+    if (!activeFile && !text.trim()) {
+      showToast('请先打开一篇文档后再使用 AI 总结', 'warning');
+      return;
+    }
+    const patch = { rightMode: 'summary', rightCollapsed: false };
+    if (typeof window !== 'undefined' && window.innerWidth <= 767) {
+      patch.mobileTab = 'ai';
+    }
+    store.setState(patch, 'rightMode:changed');
+    store.emit('layout:changed');
+    store.emit('ai:summarize-request', {
+      file_path: activeFile?.path || null,
+      text,
+      autoRun: true,
+    });
   } else if (action === 'ai-polish') {
     const activeType = store.state.activeFile?.type;
     if (!store.state.activeFile || (activeType !== 'markdown' && activeType !== 'text')) {
@@ -2081,6 +2423,70 @@ function handleContextMenuAction(action) {
   }
 }
 
+function handleStickyCardContextAction(stickyId, action, colorValue = '') {
+  const sticky = getCardById(stickyId);
+  hideContextMenu();
+  if (!sticky) return;
+
+  if (colorValue && STICKY_COLORS.includes(colorValue)) {
+    sticky.color = colorValue;
+    sticky.customColor = '';
+    saveStickies();
+    renderStickies();
+    return;
+  }
+
+  if (action === 'copy') {
+    const text = String(sticky.content || '');
+    if (!text.trim()) {
+      showToast('闪念内容为空', 'warning');
+      return;
+    }
+    copyInternal(text, '已复制闪念内容');
+  } else if (action === 'toggle-pin') {
+    sticky.pinned = !sticky.pinned;
+    if (sticky.pinned) {
+      sticky.stackId = null;
+      sticky.stackExpanded = false;
+      sticky.zone = 'free';
+      restoreStickyOrigSize(sticky);
+      cleanupOrphanStacks();
+      showToast('已固定位置（免受自动整理和拖拽影响）', 'success', { duration: 1800 });
+    } else {
+      showToast('已取消固定', 'info', { duration: 1500 });
+    }
+    saveStickies();
+    renderStickies();
+  } else if (action === 'minimize') {
+    sticky.minimized = true;
+    sticky.stackId = null;
+    sticky.stackExpanded = false;
+    restoreStickyOrigSize(sticky);
+    cleanupOrphanStacks();
+    saveStickies();
+    renderStickies();
+    showToast('已收起到灵动岛闪念控制', 'info', { duration: 1600 });
+  } else if (action === 'to-shelf') {
+    const text = String(sticky.content || '').trim();
+    if (!text) {
+      showToast('空白闪念无法暂存，请先输入内容', 'warning');
+      return;
+    }
+    const title = getStickyTitle(sticky);
+    store.emit('shelf:add-item', {
+      type: 'sticky',
+      kind: 'sticky',
+      title,
+      label: title,
+      markdown: sticky.content,
+      content: sticky.content,
+      sourceStickyId: sticky.id,
+    });
+  } else if (action === 'trash') {
+    trashStickyById(sticky.id);
+  }
+}
+
 function isSheetOpen() {
   const sheetOverlay = document.getElementById('sheet-overlay');
   return Boolean(
@@ -2089,30 +2495,57 @@ function isSheetOpen() {
 }
 
 /**
- * Initialize floating tinted-paper Stickies & scoped Center Context Menu.
+ * Initialize floating tinted-paper Stickies, Island control hub & Context Menus.
  */
 export function initStickies() {
   if (initialized || typeof document === 'undefined') return;
   initialized = true;
 
+  ensureV72StickiesStyles();
+  document.getElementById('sticky-dock-pill')?.remove();
+
   stickies = loadStickies();
   ensureLayer();
-  ensureDockPill();
   ensureSnapPreview();
   const menu = ensureContextMenu();
+  bindStickiesPanelEvents();
   renderStickies();
 
   menu?.addEventListener('click', (e) => {
+    const colorDot = e.target.closest('[data-sticky-ctx-color]');
+    if (colorDot) {
+      e.stopPropagation();
+      const targetId = menu.dataset.targetStickyId;
+      handleStickyCardContextAction(targetId, 'color', colorDot.dataset.stickyCtxColor);
+      return;
+    }
+    const stickyBtn = e.target.closest('[data-sticky-ctx]');
+    if (stickyBtn) {
+      e.stopPropagation();
+      const targetId = menu.dataset.targetStickyId;
+      handleStickyCardContextAction(targetId, stickyBtn.dataset.stickyCtx);
+      return;
+    }
     const btn = e.target.closest('[data-ctx-action]');
     if (!btn) return;
     handleContextMenuAction(btn.dataset.ctxAction);
   });
 
-  // Strictly scoped right-click context menu ONLY inside #center-panel
+  // Scoped right-click context menu: sticky cards anywhere + blank areas inside #center-panel
   document.addEventListener('contextmenu', (e) => {
     const target = e.target;
     if (!(target instanceof Element)) {
       hideContextMenu();
+      return;
+    }
+
+    const stickyCard = target.closest('.sticky-card[data-sticky-id]');
+    if (stickyCard) {
+      if (target.closest('input[type="color"]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeAllColorPopovers();
+      showStickyCardContextMenu(stickyCard.dataset.stickyId, e.clientX, e.clientY);
       return;
     }
 
@@ -2123,7 +2556,7 @@ export function initStickies() {
 
     if (
       target.closest(
-        '#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .sticky-card, .spark-card, .anchor-pill, .media-embed-card, #capsule-context-menu, #drag-shelf, #island-shelf-drawer, #module-context-menu, #slash-command-menu, #hover-peek-card'
+        '#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .spark-card, .anchor-pill, .media-embed-card, #capsule-context-menu, #drag-shelf, #island-shelf-drawer, #module-context-menu, #slash-command-menu, #hover-peek-card'
       )
     ) {
       hideContextMenu();
@@ -2214,6 +2647,16 @@ export function initStickies() {
     spawnStickyNote(opts || {});
   });
 
+  store.on('stickies:spawn-at', ({ x, y, ...rest } = {}) => {
+    spawnStickyAt(x, y, rest);
+  });
+
+  store.on('island:tab-change', (tab) => {
+    if (tab === 'stickies') {
+      renderStickiesControlPanel();
+    }
+  });
+
   store.on('sticky:consumed-by-drag', (payload) => {
     const sid = payload?.sourceStickyId || payload?.stickyId;
     if (!sid || payload?.dragMode === 'copy') return;
@@ -2230,5 +2673,75 @@ export function initStickies() {
     cleanupOrphanStacks();
     saveStickies();
     renderStickies();
+  });
+
+  store.on('trash:consumed-drag', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const kind = String(payload.kind || payload.type || '');
+    const sid = payload.sourceStickyId || payload.stickyId || payload.sticky?.id || (kind === 'sticky' ? payload.id : '');
+    if (!sid) return;
+    if (!getCardById(sid)) return;
+    stickies = stickies.filter((item) => item.id !== sid);
+    cleanupOrphanStacks();
+    saveStickies();
+    renderStickies();
+  });
+
+  store.on('trash:restore-virtual', (res) => {
+    const kind = String(res?.kind || res?.item?.kind || '');
+    if (kind !== 'sticky') return;
+    const item = res?.item || res;
+    const saved = item?.payload && typeof item.payload === 'object' ? item.payload : {};
+    const rawSticky = saved.sticky && typeof saved.sticky === 'object' ? saved.sticky : saved;
+    const { vw, vh } = getViewportSize();
+    const w = clampWidth(rawSticky.w ?? DEFAULT_W);
+    const h = clampHeight(rawSticky.h ?? DEFAULT_H);
+    const x = clampPosX(Number.isFinite(Number(rawSticky.x)) ? Number(rawSticky.x) : Math.round(vw * 0.52), w);
+    const y = clampPosY(Number.isFinite(Number(rawSticky.y)) ? Number(rawSticky.y) : Math.round(vh * 0.24), h);
+    const candidateId = String(rawSticky.id || saved.sourceStickyId || `sticky_${Date.now()}`);
+    const uniqueId = getCardById(candidateId)
+      ? `sticky_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+      : candidateId;
+
+    zCounter += 1;
+    const restored = {
+      id: uniqueId,
+      title: String(rawSticky.title || ''),
+      content: typeof rawSticky.content === 'string'
+        ? rawSticky.content
+        : (typeof rawSticky.text === 'string'
+          ? rawSticky.text
+          : String(saved.markdown || item?.title || '')),
+      x,
+      y,
+      w,
+      h,
+      origW: null,
+      origH: null,
+      color: migrateColor(rawSticky.color || rawSticky.accent),
+      customColor: normalizeCustomColor(rawSticky.customColor),
+      minimized: false,
+      pinned: Boolean(rawSticky.pinned),
+      z: zCounter,
+      zone: VALID_ZONES.has(rawSticky.zone) ? rawSticky.zone : 'free',
+      stackId: null,
+      stackExpanded: false,
+    };
+
+    stickies.push(restored);
+    saveStickies();
+    renderStickies();
+
+    window.requestAnimationFrame(() => {
+      const cardEl = getCardElementById(restored.id);
+      if (cardEl) {
+        cardEl.classList.remove('is-pin-pulse');
+        void cardEl.offsetWidth;
+        cardEl.classList.add('is-pin-pulse');
+        window.setTimeout(() => cardEl.classList.remove('is-pin-pulse'), 650);
+        cardEl.querySelector('.sticky-textarea')?.focus();
+      }
+    });
+    showToast(`已从回收站还原闪念「${getStickyTitle(restored)}」`, 'success');
   });
 }

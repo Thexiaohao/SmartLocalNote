@@ -48,6 +48,9 @@ import {
   closeSplitDoc,
   consumeShelfItem,
   addToShelf,
+  nextSequentialName,
+  setCenterView,
+  togglePinFile,
   DRAG_MIME,
 } from './store.js';
 import {
@@ -56,7 +59,7 @@ import {
   execWysiwygFormat,
 } from './md_wysiwyg.js';
 import { api } from './api_client.js';
-import { icon } from './icons.js';
+import { icon, getFileTypeStyle } from './icons.js';
 import { renderMindMap } from './mindmap.js';
 
 const IMAGE_ZOOM_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
@@ -652,6 +655,377 @@ function injectV4CenterStyles() {
       border-bottom: 2px solid var(--text-tertiary);
       opacity: 0.65;
     }
+    .center-home-pill-btn {
+      height: 26px;
+      padding: 0 9px;
+      font-size: 11.5px;
+      font-weight: 600;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .explorer-home {
+      flex: 1 1 auto;
+      min-height: 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .explorer-topbar {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border-hairline);
+      background: var(--bg-glass);
+      flex-shrink: 0;
+    }
+    .explorer-topbar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .explorer-breadcrumbs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .explorer-crumb {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 26px;
+      padding: 0 10px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: transform var(--dur-fast) var(--ease-apple), opacity var(--dur-fast) var(--ease-apple);
+    }
+    .explorer-crumb:hover { opacity: 0.92; transform: translateY(-0.5px); }
+    .explorer-crumb.is-active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .explorer-crumb-sep {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      user-select: none;
+    }
+    .explorer-actions-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .explorer-filter-pills {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .explorer-type-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform var(--dur-fast) var(--ease-apple), opacity var(--dur-fast) var(--ease-apple);
+    }
+    .explorer-type-pill:hover { transform: translateY(-0.5px); opacity: 0.95; }
+    .explorer-type-pill.is-active {
+      box-shadow: 0 0 0 1px currentColor inset;
+    }
+    .explorer-quick-inline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-glass-edge);
+      flex-wrap: wrap;
+    }
+    .explorer-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      min-width: 0;
+      display: flex;
+      overflow: hidden;
+    }
+    .explorer-files-pane {
+      flex: 1 1 62%;
+      min-width: 0;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .explorer-todo-pane {
+      flex: 0 0 38%;
+      min-width: 280px;
+      max-width: 480px;
+      min-height: 0;
+      border-left: 1px solid var(--border-hairline);
+      background: var(--bg-glass);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .explorer-home.is-todo-full .explorer-files-pane {
+      display: none;
+    }
+    .explorer-home.is-todo-full .explorer-todo-pane {
+      flex: 1 1 100%;
+      max-width: none;
+      border-left: none;
+    }
+    .explorer-home.is-todo-collapsed .explorer-todo-pane {
+      display: none;
+    }
+    @media (max-width: 920px) {
+      .explorer-body { flex-direction: column; }
+      .explorer-files-pane { flex: 1 1 55%; }
+      .explorer-todo-pane {
+        flex: 1 1 45%;
+        max-width: none;
+        min-width: 0;
+        border-left: none;
+        border-top: 1px solid var(--border-hairline);
+      }
+    }
+    .explorer-section-label {
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .explorer-folder-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+      gap: 9px;
+    }
+    .explorer-folder-card {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 11px;
+      border-radius: 12px;
+      background: var(--bg-glass);
+      border: 1px solid var(--border-hairline);
+      cursor: pointer;
+      min-width: 0;
+      transition: transform var(--dur-fast) var(--ease-apple), opacity var(--dur-fast) var(--ease-apple);
+    }
+    .explorer-folder-card:hover {
+      transform: translateY(-1px);
+      border-color: rgba(217, 119, 6, 0.45);
+    }
+    .explorer-file-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
+      gap: 10px;
+    }
+    .explorer-file-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 11px 12px;
+      border-radius: 14px;
+      background: var(--bg-glass);
+      border: 1px solid var(--border-hairline);
+      cursor: pointer;
+      min-width: 0;
+      position: relative;
+      transition: transform var(--dur-fast) var(--ease-apple), opacity var(--dur-fast) var(--ease-apple);
+    }
+    .explorer-file-card:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent);
+      box-shadow: var(--shadow-card);
+    }
+    .explorer-file-card.is-active-doc,
+    .explorer-file-row.is-active-doc {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .explorer-file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .explorer-file-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 11px;
+      border-radius: 11px;
+      background: var(--bg-glass);
+      border: 1px solid var(--border-hairline);
+      cursor: pointer;
+      min-width: 0;
+      transition: transform var(--dur-fast) var(--ease-apple), opacity var(--dur-fast) var(--ease-apple);
+    }
+    .explorer-file-row:hover {
+      border-color: var(--accent);
+      transform: translateX(1px);
+    }
+    .explorer-ft-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .explorer-ft-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 6px;
+      border-radius: var(--radius-pill);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      flex-shrink: 0;
+    }
+    .explorer-todo-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 1px 7px;
+      border-radius: var(--radius-pill);
+      font-size: 10.5px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .explorer-todo-badge.is-open {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .explorer-todo-badge.is-done {
+      background: rgba(22, 163, 74, 0.12);
+      color: #16A34A;
+    }
+    .explorer-pin-btn {
+      width: 22px;
+      height: 22px;
+      border-radius: 9999px;
+      border: none;
+      background: transparent;
+      color: var(--text-tertiary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 12px;
+      flex-shrink: 0;
+      opacity: 0.72;
+      transition: transform var(--dur-fast) var(--ease-apple), opacity var(--dur-fast) var(--ease-apple);
+    }
+    .explorer-pin-btn:hover { opacity: 1; transform: scale(1.1); }
+    .explorer-pin-btn.is-pinned { opacity: 1; color: #D97706; }
+    .explorer-todo-header {
+      padding: 10px 13px;
+      border-bottom: 1px solid var(--border-hairline);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .explorer-todo-list {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 10px 12px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .explorer-todo-group {
+      border-radius: 12px;
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-subtle);
+      overflow: hidden;
+    }
+    .explorer-todo-group-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 7px 10px;
+      background: var(--bg-glass);
+      border-bottom: 1px solid var(--border-hairline);
+    }
+    .explorer-todo-group.is-collapsed .explorer-todo-group-head {
+      border-bottom: none;
+    }
+    .explorer-todo-group.is-collapsed .explorer-todo-group-body {
+      display: none;
+    }
+    .explorer-todo-quick-add {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border-hairline);
+      background: rgba(128, 128, 128, 0.04);
+    }
+    .explorer-todo-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border-hairline);
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .explorer-todo-row:last-child {
+      border-bottom: none;
+    }
+    .explorer-todo-row.is-checked .explorer-todo-text {
+      text-decoration: line-through;
+      color: var(--text-tertiary);
+    }
+    .explorer-todo-check {
+      margin-top: 2px;
+      flex-shrink: 0;
+      cursor: pointer;
+      accent-color: var(--accent);
+    }
+    .explorer-todo-text {
+      flex: 1 1 auto;
+      min-width: 0;
+      word-break: break-word;
+      cursor: pointer;
+      color: var(--text-primary);
+    }
+    .explorer-todo-text:hover {
+      color: var(--accent);
+    }
   `;
   document.head.appendChild(style);
 }
@@ -786,6 +1160,19 @@ export function initCenterView(containerEl) {
       initialTime: 0,
       autoPlay: false,
     },
+    explorer: {
+      scope: 'all', // 'all' | 'notes' | 'imported' | 'mounted'
+      relDir: '',
+      mountedDir: '',
+      search: '',
+      typeFilter: 'all',
+      viewMode: 'grid', // 'grid' | 'list'
+      todoPaneMode: 'side', // 'side' | 'collapsed' | 'full'
+      todoFilter: 'open', // 'open' | 'all' | 'done'
+      collapsedTodoFiles: new Set(),
+      inlineCreateMode: '', // '' | 'note' | 'folder'
+      lastRefreshAt: 0,
+    },
   };
 
   let typographySaveTimer = null;
@@ -850,6 +1237,7 @@ export function initCenterView(containerEl) {
           ${icon('arrow-right', 14)}
         </button>
       </div>
+      <button type="button" class="pill-btn pill-btn-sm center-home-pill-btn" data-action="open-explorer-home" title="返回工作区主面板">🏠 主面板</button>
     `;
   }
 
@@ -1326,71 +1714,1140 @@ export function initCenterView(containerEl) {
   }
 
   // =========================================================================
-  // Rendering: Welcome / Loading
+  // Rendering: Explorer Home (Workspace Files + Global Todos) & Loading
   // =========================================================================
-  function renderWelcome() {
-    hideFormatBar();
-    removeDropInsertLine();
-    const items = store.state.files?.items || [];
-    const quickDocs = items.slice(0, 4);
+  const EXPLORER_TYPE_FILTERS = [
+    { key: 'all', label: '全部', color: 'var(--text-primary)', bg: 'var(--bg-subtle)' },
+    { key: 'md', label: 'MD', color: '#4F46E5', bg: 'rgba(79,70,229,0.12)' },
+    { key: 'pdf', label: 'PDF', color: '#DC2626', bg: 'rgba(220,38,38,0.12)' },
+    { key: 'word', label: 'Word', color: '#2563EB', bg: 'rgba(37,99,235,0.12)' },
+    { key: 'excel', label: '表格', color: '#16A34A', bg: 'rgba(22,163,74,0.12)' },
+    { key: 'ppt', label: 'PPT', color: '#EA580C', bg: 'rgba(234,88,12,0.12)' },
+    { key: 'image', label: '图片', color: '#9333EA', bg: 'rgba(147,51,234,0.12)' },
+    { key: 'code', label: '代码', color: '#0D9488', bg: 'rgba(13,148,136,0.12)' },
+  ];
 
-    ensureMainPaneEl().innerHTML = `
-      <div class="center-toolbar">
-        <div class="center-toolbar-group">
-          ${renderNavButtonsHtml()}
-          <span class="doc-title-pill">文档工作区</span>
-        </div>
-        <div class="center-toolbar-group">
-          <button type="button" class="pill-btn pill-btn-sm" data-action="welcome-new-note">
-            ${icon('plus', 13)} 新建笔记
-          </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="welcome-ai-summary">
-            ${icon('sparkles', 13)} 一键 AI 速记
-          </button>
-        </div>
-      </div>
+  function getWorkspaceFilesList() {
+    const raw = store.state.files;
+    if (Array.isArray(raw)) return raw;
+    return Array.isArray(raw?.items) ? raw.items : [];
+  }
 
-      <div style="flex:1 1 auto; min-height:0; overflow-y:auto; display:flex; align-items:center; justify-content:center; padding:24px;">
-        <div class="empty-state glass-card" style="max-width:460px; width:100%; padding:32px 24px;">
-          <div style="width:48px; height:48px; border-radius:16px; background:var(--accent-soft); color:var(--accent); display:inline-flex; align-items:center; justify-content:center; margin-bottom:6px;">
-            ${icon('book-open', 24)}
+  function getWorkspaceFoldersList() {
+    const raw = store.state.files;
+    if (Array.isArray(raw?.folders)) return raw.folders;
+    return Array.isArray(store.state.folders) ? store.state.folders : [];
+  }
+
+  function findTodoStatsForFile(filePath) {
+    const byFile = store.state.todos?.by_file;
+    if (!byFile || !filePath) return null;
+    if (byFile[filePath]) return byFile[filePath];
+    for (const [k, v] of Object.entries(byFile)) {
+      if (isSamePath(k, filePath)) return v;
+    }
+    return null;
+  }
+
+  function formatExplorerTime(mtimeSec) {
+    const n = Number(mtimeSec);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    const d = new Date(n * 1000);
+    if (Number.isNaN(d.getTime())) return '';
+    const now = new Date();
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    const pad = (v) => String(v).padStart(2, '0');
+    if (sameDay) return `今天 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    if (d.getFullYear() === now.getFullYear()) {
+      return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function openExplorerRenameSheet(fileItem) {
+    if (!fileItem?.path) return;
+    const oldName = fileItem.name || getBaseName(fileItem.path);
+    openSheet({
+      title: '重命名文件',
+      bodyHtml: `
+        <form id="explorer-rename-form" style="display:flex;flex-direction:column;gap:8px;">
+          <label for="explorer-rename-input" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);">新文件名（含扩展名）</label>
+          <input id="explorer-rename-input" type="text" class="apple-input" value="${escapeHtml(oldName)}" autocomplete="off" />
+        </form>
+      `,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="explorer-rename-cancel">取消</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="explorer-rename-submit">${icon('check', 13)} 确认重命名</button>
+      `,
+      onMount(card) {
+        const input = card.querySelector('#explorer-rename-input');
+        const submitBtn = card.querySelector('#explorer-rename-submit');
+        card.querySelector('#explorer-rename-cancel')?.addEventListener('click', closeSheet);
+        const doRename = async () => {
+          const nextName = String(input?.value || '').trim();
+          if (!nextName || nextName === oldName) {
+            closeSheet();
+            return;
+          }
+          if (submitBtn) submitBtn.disabled = true;
+          try {
+            const res = await api.post('/api/files/rename', {
+              path: fileItem.path,
+              new_name: nextName,
+            });
+            closeSheet();
+            if (state.activeDoc && isSamePath(state.activeDoc.path, fileItem.path) && res?.path) {
+              state.activeDoc.path = res.path;
+              state.activeDoc.name = res.name || nextName;
+              syncActiveFileStore();
+            }
+            await Promise.allSettled([
+              store.refreshFilesList?.(),
+              store.refreshAllTodos?.(),
+            ]);
+            showToast(`已重命名为「${res?.name || nextName}」`, 'success');
+          } catch (err) {
+            if (submitBtn) submitBtn.disabled = false;
+            showToast(getErrorMsg(err, '重命名失败'), 'error');
+          }
+        };
+        submitBtn?.addEventListener('click', doRename);
+        card.querySelector('#explorer-rename-form')?.addEventListener('submit', (ev) => {
+          ev.preventDefault();
+          doRename();
+        });
+        window.requestAnimationFrame(() => {
+          if (!input) return;
+          input.focus();
+          const dotIdx = oldName.lastIndexOf('.');
+          input.setSelectionRange(0, dotIdx > 0 ? dotIdx : oldName.length);
+        });
+      },
+    });
+  }
+
+  function showExplorerItemContextMenu(e, kind, item) {
+    e.preventDefault();
+    e.stopPropagation();
+    hideHoverPeekCard();
+    const menu = ensureCapsuleMenuEl();
+    if (kind === 'folder') {
+      menu.innerHTML = `
+        <button type="button" class="context-menu-item" data-exp-ctx="open-folder" role="menuitem">
+          <span class="ctx-item-left"><span>📂</span><span>打开文件夹</span></span>
+        </button>
+        <div class="context-menu-sep" role="separator"></div>
+        <button type="button" class="context-menu-item" data-exp-ctx="trash-folder" role="menuitem" style="color:var(--danger);">
+          <span class="ctx-item-left"><span>🗑</span><span>移入回收站</span></span>
+        </button>
+      `;
+    } else {
+      menu.innerHTML = `
+        <button type="button" class="context-menu-item" data-exp-ctx="open-doc" role="menuitem">
+          <span class="ctx-item-left"><span>📄</span><span>打开文档</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="split-doc" role="menuitem">
+          <span class="ctx-item-left"><span>◫</span><span>分屏打开 (Ctrl+点击)</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="rename-doc" role="menuitem">
+          <span class="ctx-item-left"><span>✏</span><span>重命名</span></span>
+        </button>
+        <div class="context-menu-sep" role="separator"></div>
+        <button type="button" class="context-menu-item" data-exp-ctx="trash-doc" role="menuitem" style="color:var(--danger);">
+          <span class="ctx-item-left"><span>🗑</span><span>移入回收站</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="remove-doc" role="menuitem">
+          <span class="ctx-item-left"><span>✕</span><span>从工作台列表移除</span></span>
+        </button>
+      `;
+    }
+
+    menu.querySelectorAll('[data-exp-ctx]').forEach((btn) => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const act = btn.dataset.expCtx;
+        hideCapsuleContextMenu();
+        if (act === 'open-folder') {
+          state.explorer.scope = 'notes';
+          state.explorer.relDir = item.rel_dir || '';
+          renderExplorerHome({ refresh: false });
+        } else if (act === 'trash-folder') {
+          try {
+            await store.trashFile?.(item.path);
+            if (state.explorer.relDir && (state.explorer.relDir === item.rel_dir || state.explorer.relDir.startsWith(`${item.rel_dir}/`))) {
+              state.explorer.relDir = item.parent_rel || '';
+            }
+            renderExplorerHome({ refresh: false });
+          } catch (err) {
+            showToast(getErrorMsg(err, '移入回收站失败'), 'error');
+          }
+        } else if (act === 'open-doc') {
+          openFile(item.path);
+        } else if (act === 'split-doc') {
+          openSplitDoc({ path: item.path, name: item.name, ext: item.ext });
+          if (store.state.activeCenterView === 'explorer' && typeof setCenterView === 'function') {
+            setCenterView('doc');
+          }
+        } else if (act === 'rename-doc') {
+          openExplorerRenameSheet(item);
+        } else if (act === 'trash-doc') {
+          try {
+            await store.trashFile?.(item.path);
+            if (state.activeDoc && isSamePath(state.activeDoc.path, item.path)) {
+              state.activeDoc = null;
+              state.dirty = false;
+              syncActiveFileStore();
+            }
+            await store.refreshAllTodos?.().catch(() => {});
+          } catch (err) {
+            showToast(getErrorMsg(err, '移入回收站失败'), 'error');
+          }
+        } else if (act === 'remove-doc') {
+          try {
+            await api.post('/api/files/remove', { path: item.path });
+            if (state.activeDoc && isSamePath(state.activeDoc.path, item.path)) {
+              state.activeDoc = null;
+              state.dirty = false;
+              syncActiveFileStore();
+            }
+            await Promise.allSettled([
+              store.refreshFilesList?.(),
+              store.refreshAllTodos?.(),
+            ]);
+            showToast('已从工作台列表移除（磁盘原文件未删除）', 'info');
+          } catch (err) {
+            showToast(getErrorMsg(err, '移除失败'), 'error');
+          }
+        }
+      });
+    });
+
+    menu.hidden = false;
+    menu.classList.remove('hidden');
+    menu.classList.add('is-open');
+    const rect = menu.getBoundingClientRect();
+    const maxX = Math.max(8, window.innerWidth - (rect.width || 220) - 10);
+    const maxY = Math.max(8, window.innerHeight - (rect.height || 240) - 10);
+    menu.style.left = `${Math.min(maxX, Math.max(8, e.clientX))}px`;
+    menu.style.top = `${Math.min(maxY, Math.max(8, e.clientY))}px`;
+  }
+
+  function buildExplorerFilesSectionData() {
+    const exp = state.explorer;
+    const allItems = getWorkspaceFilesList();
+    const allFolders = getWorkspaceFoldersList();
+    const mountedDirs = Array.isArray(store.state.files?.dirs) ? store.state.files.dirs : [];
+    const searchLower = String(exp.search || '').trim().toLowerCase();
+    const typeFilter = exp.typeFilter || 'all';
+    const hasFilter = Boolean(searchLower || typeFilter !== 'all');
+
+    let folders = [];
+    if (exp.scope === 'notes') {
+      folders = allFolders.filter((f) => {
+        const pRel = f.parent_rel || '';
+        const inBranch = hasFilter
+          ? (!exp.relDir || (f.rel_dir || '').startsWith(`${exp.relDir}/`) || pRel === exp.relDir)
+          : pRel === (exp.relDir || '');
+        if (!inBranch) return false;
+        if (searchLower) {
+          return `${f.name || ''} ${f.rel_dir || ''}`.toLowerCase().includes(searchLower);
+        }
+        return !hasFilter || typeFilter === 'all';
+      });
+    } else if (exp.scope === 'all' && typeFilter === 'all') {
+      folders = allFolders.filter((f) => {
+        if (searchLower) {
+          return `${f.name || ''} ${f.rel_dir || ''}`.toLowerCase().includes(searchLower);
+        }
+        return !(f.parent_rel || '');
+      });
+    }
+
+    const files = allItems.filter((f) => {
+      if (exp.scope === 'notes') {
+        if (f.source !== 'notes') return false;
+        const fRel = f.rel_dir || '';
+        const targetRel = exp.relDir || '';
+        if (hasFilter) {
+          if (targetRel && fRel !== targetRel && !fRel.startsWith(`${targetRel}/`)) return false;
+        } else if (fRel !== targetRel) {
+          return false;
+        }
+      } else if (exp.scope === 'imported') {
+        if (f.source !== 'imported') return false;
+      } else if (exp.scope === 'mounted') {
+        if (f.source !== 'mounted_dir') return false;
+        if (exp.mountedDir && !normalizePath(f.path).startsWith(normalizePath(exp.mountedDir))) {
+          return false;
+        }
+      }
+
+      if (typeFilter !== 'all') {
+        const ft = getFileTypeStyle(f.name || '');
+        if (ft.key !== typeFilter) return false;
+      }
+      if (searchLower) {
+        const hay = `${f.name || ''} ${f.rel_dir || ''} ${f.group || ''} ${f.path || ''}`.toLowerCase();
+        if (!hay.includes(searchLower)) return false;
+      }
+      return true;
+    });
+
+    const pinnedSet = new Set((store.state.pinnedFiles || []).map((p) => normalizePath(p)));
+    files.sort((a, b) => {
+      const pa = pinnedSet.has(normalizePath(a.path)) ? 0 : 1;
+      const pb = pinnedSet.has(normalizePath(b.path)) ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return (Number(b.mtime) || 0) - (Number(a.mtime) || 0);
+    });
+
+    return { folders, files, mountedDirs, pinnedSet, allItems, allFolders };
+  }
+
+  function renderExplorerFilesPaneInnerHtml(data) {
+    const exp = state.explorer;
+    const { folders, files, pinnedSet } = data;
+
+    const folderSectionHtml =
+      folders.length > 0
+        ? `
+          <div>
+            <div class="explorer-section-label">
+              <span>📁 子文件夹 (${folders.length})</span>
+            </div>
+            <div class="explorer-folder-grid">
+              ${folders
+                .map((fld) => {
+                  const ft = getFileTypeStyle('', true);
+                  return `
+                    <div
+                      class="explorer-folder-card"
+                      draggable="true"
+                      data-explorer-folder="${escapeHtml(fld.rel_dir)}"
+                      data-folder-path="${escapeHtml(fld.path)}"
+                      title="${escapeHtml(fld.rel_dir || fld.name)}"
+                    >
+                      <span class="explorer-ft-icon" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border};">
+                        ${icon(ft.iconName, 16)}
+                      </span>
+                      <div style="min-width:0; flex:1 1 auto;">
+                        <div style="font-size:13px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                          ${escapeHtml(fld.name)}
+                        </div>
+                        <div style="font-size:11px; color:var(--text-tertiary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                          ${escapeHtml(fld.rel_dir || '子目录')}
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                })
+                .join('')}
+            </div>
           </div>
-          <h2 class="empty-title" style="font-size:16px;">欢迎使用 SmartLocalNote</h2>
-          <p class="empty-desc" style="max-width:380px;line-height:1.65;">
-            本地优先的苹果风学习与办公工作台。全面支持 Markdown、TXT/代码、Excel 表格、PDF 原生预览与批注、ZIP 压缩包免解压预览、图片与音视频、Word/PPT 速览。
-          </p>
-          <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:10px;">
-            <button type="button" class="pill-btn pill-btn-primary" data-action="welcome-new-note">
-              ${icon('plus', 14)} 新建笔记
+        `
+        : '';
+
+    const renderFileBadgesHtml = (file, ft) => {
+      const todoStat = findTodoStatsForFile(file.path);
+      const todoHtml =
+        todoStat && todoStat.total > 0
+          ? todoStat.open > 0
+            ? `<span class="explorer-todo-badge is-open" title="未完成待办 ${todoStat.open} 项">☑ ${todoStat.done}/${todoStat.total}</span>`
+            : `<span class="explorer-todo-badge is-done" title="本篇待办已全部完成">✓ 全部完成</span>`
+          : '';
+      const dirText =
+        file.rel_dir ||
+        (file.source === 'notes' ? '默认笔记' : file.source === 'imported' ? '已导入' : file.group || '挂载目录');
+      return { todoHtml, dirText };
+    };
+
+    const filesSectionHtml =
+      files.length > 0
+        ? `
+          <div>
+            <div class="explorer-section-label">
+              <span>📄 工作区文档 (${files.length})</span>
+              <span style="font-weight:500;">单击打开 · Ctrl+点击分屏 · 拖动至灵动岛或垃圾桶</span>
+            </div>
+            <div class="${exp.viewMode === 'list' ? 'explorer-file-list' : 'explorer-file-grid'}">
+              ${files
+                .map((file) => {
+                  const ft = getFileTypeStyle(file.name || '');
+                  const isPinned = pinnedSet.has(normalizePath(file.path));
+                  const isCurrent = Boolean(state.activeDoc && isSamePath(state.activeDoc.path, file.path));
+                  const { todoHtml, dirText } = renderFileBadgesHtml(file, ft);
+                  const mtimeStr = formatExplorerTime(file.mtime);
+                  if (exp.viewMode === 'list') {
+                    return `
+                      <div
+                        class="explorer-file-row ${isCurrent ? 'is-active-doc' : ''}"
+                        draggable="true"
+                        data-explorer-file="${escapeHtml(file.path)}"
+                        title="${escapeHtml(file.path)}"
+                      >
+                        <div style="display:flex; align-items:center; gap:8px; min-width:0; flex:1 1 auto; overflow:hidden;">
+                          <span class="explorer-ft-icon" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border}; width:26px; height:26px;">
+                            ${icon(ft.iconName, 14)}
+                          </span>
+                          <span class="explorer-ft-badge" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border}; flex-shrink:0;">
+                            ${escapeHtml(ft.label)}
+                          </span>
+                          <span style="flex:1 1 auto; min-width:0; font-size:13px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                            ${escapeHtml(file.name)}
+                          </span>
+                          ${file.is_private ? `<span class="lock-badge" style="flex-shrink:0;" title="隐私锁">${icon('lock', 11)}</span>` : ''}
+                          <span style="font-size:10.5px; color:var(--text-tertiary); padding:1px 6px; border-radius:var(--radius-pill); background:var(--bg-subtle); max-width:82px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex-shrink:1;">
+                            ${escapeHtml(dirText)}
+                          </span>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:6px; flex-shrink:0; white-space:nowrap;">
+                          ${todoHtml}
+                          ${mtimeStr ? `<span style="font-size:11px; color:var(--text-tertiary); white-space:nowrap;">${escapeHtml(mtimeStr)}</span>` : ''}
+                          <button type="button" class="explorer-pin-btn ${isPinned ? 'is-pinned' : ''}" data-explorer-pin="${escapeHtml(file.path)}" title="${isPinned ? '取消置顶' : '置顶文件'}">
+                            ${isPinned ? '★' : '☆'}
+                          </button>
+                        </div>
+                      </div>
+                    `;
+                  }
+                  return `
+                    <div
+                      class="explorer-file-card ${isCurrent ? 'is-active-doc' : ''}"
+                      draggable="true"
+                      data-explorer-file="${escapeHtml(file.path)}"
+                      title="${escapeHtml(file.path)}"
+                    >
+                      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                        <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+                          <span class="explorer-ft-icon" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border};">
+                            ${icon(ft.iconName, 16)}
+                          </span>
+                          <span class="explorer-ft-badge" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border};">
+                            ${escapeHtml(ft.label)}
+                          </span>
+                          ${file.is_private ? `<span class="lock-badge" title="隐私锁">${icon('lock', 11)}</span>` : ''}
+                        </div>
+                        <button type="button" class="explorer-pin-btn ${isPinned ? 'is-pinned' : ''}" data-explorer-pin="${escapeHtml(file.path)}" title="${isPinned ? '取消置顶' : '置顶文件'}">
+                          ${isPinned ? '★' : '☆'}
+                        </button>
+                      </div>
+                      <div style="font-size:13.5px; font-weight:600; color:var(--text-primary); line-height:1.35; word-break:break-word;">
+                        ${escapeHtml(file.name)}
+                      </div>
+                      <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; margin-top:auto;">
+                        <span style="font-size:11px; color:var(--text-tertiary); padding:1px 7px; border-radius:var(--radius-pill); background:var(--bg-subtle); max-width:130px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                          ${escapeHtml(dirText)}
+                        </span>
+                        <div style="display:inline-flex; align-items:center; gap:6px;">
+                          ${todoHtml}
+                          ${mtimeStr ? `<span style="font-size:10.5px; color:var(--text-tertiary);">${escapeHtml(mtimeStr)}</span>` : ''}
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                })
+                .join('')}
+            </div>
+          </div>
+        `
+        : `
+          <div class="empty-state" style="padding:36px 16px;">
+            <p class="empty-title" style="font-size:14px;">当前筛选下暂无文件</p>
+            <p class="empty-desc">可点击上方「+ 新建笔记」或切换筛选条件查看全部工作区文件。</p>
+          </div>
+        `;
+
+    return `${folderSectionHtml}${filesSectionHtml}`;
+  }
+
+  function renderExplorerTodoPaneHtml() {
+    const exp = state.explorer;
+    const todosState = store.state.todos || { items: [], by_file: {}, stats: { total: 0, done: 0, open: 0 } };
+    const allTodoItems = Array.isArray(todosState.items) ? todosState.items : [];
+    const stats = todosState.stats || {
+      total: allTodoItems.length,
+      done: allTodoItems.filter((it) => Boolean(it?.checked)).length,
+      open: allTodoItems.filter((it) => !it?.checked).length,
+    };
+
+    const groupsMap = new Map();
+    for (const item of allTodoItems) {
+      if (!item?.file_path) continue;
+      if (exp.todoFilter === 'open' && item.checked) continue;
+      if (exp.todoFilter === 'done' && !item.checked) continue;
+      const key = item.file_path;
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          file_path: item.file_path,
+          file_name: item.file_name || getBaseName(item.file_path),
+          items: [],
+        });
+      }
+      groupsMap.get(key).items.push(item);
+    }
+
+    // If user is on 'all' or there are no todos yet, ensure active/first MD note is still reachable for quick todo creation
+    const mdFiles = getWorkspaceFilesList().filter((f) => String(f.ext || '').toLowerCase() === '.md');
+    const mdFt = getFileTypeStyle('note.md');
+    const groups = Array.from(groupsMap.values());
+
+    return `
+      <div class="explorer-todo-header">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+          <div style="display:flex; align-items:center; gap:7px;">
+            <span style="font-size:13.5px; font-weight:700; color:var(--text-primary);">☑ 全库待办整理</span>
+            <span style="font-size:11px; font-weight:600; padding:2px 8px; border-radius:var(--radius-pill); background:var(--bg-subtle); color:var(--text-secondary);">
+              未完成 ${stats.open ?? 0} · 已完成 ${stats.done ?? 0}
+            </span>
+          </div>
+          <div style="display:inline-flex; align-items:center; gap:4px;">
+            <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="refresh-todos" title="立即重新扫描全库待办" style="height:24px; padding:0 8px;">🔄</button>
+            <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="toggle-todo-full" title="${exp.todoPaneMode === 'full' ? '恢复双栏布局' : '全宽整理待办'}" style="height:24px; padding:0 8px;">
+              ${exp.todoPaneMode === 'full' ? '◫ 双栏' : '⛶ 全屏'}
             </button>
-            <button type="button" class="pill-btn" data-action="welcome-ai-summary">
-              ${icon('sparkles', 14)} 一键 AI 速记
-            </button>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+          <div style="display:inline-flex; align-items:center; gap:4px;">
+            <button type="button" class="pill-btn pill-btn-sm ${exp.todoFilter === 'open' ? 'pill-btn-primary' : ''}" data-explorer-todo-filter="open" style="height:23px; padding:0 9px; font-size:11px;">未完成</button>
+            <button type="button" class="pill-btn pill-btn-sm ${exp.todoFilter === 'all' ? 'pill-btn-primary' : ''}" data-explorer-todo-filter="all" style="height:23px; padding:0 9px; font-size:11px;">全部</button>
+            <button type="button" class="pill-btn pill-btn-sm ${exp.todoFilter === 'done' ? 'pill-btn-primary' : ''}" data-explorer-todo-filter="done" style="height:23px; padding:0 9px; font-size:11px;">已完成</button>
           </div>
           ${
-            quickDocs.length > 0
-              ? `
-            <div style="width:100%; margin-top:16px; padding-top:14px; border-top:1px solid var(--border-hairline); text-align:left;">
-              <div class="section-heading" style="margin:0 0 8px;">快速打开工作区文档</div>
-              <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                ${quickDocs
-                  .map(
-                    (f) => `
-                  <button type="button" class="pill-btn pill-btn-sm" data-action="quick-open" data-path="${escapeHtml(f.path)}">
-                    ${icon(docIconName('', f.ext), 13)} ${escapeHtml(f.name)}
-                  </button>
-                `
-                  )
-                  .join('')}
-              </div>
-            </div>
-          `
+            mdFiles.length > 0
+              ? `<button type="button" class="pill-btn pill-btn-sm" data-explorer-act="quick-add-first-todo" title="向「${escapeHtml(mdFiles[0].name)}」追加待办" style="height:23px; padding:0 8px; font-size:11px;">+ 速添待办</button>`
               : ''
           }
         </div>
       </div>
+      <div class="explorer-todo-list" data-explorer-role="todo-list">
+        ${
+          groups.length === 0
+            ? `
+              <div class="empty-state" style="padding:28px 14px;">
+                <p class="empty-title" style="font-size:13.5px;">${exp.todoFilter === 'open' ? '暂无未完成待办' : '当前筛选下暂无待办'}</p>
+                <p class="empty-desc">在任意 .md 笔记中写下 <code>- [ ] 任务</code>，即可在此跨文档汇总与双向勾选。</p>
+                ${
+                  mdFiles.length > 0
+                    ? `
+                      <div style="width:100%; max-width:300px; margin-top:10px;">
+                        <input
+                          type="text"
+                          class="apple-input"
+                          data-explorer-todo-add="${escapeHtml(mdFiles[0].path)}"
+                          placeholder="向 ${escapeHtml(mdFiles[0].name)} 添加：${escapeHtml(nextSequentialName('新建待办', []))}"
+                          style="height:28px; font-size:12px;"
+                        />
+                      </div>
+                    `
+                    : ''
+                }
+              </div>
+            `
+            : groups
+                .map((grp) => {
+                  const collapsed = exp.collapsedTodoFiles.has(normalizePath(grp.file_path));
+                  const fStat = findTodoStatsForFile(grp.file_path) || {
+                    total: grp.items.length,
+                    done: grp.items.filter((x) => x.checked).length,
+                    open: grp.items.filter((x) => !x.checked).length,
+                  };
+                  const nextTodoPlaceholder = nextSequentialName(
+                    '新建待办',
+                    allTodoItems
+                      .filter((x) => isSamePath(x.file_path, grp.file_path))
+                      .map((x) => x.text || '')
+                  );
+                  return `
+                    <div class="explorer-todo-group ${collapsed ? 'is-collapsed' : ''}" data-todo-group-path="${escapeHtml(grp.file_path)}">
+                      <div class="explorer-todo-group-head">
+                        <div style="display:flex; align-items:center; gap:6px; min-width:0; flex:1 1 auto;">
+                          <button type="button" class="pill-btn pill-btn-sm" data-explorer-todo-collapse="${escapeHtml(grp.file_path)}" title="${collapsed ? '展开分组' : '折叠分组'}" style="height:20px; width:20px; padding:0; justify-content:center; font-size:10px;">
+                            ${collapsed ? '▶' : '▼'}
+                          </button>
+                          <span class="explorer-ft-badge" style="color:${mdFt.color}; background:${mdFt.bg}; border:1px solid ${mdFt.border};">MD</span>
+                          <button type="button" data-explorer-open-note="${escapeHtml(grp.file_path)}" title="打开 ${escapeHtml(grp.file_name)}" style="border:none; background:transparent; padding:0; font-size:12.5px; font-weight:700; color:var(--text-primary); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:left;">
+                            ${escapeHtml(grp.file_name)}
+                          </button>
+                        </div>
+                        <span class="explorer-todo-badge ${fStat.open > 0 ? 'is-open' : 'is-done'}">
+                          ${fStat.done}/${fStat.total}
+                        </span>
+                      </div>
+                      <div class="explorer-todo-group-body">
+                        <div class="explorer-todo-quick-add">
+                          <input
+                            type="text"
+                            class="apple-input"
+                            data-explorer-todo-add="${escapeHtml(grp.file_path)}"
+                            placeholder="+ 快添待办（留空回车：${escapeHtml(nextTodoPlaceholder)}）"
+                            style="height:26px; font-size:11.5px; padding:2px 8px;"
+                          />
+                        </div>
+                        ${grp.items
+                          .map(
+                            (it) => `
+                            <div class="explorer-todo-row ${it.checked ? 'is-checked' : ''}">
+                              <input
+                                type="checkbox"
+                                class="explorer-todo-check"
+                                data-explorer-todo-check="1"
+                                data-file-path="${escapeHtml(it.file_path)}"
+                                data-line-no="${Number(it.line_no) || 0}"
+                                data-expected-text="${escapeHtml(it.text || '')}"
+                                ${it.checked ? 'checked' : ''}
+                              />
+                              <div
+                                class="explorer-todo-text"
+                                data-explorer-todo-jump="${escapeHtml(it.file_path)}"
+                                data-line-no="${Number(it.line_no) || 0}"
+                                title="点击跳转至 ${escapeHtml(grp.file_name)} 第 ${Number(it.line_no) || 1} 行"
+                              >
+                                ${escapeHtml(it.text || '')}
+                                ${
+                                  it.heading
+                                    ? `<span style="margin-left:6px; font-size:10.5px; color:var(--text-tertiary);">#${escapeHtml(it.heading)}</span>`
+                                    : ''
+                                }
+                              </div>
+                            </div>
+                          `
+                          )
+                          .join('')}
+                      </div>
+                    </div>
+                  `;
+                })
+                .join('')
+        }
+      </div>
+    `;
+  }
+
+  function renderExplorerHome({ refresh = false } = {}) {
+    hideFormatBar();
+    removeDropInsertLine();
+
+    const mainPane = ensureMainPaneEl();
+    const prevFilesScroll = mainPane.querySelector('.explorer-files-pane')?.scrollTop || 0;
+    const prevTodosScroll = mainPane.querySelector('[data-explorer-role="todo-list"]')?.scrollTop || 0;
+
+    const exp = state.explorer;
+    const filesData = buildExplorerFilesSectionData();
+    const { mountedDirs, allItems, allFolders } = filesData;
+
+    const currentRelSegments = exp.scope === 'notes' && exp.relDir ? exp.relDir.split('/').filter(Boolean) : [];
+    const targetFolderNames = allFolders
+      .filter((f) => (f.parent_rel || '') === (exp.scope === 'notes' ? exp.relDir : ''))
+      .map((f) => f.name);
+    const defaultNotePlaceholder = nextSequentialName(
+      '新建笔记',
+      allItems.map((f) => f.name)
+    );
+    const defaultFolderPlaceholder = nextSequentialName('新建文件夹', targetFolderNames);
+
+    const todoPaneModeClass =
+      exp.todoPaneMode === 'full'
+        ? 'is-todo-full'
+        : exp.todoPaneMode === 'collapsed'
+        ? 'is-todo-collapsed'
+        : '';
+
+    mainPane.innerHTML = `
+      <div class="explorer-home ${todoPaneModeClass}">
+        <div class="explorer-topbar">
+          <div class="explorer-topbar-row">
+            <div class="explorer-breadcrumbs" role="navigation" aria-label="工作区面包屑">
+              <button type="button" class="explorer-crumb ${exp.scope === 'all' ? 'is-active' : ''}" data-explorer-scope="all">
+                🏠 全部工作区
+              </button>
+              <button type="button" class="explorer-crumb ${exp.scope === 'notes' && !exp.relDir ? 'is-active' : ''}" data-explorer-scope="notes" data-rel-dir="">
+                📁 默认笔记主目录
+              </button>
+              ${currentRelSegments
+                .map((seg, idx) => {
+                  const pathSoFar = currentRelSegments.slice(0, idx + 1).join('/');
+                  const isLast = idx === currentRelSegments.length - 1;
+                  return `
+                    <span class="explorer-crumb-sep">/</span>
+                    <button type="button" class="explorer-crumb ${isLast ? 'is-active' : ''}" data-explorer-scope="notes" data-rel-dir="${escapeHtml(pathSoFar)}">
+                      ${escapeHtml(seg)}
+                    </button>
+                  `;
+                })
+                .join('')}
+              <button type="button" class="explorer-crumb ${exp.scope === 'imported' ? 'is-active' : ''}" data-explorer-scope="imported">
+                📎 已导入文件
+              </button>
+              ${
+                mountedDirs.length > 0
+                  ? mountedDirs
+                      .map((dirPath) => {
+                        const dName = getBaseName(dirPath) || dirPath;
+                        const isActiveMounted = exp.scope === 'mounted' && isSamePath(exp.mountedDir, dirPath);
+                        return `
+                          <button type="button" class="explorer-crumb ${isActiveMounted ? 'is-active' : ''}" data-explorer-scope="mounted" data-mounted-dir="${escapeHtml(dirPath)}" title="${escapeHtml(dirPath)}">
+                            🗂 ${escapeHtml(dName)}
+                          </button>
+                        `;
+                      })
+                      .join('')
+                  : ''
+              }
+            </div>
+
+            <div class="explorer-actions-group">
+              ${
+                state.activeDoc
+                  ? `<button type="button" class="pill-btn pill-btn-sm" data-explorer-act="back-to-doc" title="回到正在打开的文档">📄 ${escapeHtml(state.activeDoc.name)}</button>`
+                  : ''
+              }
+              <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-explorer-act="toggle-new-note">
+                ${icon('plus', 13)} 新建笔记
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="toggle-new-folder">
+                ${icon('folder-open', 13)} 新建文件夹
+              </button>
+              <div class="segmented-pill" role="group" aria-label="视图切换" style="height:26px; padding:2px;">
+                <button type="button" class="segmented-btn ${exp.viewMode === 'grid' ? 'is-active' : ''}" data-explorer-view="grid" style="height:22px; font-size:11px; padding:0 8px;">⊞ 网格</button>
+                <button type="button" class="segmented-btn ${exp.viewMode === 'list' ? 'is-active' : ''}" data-explorer-view="list" style="height:22px; font-size:11px; padding:0 8px;">☰ 列表</button>
+              </div>
+              <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="cycle-todo-pane" title="切换右栏待办展开 / 全屏 / 折叠">
+                ${exp.todoPaneMode === 'collapsed' ? '☑ 展开待办' : exp.todoPaneMode === 'full' ? '◫ 双栏视图' : '◨ 折叠待办'}
+              </button>
+            </div>
+          </div>
+
+          <div class="explorer-topbar-row">
+            <div style="position:relative; width:220px; max-width:100%; flex:0 1 240px;">
+              <input
+                type="search"
+                class="apple-input"
+                data-explorer-role="search"
+                placeholder="筛选文件名或路径…"
+                value="${escapeHtml(exp.search)}"
+                style="height:28px; padding:3px 10px; font-size:12px;"
+              />
+            </div>
+            <div class="explorer-filter-pills" role="group" aria-label="格式筛选">
+              ${EXPLORER_TYPE_FILTERS.map((f) => {
+                const active = exp.typeFilter === f.key;
+                return `
+                  <button
+                    type="button"
+                    class="explorer-type-pill ${active ? 'is-active' : ''}"
+                    data-explorer-type="${f.key}"
+                    style="color:${f.color}; background:${active ? f.bg : 'var(--bg-subtle)'}; ${active ? `border-color:${f.color};` : ''}"
+                  >${f.label}</button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
+          ${
+            exp.inlineCreateMode === 'note' || exp.inlineCreateMode === 'folder'
+              ? `
+                <div class="explorer-quick-inline">
+                  <span style="font-size:12px; font-weight:600; color:var(--text-primary);">
+                    ${exp.inlineCreateMode === 'note' ? '📝 新建笔记：' : '📁 新建文件夹：'}
+                  </span>
+                  <input
+                    type="text"
+                    class="apple-input"
+                    data-explorer-inline-input="1"
+                    placeholder="${escapeHtml(exp.inlineCreateMode === 'note' ? `留空回车直接创建「${defaultNotePlaceholder}」` : `留空回车直接创建「${defaultFolderPlaceholder}」`)}"
+                    style="flex:1 1 220px; height:28px; font-size:12.5px;"
+                    autocomplete="off"
+                  />
+                  <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-explorer-act="confirm-inline-create">确认创建</button>
+                  <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="cancel-inline-create">取消</button>
+                </div>
+              `
+              : ''
+          }
+        </div>
+
+        <div class="explorer-body">
+          <div class="explorer-files-pane" data-explorer-role="files-pane">
+            ${renderExplorerFilesPaneInnerHtml(filesData)}
+          </div>
+          <aside class="explorer-todo-pane" data-explorer-role="todo-pane">
+            ${renderExplorerTodoPaneHtml()}
+          </aside>
+        </div>
+      </div>
     `;
     ensureDropOverlay();
+
+    const homeEl = mainPane.querySelector('.explorer-home');
+    const filesPane = mainPane.querySelector('.explorer-files-pane');
+    const todoListEl = mainPane.querySelector('[data-explorer-role="todo-list"]');
+    if (filesPane) filesPane.scrollTop = prevFilesScroll;
+    if (todoListEl) todoListEl.scrollTop = prevTodosScroll;
+
+    if (exp.inlineCreateMode) {
+      window.requestAnimationFrame(() => mainPane.querySelector('[data-explorer-inline-input]')?.focus());
+    }
+
+    if (homeEl) {
+      bindExplorerHomeEvents(homeEl);
+    }
+
+    if (refresh) {
+      const now = Date.now();
+      if (now - exp.lastRefreshAt > 800) {
+        exp.lastRefreshAt = now;
+        Promise.allSettled([
+          store.refreshAllTodos?.(),
+          store.refreshFilesList?.(),
+        ]);
+      }
+    }
+  }
+
+  function bindExplorerHomeEvents(homeEl) {
+    const submitInlineCreate = async () => {
+      const inp = homeEl.querySelector('[data-explorer-inline-input]');
+      const mode = state.explorer.inlineCreateMode;
+      const rawVal = String(inp?.value || '').trim();
+      const targetRelDir = state.explorer.scope === 'notes' ? state.explorer.relDir || '' : '';
+
+      if (mode === 'note') {
+        const defaultName = nextSequentialName(
+          '新建笔记',
+          getWorkspaceFilesList().map((f) => f.name)
+        );
+        const title = rawVal || defaultName;
+        if (inp) inp.disabled = true;
+        try {
+          const created = await api.post('/api/files/create-note', {
+            title,
+            content: '',
+            folder_rel: targetRelDir,
+          });
+          state.explorer.inlineCreateMode = '';
+          await store.refreshFilesList?.().catch(() => {});
+          if (created?.path) {
+            await openFile(created.path, { mode: 'live' });
+            appendNewBlockAndFocus();
+          }
+          showToast(`已创建笔记：${created?.name || title}`, 'success');
+        } catch (err) {
+          if (inp) inp.disabled = false;
+          showToast(getErrorMsg(err, '创建笔记失败'), 'error');
+        }
+      } else if (mode === 'folder') {
+        if (inp) inp.disabled = true;
+        try {
+          const res = await store.createFolder?.(targetRelDir, rawVal);
+          state.explorer.inlineCreateMode = '';
+          renderExplorerHome({ refresh: false });
+          showToast(`已创建文件夹：${res?.name || rawVal || '新建文件夹'}`, 'success');
+        } catch (err) {
+          if (inp) inp.disabled = false;
+          showToast(getErrorMsg(err, '创建文件夹失败'), 'error');
+        }
+      }
+    };
+
+    const searchInput = homeEl.querySelector('[data-explorer-role="search"]');
+    searchInput?.addEventListener('input', () => {
+      state.explorer.search = searchInput.value || '';
+      const fp = homeEl.querySelector('[data-explorer-role="files-pane"]');
+      if (fp) {
+        fp.innerHTML = renderExplorerFilesPaneInnerHtml(buildExplorerFilesSectionData());
+      }
+    });
+
+    homeEl.addEventListener('keydown', async (e) => {
+      if (e.target.matches('[data-explorer-inline-input]')) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          await submitInlineCreate();
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          state.explorer.inlineCreateMode = '';
+          renderExplorerHome({ refresh: false });
+        }
+        return;
+      }
+
+      if (e.target.matches('[data-explorer-todo-add]')) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const inputEl = e.target;
+        const filePath = inputEl.dataset.explorerTodoAdd;
+        if (!filePath || inputEl.disabled) return;
+        const todoText = String(inputEl.value || '').trim();
+        inputEl.disabled = true;
+        try {
+          const res = await store.addWorkspaceTodo?.(filePath, todoText);
+          if (typeof res?.content === 'string' && state.activeDoc && isSamePath(state.activeDoc.path, filePath) && !state.dirty) {
+            state.activeDoc.content = res.content;
+            store.state.activeDocumentText = res.content;
+          }
+          showToast(`已添加待办：${res?.text || todoText || '新建待办'}`, 'success');
+          renderExplorerHome({ refresh: false });
+        } catch (err) {
+          inputEl.disabled = false;
+          showToast(getErrorMsg(err, '添加待办失败'), 'error');
+        }
+      }
+    });
+
+    homeEl.addEventListener('change', async (e) => {
+      const cb = e.target.closest('[data-explorer-todo-check]');
+      if (!cb) return;
+      const filePath = cb.dataset.filePath;
+      const lineNo = Number.parseInt(cb.dataset.lineNo, 10);
+      const expectedText = cb.dataset.expectedText || '';
+      const checked = Boolean(cb.checked);
+      if (!filePath || !Number.isFinite(lineNo)) return;
+      cb.disabled = true;
+      try {
+        await store.toggleWorkspaceTodo?.({
+          file_path: filePath,
+          line_no: lineNo,
+          checked,
+          expected_text: expectedText,
+        });
+      } catch (err) {
+        cb.checked = !checked;
+        cb.disabled = false;
+        showToast(getErrorMsg(err, '同步待办状态失败'), 'error');
+      }
+    });
+
+    homeEl.addEventListener('click', async (e) => {
+      const scopeBtn = e.target.closest('[data-explorer-scope]');
+      if (scopeBtn) {
+        state.explorer.scope = scopeBtn.dataset.explorerScope || 'all';
+        state.explorer.relDir = scopeBtn.dataset.relDir || '';
+        state.explorer.mountedDir = scopeBtn.dataset.mountedDir || '';
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const typeBtn = e.target.closest('[data-explorer-type]');
+      if (typeBtn) {
+        state.explorer.typeFilter = typeBtn.dataset.explorerType || 'all';
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const viewBtn = e.target.closest('[data-explorer-view]');
+      if (viewBtn) {
+        state.explorer.viewMode = viewBtn.dataset.explorerView === 'list' ? 'list' : 'grid';
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const todoFilterBtn = e.target.closest('[data-explorer-todo-filter]');
+      if (todoFilterBtn) {
+        state.explorer.todoFilter = todoFilterBtn.dataset.explorerTodoFilter || 'open';
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const collapseBtn = e.target.closest('[data-explorer-todo-collapse]');
+      if (collapseBtn) {
+        const key = normalizePath(collapseBtn.dataset.explorerTodoCollapse);
+        if (state.explorer.collapsedTodoFiles.has(key)) {
+          state.explorer.collapsedTodoFiles.delete(key);
+        } else {
+          state.explorer.collapsedTodoFiles.add(key);
+        }
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const openNoteBtn = e.target.closest('[data-explorer-open-note]');
+      if (openNoteBtn) {
+        const p = openNoteBtn.dataset.explorerOpenNote;
+        if (p) openFile(p, { mode: 'live' });
+        return;
+      }
+
+      const jumpTodoEl = e.target.closest('[data-explorer-todo-jump]');
+      if (jumpTodoEl) {
+        const p = jumpTodoEl.dataset.explorerTodoJump;
+        const line = Number.parseInt(jumpTodoEl.dataset.lineNo, 10);
+        if (p) openFile(p, Number.isFinite(line) ? { mode: 'live', line } : { mode: 'live' });
+        return;
+      }
+
+      const pinBtn = e.target.closest('[data-explorer-pin]');
+      if (pinBtn) {
+        e.stopPropagation();
+        const p = pinBtn.dataset.explorerPin;
+        if (p && typeof togglePinFile === 'function') {
+          togglePinFile(p);
+          renderExplorerHome({ refresh: false });
+        }
+        return;
+      }
+
+      const actBtn = e.target.closest('[data-explorer-act]');
+      if (actBtn) {
+        const act = actBtn.dataset.explorerAct;
+        if (act === 'back-to-doc') {
+          if (typeof setCenterView === 'function') setCenterView('doc');
+          return;
+        }
+        if (act === 'toggle-new-note') {
+          state.explorer.inlineCreateMode = state.explorer.inlineCreateMode === 'note' ? '' : 'note';
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'toggle-new-folder') {
+          state.explorer.inlineCreateMode = state.explorer.inlineCreateMode === 'folder' ? '' : 'folder';
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'confirm-inline-create') {
+          await submitInlineCreate();
+          return;
+        }
+        if (act === 'cancel-inline-create') {
+          state.explorer.inlineCreateMode = '';
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'cycle-todo-pane') {
+          const cur = state.explorer.todoPaneMode;
+          state.explorer.todoPaneMode = cur === 'side' ? 'collapsed' : 'side';
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'toggle-todo-full') {
+          state.explorer.todoPaneMode = state.explorer.todoPaneMode === 'full' ? 'side' : 'full';
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'refresh-todos') {
+          await store.refreshAllTodos?.().catch(() => {});
+          showToast('已刷新全库待办', 'success');
+          return;
+        }
+        if (act === 'quick-add-first-todo') {
+          const firstInput = homeEl.querySelector('[data-explorer-todo-add]');
+          if (firstInput) {
+            firstInput.focus();
+            firstInput.scrollIntoView({ block: 'nearest' });
+          } else {
+            const firstMd = getWorkspaceFilesList().find((f) => String(f.ext || '').toLowerCase() === '.md');
+            if (firstMd) {
+              const res = await store.addWorkspaceTodo?.(firstMd.path, '');
+              if (typeof res?.content === 'string' && state.activeDoc && isSamePath(state.activeDoc.path, firstMd.path) && !state.dirty) {
+                state.activeDoc.content = res.content;
+                store.state.activeDocumentText = res.content;
+              }
+              showToast(`已向「${firstMd.name}」添加待办：${res?.text || '新建待办'}`, 'success');
+            }
+          }
+          return;
+        }
+      }
+
+      const folderCard = e.target.closest('[data-explorer-folder]');
+      if (folderCard) {
+        state.explorer.scope = 'notes';
+        state.explorer.relDir = folderCard.dataset.explorerFolder || '';
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const fileCard = e.target.closest('[data-explorer-file]');
+      if (fileCard) {
+        const p = fileCard.dataset.explorerFile;
+        if (!p) return;
+        const item = getWorkspaceFilesList().find((f) => isSamePath(f.path, p)) || { path: p, name: getBaseName(p), ext: getExtLower(p) };
+        if (e.ctrlKey || e.metaKey) {
+          openSplitDoc({ path: item.path, name: item.name, ext: item.ext });
+          if (state.activeDoc && typeof setCenterView === 'function') {
+            setCenterView('doc');
+          } else if (!state.activeDoc) {
+            openFile(item.path);
+          }
+        } else {
+          openFile(item.path);
+        }
+      }
+    });
+
+    homeEl.addEventListener('contextmenu', (e) => {
+      const folderCard = e.target.closest('[data-explorer-folder]');
+      if (folderCard) {
+        const relDir = folderCard.dataset.explorerFolder || '';
+        const folderPath = folderCard.dataset.folderPath || '';
+        const folder =
+          getWorkspaceFoldersList().find((f) => f.rel_dir === relDir || isSamePath(f.path, folderPath)) || {
+            rel_dir: relDir,
+            path: folderPath,
+            name: getBaseName(folderPath || relDir),
+          };
+        showExplorerItemContextMenu(e, 'folder', folder);
+        return;
+      }
+
+      const fileCard = e.target.closest('[data-explorer-file]');
+      if (fileCard) {
+        const p = fileCard.dataset.explorerFile;
+        const item = getWorkspaceFilesList().find((f) => isSamePath(f.path, p)) || {
+          path: p,
+          name: getBaseName(p),
+          ext: getExtLower(p),
+        };
+        showExplorerItemContextMenu(e, 'file', item);
+      }
+    });
+
+    homeEl.addEventListener('dragstart', (e) => {
+      const fileCard = e.target.closest('[data-explorer-file]');
+      if (fileCard) {
+        const p = fileCard.dataset.explorerFile;
+        const item = getWorkspaceFilesList().find((f) => isSamePath(f.path, p)) || {
+          path: p,
+          name: getBaseName(p),
+          ext: getExtLower(p),
+        };
+        setDragPayload(e, {
+          type: 'file',
+          kind: 'file',
+          path: item.path,
+          name: item.name,
+          ext: item.ext,
+          label: item.name,
+        });
+        return;
+      }
+
+      const folderCard = e.target.closest('[data-explorer-folder]');
+      if (folderCard) {
+        const folderPath = folderCard.dataset.folderPath || '';
+        const relDir = folderCard.dataset.explorerFolder || '';
+        const name = getBaseName(folderPath || relDir);
+        setDragPayload(e, {
+          type: 'folder',
+          kind: 'folder',
+          path: folderPath,
+          name,
+          label: name,
+        });
+      }
+    });
+
+    homeEl.addEventListener('dragend', () => {
+      clearDragPayload();
+      store.endGlobalDrag?.();
+    });
+  }
+
+  function renderWelcome() {
+    renderExplorerHome({ refresh: false });
   }
 
   function renderLoading(label = '正在加载本地文档…') {
@@ -4564,6 +6021,9 @@ export function initCenterView(containerEl) {
       !opts.forceReload &&
       !opts.skipUnsavedGuard
     ) {
+      if (store.state.activeCenterView === 'explorer' && typeof setCenterView === 'function') {
+        setCenterView('doc');
+      }
       const t = state.activeDoc.type;
       if (t === 'markdown' || t === 'text') {
         const hasEditingBlock =
@@ -4627,6 +6087,9 @@ export function initCenterView(containerEl) {
     const seq = ++state.openSeq;
     state.loading = true;
     renderLoading(`正在打开 ${getBaseName(targetPath)}…`);
+    if (store.state.activeCenterView !== 'doc' && typeof setCenterView === 'function') {
+      setCenterView('doc');
+    }
 
     try {
       const data = await api.get(`/api/files/read?path=${encodeURIComponent(targetPath)}`);
@@ -4984,13 +6447,22 @@ export function initCenterView(containerEl) {
   }
 
   function openNewNoteSheet() {
+    const defaultTitle = nextSequentialName(
+      '新建笔记',
+      getWorkspaceFilesList().map((f) => f.name)
+    );
+    const defaultFolderRel =
+      store.state.activeCenterView === 'explorer' && state.explorer.scope === 'notes'
+        ? state.explorer.relDir || ''
+        : '';
+
     openSheet({
       title: '新建本地 Markdown 笔记',
       bodyHtml: `
         <form id="center-new-note-form" style="display:flex; flex-direction:column; gap:10px;">
           <div>
-            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">笔记标题</label>
-            <input type="text" class="apple-input" id="center-new-note-title" placeholder="例如：线性代数特征值复盘" />
+            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">笔记标题（留空回车将自动命名为「${escapeHtml(defaultTitle)}」）</label>
+            <input type="text" class="apple-input" id="center-new-note-title" placeholder="${escapeHtml(defaultTitle)}" autocomplete="off" />
           </div>
           <div>
             <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">初始正文（可选）</label>
@@ -5006,11 +6478,15 @@ export function initCenterView(containerEl) {
         card.querySelector('#center-new-note-cancel')?.addEventListener('click', closeSheet);
         const submitBtn = card.querySelector('#center-new-note-create');
         const doCreate = async () => {
-          const title = card.querySelector('#center-new-note-title')?.value?.trim() || '未命名笔记';
+          const title = card.querySelector('#center-new-note-title')?.value?.trim() || defaultTitle;
           const content = card.querySelector('#center-new-note-body')?.value || '';
           if (submitBtn) submitBtn.disabled = true;
           try {
-            const created = await api.post('/api/files/create-note', { title, content });
+            const created = await api.post('/api/files/create-note', {
+              title,
+              content,
+              folder_rel: defaultFolderRel,
+            });
             closeSheet();
             try {
               const filesData = await api.get('/api/files/list');
@@ -5148,6 +6624,134 @@ export function initCenterView(containerEl) {
   // =========================================================================
   // EventBus Subscriptions (STRICT decoupling)
   // =========================================================================
+  function refreshExplorerUiIfVisible() {
+    if (state.loading) return;
+    const isExplorerMode = store.state.activeCenterView === 'explorer' || !state.activeDoc;
+    if (!isExplorerMode) return;
+    const mainPane = ensureMainPaneEl();
+    const homeEl = mainPane.querySelector('.explorer-home');
+    if (!homeEl) {
+      renderExplorerHome({ refresh: false });
+      return;
+    }
+    const activeEl = document.activeElement;
+    if (activeEl && homeEl.contains(activeEl) && activeEl.matches('input')) {
+      const filesPane = homeEl.querySelector('[data-explorer-role="files-pane"]');
+      const todoPane = homeEl.querySelector('[data-explorer-role="todo-pane"]');
+      if (activeEl.matches('[data-explorer-todo-add]')) {
+        if (filesPane) filesPane.innerHTML = renderExplorerFilesPaneInnerHtml(buildExplorerFilesSectionData());
+      } else {
+        if (filesPane && !activeEl.matches('[data-explorer-inline-input]')) {
+          filesPane.innerHTML = renderExplorerFilesPaneInnerHtml(buildExplorerFilesSectionData());
+        }
+        if (todoPane) {
+          const prevScroll = todoPane.querySelector('[data-explorer-role="todo-list"]')?.scrollTop || 0;
+          todoPane.innerHTML = renderExplorerTodoPaneHtml();
+          const newList = todoPane.querySelector('[data-explorer-role="todo-list"]');
+          if (newList) newList.scrollTop = prevScroll;
+        }
+      }
+      return;
+    }
+    renderExplorerHome({ refresh: false });
+  }
+
+  store.on('center-view:change', (view) => {
+    const next = (view === 'explorer' || store.state.activeCenterView === 'explorer') ? 'explorer' : 'doc';
+    if (next === 'explorer') {
+      commitActiveBlock({ reRender: false });
+      renderExplorerHome({ refresh: true });
+      return;
+    }
+    if (state.loading) return;
+    if (state.activeDoc) {
+      renderActiveView();
+    } else {
+      renderExplorerHome({ refresh: false });
+    }
+  });
+
+  store.on('todos:updated', () => {
+    refreshExplorerUiIfVisible();
+  });
+
+  store.on('todos:toggled', ({ file_path, content } = {}) => {
+    if (typeof content !== 'string' || !file_path) return;
+    if (state.activeDoc && isSamePath(state.activeDoc.path, file_path) && !state.dirty) {
+      state.activeDoc.content = content;
+      store.state.activeDocumentText = content;
+      if (
+        store.state.activeCenterView !== 'explorer' &&
+        (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text')
+      ) {
+        renderMarkdownMode();
+      }
+    }
+  });
+
+  store.on('ai:polish-request', async (payload = {}) => {
+    const targetPath = String(payload?.filePath || payload?.file_path || '').trim();
+    if (targetPath && (!state.activeDoc || !isSamePath(state.activeDoc.path, targetPath))) {
+      await openFile(targetPath, { mode: 'live' });
+    }
+    triggerAiPolish();
+  });
+
+  store.on('trash:restore-virtual', async (res = {}) => {
+    const kind = String(res?.kind || res?.item?.kind || '');
+    if (kind !== 'lp-block') return;
+    const item = res?.item || res;
+    const payload = item?.payload || {};
+    const md = String(payload.markdown ?? payload.text ?? item?.title ?? '').trim();
+    if (!md) return;
+    const targetPath = String(payload.docPath || payload.sourceDocPath || item?.source_path || '').trim();
+
+    if (
+      state.activeDoc &&
+      (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text') &&
+      (!targetPath || isSamePath(state.activeDoc.path, targetPath))
+    ) {
+      commitActiveBlock({ reRender: false });
+      pushUndoSnapshot(state.activeDoc.content, { immediate: true });
+      const nextContent = insertMarkdownWithPadding(state.activeDoc.content || '', getMdLines().length, md);
+      state.activeDoc.content = nextContent;
+      state.dirty = true;
+      state.editingBlockIdx = null;
+      state.editingBlockRange = null;
+      state.editingDraftInsert = null;
+      store.state.activeDocumentText = nextContent;
+      if (store.state.activeCenterView !== 'explorer') {
+        renderMarkdownMode();
+      }
+      showToast('已从内置回收站还原段落到当前笔记', 'success');
+      return;
+    }
+
+    if (targetPath) {
+      try {
+        await openFile(targetPath, { mode: 'live' });
+        if (
+          state.activeDoc &&
+          (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text') &&
+          isSamePath(state.activeDoc.path, targetPath)
+        ) {
+          pushUndoSnapshot(state.activeDoc.content, { immediate: true });
+          const nextContent = insertMarkdownWithPadding(state.activeDoc.content || '', getMdLines().length, md);
+          state.activeDoc.content = nextContent;
+          state.dirty = true;
+          store.state.activeDocumentText = nextContent;
+          renderMarkdownMode();
+          showToast(`已打开「${state.activeDoc.name}」并还原段落`, 'success');
+          return;
+        }
+      } catch {
+        // fall through to clipboard fallback
+      }
+    }
+    copyInternal(md);
+    showToast('当前未打开原笔记，已将还原段落复制到剪贴板', 'info');
+  });
+
   store.on('files:updated', (filesData) => {
     const items = filesData?.items || store.state.files?.items || [];
     if (state.activeDoc) {
@@ -5157,9 +6761,19 @@ export function initCenterView(containerEl) {
         if (nextPriv !== state.activeDoc.isPrivate) {
           state.activeDoc.isPrivate = nextPriv;
           syncActiveFileStore();
-          renderActiveView();
+          if (store.state.activeCenterView !== 'explorer') {
+            renderActiveView();
+          }
         }
       }
+      if (store.state.activeCenterView === 'explorer') {
+        refreshExplorerUiIfVisible();
+      }
+      return;
+    }
+
+    if (store.state.activeCenterView === 'explorer') {
+      refreshExplorerUiIfVisible();
       return;
     }
 
@@ -6588,7 +8202,7 @@ export function initCenterView(containerEl) {
       sess.blockEl.classList.remove('is-hold-arming', 'is-dragging-source');
     }
     if (sess.ghostEl) sess.ghostEl.remove();
-    document.querySelectorAll('#island-shelf-drawer.is-drag-over, #drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
+    document.querySelectorAll('#island-shelf-drawer.is-drag-over, #drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over, #portable-trash-dock.is-drag-over, [data-drop-zone="trash"].is-drag-over, [data-drop-zone="portable-trash"].is-drag-over').forEach((el) => {
       el.classList.remove('is-drag-over');
     });
     removeDropInsertLine();
@@ -6599,6 +8213,7 @@ export function initCenterView(containerEl) {
     window.removeEventListener('keydown', sess.onKeyDown);
     if (sess.active) {
       clearDragPayload();
+      store.endGlobalDrag?.();
       store.emit('drag:active', false);
     }
   }
@@ -7006,14 +8621,23 @@ export function initCenterView(containerEl) {
         sess.ghostEl.style.transform = `translate3d(${Math.round(ev.clientX + 14)}px, ${Math.round(ev.clientY + 14)}px, 0)`;
       }
 
-      document.querySelectorAll('#island-shelf-drawer.is-drag-over, #drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over').forEach((el) => {
+      document.querySelectorAll('#island-shelf-drawer.is-drag-over, #drag-shelf.is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #right-panel.is-drag-over, [data-drop-zone="right-ai"].is-drag-over, #portable-trash-dock.is-drag-over, [data-drop-zone="trash"].is-drag-over, [data-drop-zone="portable-trash"].is-drag-over').forEach((el) => {
         el.classList.remove('is-drag-over');
       });
 
-      const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
+      const hitEls = typeof document.elementsFromPoint === 'function'
+        ? document.elementsFromPoint(ev.clientX, ev.clientY)
+        : [];
+      const hitEl = hitEls[0] || document.elementFromPoint(ev.clientX, ev.clientY);
+      const trashEl = hitEls
+        .map((el) => el?.closest?.('#portable-trash-dock, [data-drop-zone="trash"], [data-drop-zone="portable-trash"]'))
+        .find(Boolean) || hitEl?.closest('#portable-trash-dock, [data-drop-zone="trash"], [data-drop-zone="portable-trash"]');
       const shelfEl = hitEl?.closest('#island-shelf-drawer, #drag-shelf, [data-drop-zone="drag-shelf"], #dynamic-island');
       const rightEl = hitEl?.closest('#right-panel, [data-drop-zone="right-ai"]');
-      if (shelfEl) {
+      if (trashEl) {
+        trashEl.classList.add('is-drag-over');
+        removeDropInsertLine();
+      } else if (shelfEl) {
         shelfEl.classList.add('is-drag-over');
         removeDropInsertLine();
       } else if (rightEl) {
@@ -7033,13 +8657,38 @@ export function initCenterView(containerEl) {
         return;
       }
       const savedLineIdx = dropTargetLineIdx;
-      const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
+      const hitEls = typeof document.elementsFromPoint === 'function'
+        ? document.elementsFromPoint(ev.clientX, ev.clientY)
+        : [];
+      const hitEl = hitEls[0] || document.elementFromPoint(ev.clientX, ev.clientY);
+      const trashDropEl = hitEls
+        .map((el) => el?.closest?.('#portable-trash-dock, [data-drop-zone="trash"], [data-drop-zone="portable-trash"]'))
+        .find(Boolean) || hitEl?.closest('#portable-trash-dock, [data-drop-zone="trash"], [data-drop-zone="portable-trash"]');
       const payload = sess.payload;
       const isCopyDrag = isCopyDragEvent(ev);
       cancelActiveHoldSession();
       window.setTimeout(() => {
         suppressNextBlockClick = false;
       }, 120);
+
+      if (trashDropEl) {
+        cutBlockRangeFromDoc(startLine, endLine);
+        Promise.resolve(
+          store.trashVirtualItem?.({
+            kind: 'lp-block',
+            title: firstLinePreview,
+            payload: {
+              markdown: raw,
+              docPath: payload.sourceDocPath,
+              startLine,
+              endLine,
+            },
+            source_path: payload.sourceDocPath,
+          })
+        ).catch(() => {});
+        showToast('已将段落移入内置回收站', 'success');
+        return;
+      }
 
       if (hitEl?.closest('#island-shelf-drawer, #drag-shelf, [data-drop-zone="drag-shelf"], #dynamic-island')) {
         if (typeof addToShelf === 'function') {
@@ -7120,6 +8769,16 @@ export function initCenterView(containerEl) {
       blockEl.classList.remove('is-hold-arming');
       blockEl.classList.add('is-dragging-source');
       store.state.activeDragPayload = sess.payload;
+      store.beginGlobalDrag?.({
+        type: 'lp-block',
+        kind: 'lp-block',
+        title: firstLinePreview,
+        label: firstLinePreview,
+        markdown: raw,
+        sourceDocPath: state.activeDoc.path,
+        startLine,
+        endLine,
+      });
 
       const ghost = document.createElement('div');
       ghost.className = 'lp-drag-ghost';
@@ -7432,6 +9091,80 @@ export function initCenterView(containerEl) {
     return false;
   }
 
+  function openEditorUrlCapsuleSheet(ctxInfo) {
+    openSheet({
+      title: '插入网址直达胶囊',
+      bodyHtml: `
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <label style="font-size:12.5px;color:var(--text-secondary);">输入网页地址（自动探测页面标题并生成 [[url:标题|链接]] 胶囊）</label>
+          <input id="ctx-url-input" class="apple-input" type="url" placeholder="https://example.com/article" autocomplete="off" />
+          <label style="font-size:12.5px;color:var(--text-secondary);">自定义显示标题（可选，留空自动获取）</label>
+          <input id="ctx-url-title" class="apple-input" type="text" placeholder="留空则自动抓取网页标题…" autocomplete="off" />
+        </div>
+      `,
+      footerHtml: `
+        <button type="button" class="pill-btn" id="ctx-url-cancel">取消</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="ctx-url-submit">${icon('globe', 14)} 获取并插入</button>
+      `,
+      onMount(card) {
+        const urlInp = card.querySelector('#ctx-url-input');
+        const titleInp = card.querySelector('#ctx-url-title');
+        const submitBtn = card.querySelector('#ctx-url-submit');
+        card.querySelector('#ctx-url-cancel')?.addEventListener('click', closeSheet);
+
+        const handleSubmit = async () => {
+          let rawUrl = String(urlInp?.value || '').trim();
+          if (!rawUrl) {
+            showToast('请输入网址', 'warning');
+            urlInp?.focus();
+            return;
+          }
+          if (!/^https?:\/\//i.test(rawUrl)) {
+            rawUrl = `https://${rawUrl}`;
+          }
+          const customTitle = String(titleInp?.value || '').trim();
+          if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = '正在读取标题…';
+          }
+          let finalTitle = customTitle;
+          let finalUrl = rawUrl;
+          if (!finalTitle) {
+            try {
+              const res = await api.post('/api/tools/fetch-url-title', { url: rawUrl });
+              if (res?.title) finalTitle = String(res.title).trim();
+              if (res?.url) finalUrl = String(res.url).trim();
+            } catch {
+              try {
+                finalTitle = new URL(rawUrl).hostname.replace(/^www\./i, '');
+              } catch {
+                finalTitle = rawUrl;
+              }
+            }
+          }
+          const safeTitle = (finalTitle || finalUrl).replace(/[|\[\]\r\n]/g, ' ').trim();
+          const block = `[[url:${safeTitle}|${finalUrl}]]`;
+          closeSheet();
+          const insertLine = Number.isFinite(ctxInfo?.endLine) ? ctxInfo.endLine + 1 : undefined;
+          insertDroppedMarkdown(
+            { markdown: block, label: '网址胶囊', dragMode: 'copy' },
+            Number.isFinite(insertLine) ? { lineIdx: insertLine } : {}
+          );
+          showToast('已生成网址直达胶囊', 'success');
+        };
+
+        submitBtn?.addEventListener('click', handleSubmit);
+        urlInp?.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            handleSubmit();
+          }
+        });
+        window.requestAnimationFrame(() => urlInp?.focus());
+      },
+    });
+  }
+
   async function handleEditorContextMenuAction(act, ctxInfo) {
     hideCapsuleContextMenu();
     const doc = state.activeDoc;
@@ -7443,6 +9176,36 @@ export function initCenterView(containerEl) {
     }
     if (act === 'set-drag-copy') {
       setDragDefaultMode('copy');
+      return;
+    }
+
+    if (act === 'editor-spawn-sticky') {
+      store.emit('stickies:spawn-at', { x: ctxInfo?.clientX, y: ctxInfo?.clientY });
+      return;
+    }
+    if (act === 'editor-insert-url') {
+      openEditorUrlCapsuleSheet(ctxInfo);
+      return;
+    }
+    if (act === 'editor-ai-summarize') {
+      store.emit('ai:summarize-request', {
+        filePath: doc.path,
+        file_path: doc.path,
+        text: doc.content || '',
+        autoRun: true,
+      });
+      return;
+    }
+    if (act === 'editor-ai-polish') {
+      store.emit('ai:polish-request', { filePath: doc.path });
+      return;
+    }
+    if (act === 'editor-toggle-mindmap') {
+      store.emit('center:toggle-mindmap', { toggle: true, path: doc.path });
+      return;
+    }
+    if (act === 'editor-semantic-search') {
+      store.emit('spotlight:open', { mode: 'semantic' });
       return;
     }
 
@@ -7587,7 +9350,7 @@ export function initCenterView(containerEl) {
       const isEditableDoc = Boolean(
         state.activeDoc && (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text')
       );
-      const inEditorArea = e.target.closest('.lp-container, .lp-block, .lp-block-wysiwyg, .md-editor:not([data-role])');
+      const inEditorArea = e.target.closest('.lp-container, .lp-block, .lp-block-wysiwyg, .md-scroll-area, .md-editor:not([data-role])');
       if (!isEditableDoc || !inEditorArea) return;
 
       e.preventDefault();
@@ -7615,7 +9378,20 @@ export function initCenterView(containerEl) {
           ? getMdLines().slice(startLine, Math.max(startLine, endLine) + 1).join('\n')
           : '';
 
-      const ctxInfo = { selectedText, savedRange, taEl, taSelStart, taSelEnd, blockEl, blockIdx, startLine, endLine, blockRaw };
+      const ctxInfo = {
+        selectedText,
+        savedRange,
+        taEl,
+        taSelStart,
+        taSelEnd,
+        blockEl,
+        blockIdx,
+        startLine,
+        endLine,
+        blockRaw,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      };
       const isCopyMode = state.dragDefaultMode === 'copy';
       const menu = ensureCapsuleMenuEl();
       menu.innerHTML = `
@@ -7659,13 +9435,37 @@ export function initCenterView(containerEl) {
         ${
           Number.isFinite(startLine)
             ? `
-              <div class="context-menu-sep" role="separator"></div>
               <button type="button" class="context-menu-item" data-ed-ctx="editor-delete-block" role="menuitem" style="color:var(--danger);">
                 <span class="ctx-item-left"><span>🗑</span><span>删除当前段落</span></span>
               </button>
             `
             : ''
         }
+        <div class="context-menu-sep" role="separator"></div>
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-spawn-sticky" role="menuitem">
+          <span class="ctx-item-left"><span>📌</span><span>在此处召唤闪念卡 (Alt+N)</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-insert-url" role="menuitem">
+          <span class="ctx-item-left"><span>🔗</span><span>插入网址直达胶囊</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-ai-summarize" role="menuitem">
+          <span class="ctx-item-left"><span>✨</span><span>AI 总结当前文档</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-ai-polish" role="menuitem">
+          <span class="ctx-item-left"><span>🪄</span><span>AI 润色当前笔记</span></span>
+        </button>
+        ${
+          state.activeDoc?.type === 'markdown'
+            ? `
+              <button type="button" class="context-menu-item" data-ed-ctx="editor-toggle-mindmap" role="menuitem">
+                <span class="ctx-item-left"><span>🧠</span><span>切换脑图视图</span></span>
+              </button>
+            `
+            : ''
+        }
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-semantic-search" role="menuitem">
+          <span class="ctx-item-left"><span>🔍</span><span>语义描述检索 (Ctrl+K)</span></span>
+        </button>
       `;
 
       menu.querySelectorAll('[data-ed-ctx]').forEach((btn) => {
@@ -9303,6 +11103,13 @@ export function initCenterView(containerEl) {
       } else if (action === 'nav-forward') {
         navigateHistory(1);
         return;
+      } else if (action === 'open-explorer-home') {
+        if (typeof setCenterView === 'function') {
+          setCenterView('explorer');
+        } else {
+          renderExplorerHome({ refresh: true });
+        }
+        return;
       } else if (action === 'lp-add-block') {
         appendNewBlockAndFocus();
         return;
@@ -10033,9 +11840,13 @@ export function initCenterView(containerEl) {
   containerEl.addEventListener('scroll', schedulePersistLastSession, true);
   window.addEventListener('beforeunload', persistLastSessionNow);
 
-  // Initial render (restore last session file+scroll or open first .md)
+  // Initial render (restore last session file+scroll or open Explorer Home)
   if (store.state.splitDoc) {
     renderSplitPane(store.state.splitDoc);
+  }
+  if (store.state.activeCenterView === 'explorer') {
+    renderExplorerHome({ refresh: true });
+    return;
   }
   const initialItems = store.state.files?.items || [];
   if (initialItems.length > 0) {

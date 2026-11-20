@@ -10,10 +10,10 @@
   <title>SmartLocalNote</title>
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23007AFF'/%3E%3Crect x='15' y='13' width='34' height='38' rx='6' fill='%23FFFFFF'/%3E%3Cpath d='M22 24h20M22 32h20M22 40h12' stroke='%23007AFF' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/css/tokens.css?v=6.0">
-  <link rel="stylesheet" href="/static/css/app.css?v=6.0">
-  <script src="/static/vendor/marked.min.js?v=6.0" defer></script>
-  <script type="module" src="/static/js/app.js?v=6.0"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css?v=7.2">
+  <link rel="stylesheet" href="/static/css/app.css?v=7.2">
+  <script src="/static/vendor/marked.min.js?v=7.2" defer></script>
+  <script type="module" src="/static/js/app.js?v=7.2"></script>
   <script>
     window.addEventListener('DOMContentLoaded', function () {
       setTimeout(function () {
@@ -54,6 +54,13 @@
           <span class="brand-dot" aria-hidden="true"></span>
           <span class="brand-title">SmartLocalNote</span>
         </div>
+        <button id="btn-center-home" class="pill-btn pill-btn-ghost pill-btn-sm center-home-btn" type="button" title="切换文件资源管理器与全局待办主面板" aria-label="主面板" aria-pressed="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+          <span>主面板</span>
+        </button>
       </div>
 
       <!-- 居中多态灵动岛 -->
@@ -61,6 +68,11 @@
         <div class="island-idle-view">
           <span class="island-status-dot" aria-hidden="true"></span>
           <span class="island-label">本地工作台就绪</span>
+        </div>
+        <div class="island-hub-badges" aria-hidden="true">
+          <span class="island-hub-badge" data-island-badge="shelf" title="暂存舱">📥 0</span>
+          <span class="island-hub-badge" data-island-badge="stickies" title="闪念便签">📌 0</span>
+          <span class="island-hub-badge" data-island-badge="trash" title="回收站">🗑 0</span>
         </div>
       </div>
 
@@ -109,8 +121,38 @@
       </div>
     </header>
 
-    <!-- 灵动岛下拉暂存抽屉 (NotchDrop) -->
-    <div id="island-shelf-drawer" class="island-shelf-drawer" data-drop-zone="drag-shelf" aria-label="灵动岛暂存栏" hidden></div>
+    <!-- 灵动岛下拉中枢抽屉 (NotchDrop · 暂存舱 / 闪念控制 / 回收站) -->
+    <div id="island-shelf-drawer" class="island-shelf-drawer" data-drop-zone="drag-shelf" data-island-tab="shelf" aria-label="灵动岛中枢抽屉" hidden>
+      <div class="island-shelf-drop-banner" hidden>📥 松手暂存到灵动岛（默认剪切 · 按住 Ctrl 复制）</div>
+      <nav class="island-drawer-tabs" role="tablist" aria-label="灵动岛功能切换">
+        <button type="button" class="island-drawer-tab is-active" data-island-tab="shelf" role="tab" aria-selected="true">📥 暂存舱</button>
+        <button type="button" class="island-drawer-tab" data-island-tab="stickies" role="tab" aria-selected="false">📌 闪念控制</button>
+        <button type="button" class="island-drawer-tab" data-island-tab="trash" role="tab" aria-selected="false">🗑 回收站</button>
+      </nav>
+      <section class="island-drawer-pane is-active" data-island-pane="shelf" role="tabpanel">
+        <header class="island-shelf-header">
+          <div class="island-shelf-title-wrap">
+            <span>📥 灵动岛暂存栏</span>
+            <span class="island-shelf-count">0</span>
+          </div>
+          <div class="island-shelf-header-actions">
+            <button type="button" class="pill-btn pill-btn-sm island-shelf-pin-btn" data-shelf-action="toggle-pin" title="固定展开（切换文件时不自动收起）" aria-pressed="false">固定</button>
+            <button type="button" class="pill-btn pill-btn-sm island-shelf-close-btn" data-shelf-action="collapse" title="收起暂存栏" aria-label="收起暂存栏">收起 ×</button>
+          </div>
+        </header>
+        <div class="island-shelf-list" role="list"></div>
+        <footer class="island-shelf-footer">
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-shelf-action="insert-all">⬇ 全部拼入当前笔记</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-shelf-action="clear-all">清空</button>
+        </footer>
+      </section>
+      <section class="island-drawer-pane" data-island-pane="stickies" role="tabpanel" hidden>
+        <div id="island-stickies-panel" class="island-stickies-panel"></div>
+      </section>
+      <section class="island-drawer-pane" data-island-pane="trash" role="tabpanel" hidden>
+        <div id="island-trash-panel" class="island-trash-panel"></div>
+      </section>
+    </div>
 
     <!-- 三栏悬浮岛屿主体 -->
     <div id="main-grid" class="main-grid">
@@ -221,8 +263,26 @@
   <!-- 右下角 Sonner 风格堆叠 Toast 容器 -->
   <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 
-  <!-- 便签最小化停靠与快捷排列胶囊 -->
-  <div id="sticky-dock-pill" class="sticky-dock-pill" hidden></div>
+  <!-- 底部居中悬浮便携垃圾桶（全局拖拽时平滑弹起） -->
+  <div id="portable-trash-dock" class="portable-trash-dock" data-drop-zone="portable-trash" data-trash-mode="system" role="region" aria-label="便携回收站拖放区" hidden>
+    <div class="portable-trash-inner">
+      <span class="portable-trash-icon" aria-hidden="true">🗑</span>
+      <div class="portable-trash-text">
+        <span class="portable-trash-title">拖到此处移入回收站</span>
+        <span class="portable-trash-mode-badge" data-trash-role="mode-label">系统回收站模式</span>
+      </div>
+      <div class="portable-trash-actions">
+        <button type="button" class="pill-btn pill-btn-sm" data-trash-dock-action="toggle-mode" title="切换系统回收站 / 内置回收站">切换模式</button>
+        <button type="button" class="pill-btn pill-btn-sm" data-trash-dock-action="open-trash" title="打开回收站抽屉">查看</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- C1 共享模块浮窗宿主层 -->
+  <div id="floating-modules-layer" class="floating-modules-layer" aria-label="浮动模块窗口层"></div>
+
+  <!-- #9 轻量专注时长选择气泡 -->
+  <div id="focus-duration-popover" class="focus-duration-popover" role="dialog" aria-label="选择专注时长" hidden></div>
 
   <!-- 全局右键上下文菜单 -->
   <div id="context-menu" class="context-menu" role="menu" aria-hidden="true" hidden></div>

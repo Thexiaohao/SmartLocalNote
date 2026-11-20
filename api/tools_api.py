@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field
 
 from api import ok
-from core import app_launcher, scheduler, tree_store
+from core import app_launcher, scheduler, trash_manager, tree_store
 
 router = APIRouter(prefix="/api", tags=["tools"])
 
@@ -26,14 +26,14 @@ class LaunchBody(BaseModel):
 
 
 class CreateWorkspaceBody(BaseModel):
-    name: str
+    name: str = ""
     app_ids: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
     captured_apps: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CreateTreeNodeBody(BaseModel):
-    name: str
+    name: str = ""
     parent_id: str | None = None
 
 
@@ -56,6 +56,23 @@ class CreateReminderBody(BaseModel):
 
 class FetchUrlTitleBody(BaseModel):
     url: str
+
+
+class TrashVirtualItemBody(BaseModel):
+    kind: str
+    title: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    source_path: str = ""
+
+
+class TrashIdBody(BaseModel):
+    trash_id: str = ""
+    id: str = ""
+
+
+class TrashSettingsBody(BaseModel):
+    mode: str | None = None
+    auto_purge_days: int | None = None
 
 
 @router.get("/apps")
@@ -157,3 +174,28 @@ def delete_reminder(reminder_id: str) -> dict:
 @router.post("/tools/fetch-url-title")
 async def fetch_url_title(body: FetchUrlTitleBody) -> dict:
     return ok(await app_launcher.fetch_url_title(body.url))
+
+
+@router.get("/trash")
+def list_trash() -> dict:
+    return ok(trash_manager.list_trash())
+
+
+@router.post("/trash/item")
+def trash_virtual_item(body: TrashVirtualItemBody) -> dict:
+    return ok(trash_manager.trash_virtual_item(body.kind, body.title, body.payload, body.source_path))
+
+
+@router.post("/trash/restore")
+def restore_trash_item(body: TrashIdBody) -> dict:
+    return ok(trash_manager.restore_item(body.trash_id or body.id))
+
+
+@router.post("/trash/empty")
+def empty_trash(body: TrashIdBody = Body(default_factory=TrashIdBody)) -> dict:
+    return ok(trash_manager.empty_trash(body.trash_id or body.id))
+
+
+@router.put("/trash/settings")
+def update_trash_settings(body: TrashSettingsBody) -> dict:
+    return ok(trash_manager.update_settings(mode=body.mode, auto_purge_days=body.auto_purge_days))

@@ -116,6 +116,55 @@ def _scan_dir_shallow(root: Path, max_depth: int = 3) -> list[Path]:
     return found
 
 
+def _next_sequential_name(prefix: str, existing_names: list[str]) -> str:
+    """Return `<prefix><max+1>` starting at 1 by matching `^<prefix>(\\d+)$`."""
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_num = 0
+    for raw in existing_names:
+        cleaned = str(raw or "").strip()
+        m = pattern.fullmatch(cleaned)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return f"{prefix}{max_num + 1}"
+
+
+def _scan_folders_shallow(root: Path, max_depth: int = 3) -> list[dict[str, str]]:
+    """Scan all subdirectories (including empty ones) under `root` up to `max_depth`."""
+    folders: list[dict[str, str]] = []
+    if not root.exists() or not root.is_dir():
+        return folders
+
+    root_resolved = root.resolve()
+    for dirpath, dirnames, _filenames in os.walk(root_resolved):
+        cur = Path(dirpath)
+        try:
+            rel_parts = cur.relative_to(root_resolved).parts
+        except ValueError:
+            continue
+        depth = len(rel_parts)
+
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not d.startswith(".") and depth < max_depth
+        )
+        for dname in dirnames:
+            dpath = (cur / dname).resolve()
+            try:
+                rel_dir = dpath.relative_to(root_resolved).as_posix()
+            except ValueError:
+                continue
+            parent_rel = cur.relative_to(root_resolved).as_posix() if depth > 0 else ""
+            folders.append({
+                "name": dname,
+                "rel_dir": rel_dir,
+                "path": str(dpath),
+                "parent_rel": parent_rel,
+            })
+
+    folders.sort(key=lambda f: f["rel_dir"].lower())
+    return folders
+
+
 def list_workspace_files() -> dict[str, Any]:
     """List mounted files/directories and default notes without opening file contents."""
     idx = safe_io.load_files_index()
@@ -130,7 +179,14 @@ def list_workspace_files() -> dict[str, Any]:
         except OSError:
             continue
 
-    def _add_file(path: Path, source: str, group: str, *, allow_any_ext: bool = False) -> None:
+    def _add_file(
+        path: Path,
+        source: str,
+        group: str,
+        *,
+        base_root: Path | None = None,
+        allow_any_ext: bool = False,
+    ) -> None:
         try:
             resolved = path.resolve()
             if not resolved.exists() or not resolved.is_file():
@@ -141,6 +197,13 @@ def list_workspace_files() -> dict[str, Any]:
             key = str(resolved)
             if key in seen:
                 return
+            rel_dir = ""
+            if base_root is not None:
+                try:
+                    rel_parent = resolved.parent.relative_to(base_root.resolve())
+                    rel_dir = "" if rel_parent == Path(".") else rel_parent.as_posix()
+                except ValueError:
+                    rel_dir = ""
             st = resolved.stat()
             seen[key] = {
                 "path": key,
@@ -151,13 +214,14 @@ def list_workspace_files() -> dict[str, Any]:
                 "is_private": key in private_set,
                 "source": source,
                 "group": group,
+                "rel_dir": rel_dir,
             }
         except OSError:
             return
 
     # 1. Default notes directory
     for fpath in _scan_dir_shallow(notes_dir, max_depth=3):
-        _add_file(fpath, source="notes", group=notes_dir.name)
+        _add_file(fpath, source="notes", group=notes_dir.name, base_root=notes_dir)
 
     # 2. Mounted directories from files.json and whitelist_dirs
     dir_candidates: list[str] = list(idx.get("dirs", []))
@@ -179,7 +243,7 @@ def list_workspace_files() -> dict[str, Any]:
         if ds not in valid_dirs:
             valid_dirs.append(ds)
         for fpath in _scan_dir_shallow(dpath, max_depth=3):
-            _add_file(fpath, source="mounted_dir", group=dpath.name)
+            _add_file(fpath, source="mounted_dir", group=dpath.name, base_root=dpath)
 
     # 3. Explicitly imported individual files (allow ANY extension)
     for raw_file in idx.get("files", []):
@@ -196,11 +260,13 @@ def list_workspace_files() -> dict[str, Any]:
         key=lambda item: (item["source"] != "notes", item["group"].lower(), item["name"].lower()),
     )
     private_files = [item["path"] for item in items if item["is_private"]]
+    folders = _scan_folders_shallow(notes_dir, max_depth=3)
 
     return {
         "items": items,
         "dirs": valid_dirs,
         "private_files": private_files,
+        "folders": folders,
     }
 
 
@@ -214,14 +280,46 @@ def _sanitize_note_filename(title: str) -> str:
     return cleaned
 
 
-def create_note(title: str, content: str = "", node_id: str | None = None) -> dict[str, Any]:
-    """Create a new `.md` note in default notes directory via `safe_io` and optionally bind to knowledge tree."""
-    notes_dir = get_default_notes_dir()
-    stem = _sanitize_note_filename(title)
-    candidate = notes_dir / f"{stem}.md"
+def _resolve_notes_subdir(notes_dir: Path, folder_rel: str) -> tuple[Path, str]:
+    clean_rel = str(folder_rel or "").replace("\\", "/").strip().strip("/")
+    if not clean_rel:
+        return notes_dir, ""
+    if "\x00" in clean_rel or ".." in Path(clean_rel).parts:
+        raise PermissionError("安全拦截：目录路径包含非法字符")
+    target_dir = (notes_dir / clean_rel).resolve()
+    try:
+        rel_out = target_dir.relative_to(notes_dir.resolve()).as_posix()
+    except ValueError as exc:
+        raise PermissionError("安全拦截：禁止越出默认笔记目录") from exc
+    safe_io.resolve_safe_path(str(target_dir))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir, rel_out
+
+
+def create_note(
+    title: str = "",
+    content: str = "",
+    node_id: str | None = None,
+    folder_rel: str = "",
+) -> dict[str, Any]:
+    """Create a new `.md` note in default notes directory (or `folder_rel`) via `safe_io`."""
+    notes_dir = get_default_notes_dir().resolve()
+    target_dir, norm_rel = _resolve_notes_subdir(notes_dir, folder_rel)
+
+    raw_title = str(title or "").strip()
+    if not raw_title:
+        existing_stems = [
+            p.stem for p in target_dir.iterdir()
+            if p.is_file() and p.suffix.lower() == ".md"
+        ] if target_dir.exists() else []
+        stem = _next_sequential_name("新建笔记", existing_stems)
+    else:
+        stem = _sanitize_note_filename(raw_title)
+
+    candidate = target_dir / f"{stem}.md"
     counter = 2
     while candidate.exists():
-        candidate = notes_dir / f"{stem}_{counter}.md"
+        candidate = target_dir / f"{stem}_{counter}.md"
         counter += 1
 
     body = content if content else f"# {stem}\n\n"
@@ -240,7 +338,61 @@ def create_note(title: str, content: str = "", node_id: str | None = None) -> di
         "path": str(resolved),
         "name": resolved.name,
         "ext": ".md",
+        "rel_dir": norm_rel,
         "node_id": node_id,
+    }
+
+
+def create_folder(parent_dir: str = "", name: str = "") -> dict[str, Any]:
+    """Create a subfolder inside `default_notes_dir` or an authorized `parent_dir`."""
+    notes_dir = get_default_notes_dir().resolve()
+    raw_parent = str(parent_dir or "").strip()
+
+    if not raw_parent:
+        base_dir = notes_dir
+    else:
+        if "\x00" in raw_parent:
+            raise PermissionError("非法路径字符")
+        p_obj = Path(raw_parent)
+        if p_obj.is_absolute():
+            base_dir = safe_io.resolve_safe_path(raw_parent)
+        else:
+            base_dir, _ = _resolve_notes_subdir(notes_dir, raw_parent)
+
+    if base_dir.exists() and not base_dir.is_dir():
+        raise ValueError("父路径不是文件夹")
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        existing_dirs = [p.name for p in base_dir.iterdir() if p.is_dir()]
+        folder_name = _next_sequential_name("新建文件夹", existing_dirs)
+    else:
+        if "/" in raw_name or "\\" in raw_name or ".." in raw_name or "\x00" in raw_name or raw_name in (".", ".."):
+            raise ValueError("文件夹名称包含非法路径字符")
+        folder_name = _INVALID_FILENAME_RE.sub("_", raw_name).strip(" .")
+        if not folder_name:
+            raise ValueError("文件夹名称不能为空")
+
+    target = (base_dir / folder_name).resolve()
+    if target.parent != base_dir.resolve():
+        raise PermissionError("安全拦截：禁止跨目录创建文件夹")
+    safe_io.resolve_safe_path(str(target))
+
+    if target.exists() and target.is_file():
+        raise ValueError(f"同名文件已存在：{target.name}")
+    target.mkdir(parents=True, exist_ok=True)
+
+    try:
+        rel_dir = target.relative_to(notes_dir).as_posix()
+    except ValueError:
+        rel_dir = target.name
+
+    return {
+        "ok": True,
+        "path": str(target),
+        "rel_dir": rel_dir,
+        "name": target.name,
     }
 
 
@@ -970,6 +1122,33 @@ def remove_from_workspace(path_str: str) -> dict[str, Any]:
         "deleted_from_disk": False,
         "message": "已从工作台列表移除，硬盘原文件未受影响",
     }
+
+
+def delete_file_to_trash(path: str, mode: str = "") -> dict[str, Any]:
+    """Move an authorized workspace file/folder to the system or built-in recycle bin and prune files.json."""
+    target = safe_io.resolve_safe_path(path, must_exist=True)
+    protected_roots = {
+        DATA_DIR.resolve(),
+        get_default_notes_dir().resolve(),
+        (DATA_DIR / "trash").resolve(),
+    }
+    if target in protected_roots:
+        raise PermissionError("安全拦截：禁止删除系统核心根目录")
+
+    from core import trash_manager
+
+    res = trash_manager.trash_file(str(target), mode=mode or None)
+
+    target_s = str(target)
+    idx = safe_io.load_files_index()
+    orig_files = idx.get("files", [])
+    orig_dirs = idx.get("dirs", [])
+    new_files = [f for f in orig_files if f != target_s and _norm_path_for_compare(f) != target_s]
+    new_dirs = [d for d in orig_dirs if d != target_s and _norm_path_for_compare(d) != target_s]
+    if len(new_files) != len(orig_files) or len(new_dirs) != len(orig_dirs):
+        safe_io.save_files_index({"files": new_files, "dirs": new_dirs})
+
+    return res
 
 
 def write_text_document(path_str: str, content: str) -> dict[str, Any]:

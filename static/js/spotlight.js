@@ -520,24 +520,128 @@ function toggleZenModeSafe(force) {
   return next;
 }
 
-function renderIslandShelfTrigger() {
-  const shelfCount = Array.isArray(store.state.shelfItems) ? store.state.shelfItems.length : 0;
-  const drawerOpen = Boolean(document.getElementById('island-shelf-drawer')?.classList.contains('is-open'));
+function ensureV72IslandFallbackStyles() {
+  if (typeof document === 'undefined' || document.getElementById('sln-v72-island-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'sln-v72-island-styles';
+  style.textContent = `
+    .dynamic-island { max-width: min(740px, 84vw); }
+    .dynamic-island .island-idle-view { cursor: pointer; }
+    .island-hub-actions { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; margin-left: 4px; }
+    .island-hub-stickies-group { display: inline-flex; align-items: center; gap: 2px; }
+    .island-hub-btn {
+      display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
+      border-radius: 9999px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.14);
+      color: #F5F5F7; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+      transition: transform 0.16s ease, opacity 0.16s ease, background-color 0.16s ease;
+    }
+    .island-hub-btn:hover { background: rgba(255,255,255,0.22); }
+    .island-hub-btn:active { transform: scale(0.95); }
+    .island-hub-btn.is-open, .island-hub-btn.is-active { background: #0A84FF; border-color: rgba(10,132,255,0.7); color: #FFFFFF; }
+    .island-hub-badge {
+      min-width: 16px; height: 16px; padding: 0 4px; border-radius: 9999px;
+      background: rgba(255,255,255,0.16); color: #FFFFFF; font-size: 10px; font-weight: 700;
+      display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums;
+    }
+    .island-hub-btn.has-items .island-hub-badge { background: rgba(10,132,255,0.88); }
+    .island-hub-btn.is-open .island-hub-badge { background: rgba(255,255,255,0.26); }
+    .island-hub-quick-btn {
+      width: 20px; height: 20px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.14); color: #F5F5F7;
+      font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer;
+      transition: transform 0.16s ease, opacity 0.16s ease, background-color 0.16s ease;
+    }
+    .island-hub-quick-btn:hover { background: #0A84FF; border-color: rgba(10,132,255,0.7); color: #FFFFFF; }
+    .island-hub-quick-btn:active { transform: scale(0.92); }
+  `;
+  if (document.head.firstChild) {
+    document.head.insertBefore(style, document.head.firstChild);
+  } else {
+    document.head.appendChild(style);
+  }
+}
+
+function getStickiesCount() {
+  if (Number.isFinite(Number(store.state.stickiesCount))) {
+    return Math.max(0, Number(store.state.stickiesCount));
+  }
+  try {
+    const raw = localStorage.getItem('sln_stickies');
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function getShelfCount() {
+  return Array.isArray(store.state.shelfItems) ? store.state.shelfItems.length : 0;
+}
+
+function getTrashCount() {
+  const statsCount = Number(store.state.trash?.stats?.count);
+  if (Number.isFinite(statsCount) && statsCount >= 0) return statsCount;
+  return Array.isArray(store.state.trash?.items) ? store.state.trash.items.length : 0;
+}
+
+function renderIslandHubActions() {
+  const stickiesCount = getStickiesCount();
+  const shelfCount = getShelfCount();
+  const trashCount = getTrashCount();
+  const drawerEl = document.getElementById('island-shelf-drawer');
+  const drawerOpen = Boolean(drawerEl?.classList.contains('is-open'));
+  const activeTab = drawerEl?.dataset?.islandTab || 'shelf';
+
+  const isStickiesOpen = drawerOpen && activeTab === 'stickies';
+  const isShelfOpen = drawerOpen && activeTab === 'shelf';
+  const isTrashOpen = drawerOpen && activeTab === 'trash';
+
   return `
-    <button type="button" class="island-shelf-trigger ${shelfCount > 0 ? 'has-items' : ''} ${drawerOpen ? 'is-open' : ''}" data-island-action="toggle-shelf" title="灵动岛暂存栏（拖拽任意内容至此暂存）" aria-expanded="${drawerOpen ? 'true' : 'false'}">
-      ${icon('inbox', 13)}${shelfCount > 0 ? `<span class="island-shelf-count">${shelfCount}</span>` : ''}
-    </button>
+    <div class="island-hub-actions" role="group" aria-label="灵动岛中枢控制">
+      <div class="island-hub-stickies-group">
+        <button type="button"
+          class="island-hub-btn ${stickiesCount > 0 ? 'has-items' : ''} ${isStickiesOpen ? 'is-open is-active' : ''}"
+          data-island-trigger="stickies"
+          title="闪念控制中心（共 ${stickiesCount} 张）"
+          aria-expanded="${isStickiesOpen ? 'true' : 'false'}">
+          <span class="island-hub-icon" aria-hidden="true">📌</span>
+          <span class="island-hub-badge" data-island-badge="stickies">${stickiesCount}</span>
+        </button>
+        <button type="button"
+          class="island-hub-quick-btn"
+          data-island-quick="new-sticky"
+          title="一键新建闪念卡 (Alt+N)"
+          aria-label="一键新建闪念卡">+</button>
+      </div>
+      <button type="button"
+        class="island-hub-btn island-shelf-trigger ${shelfCount > 0 ? 'has-items' : ''} ${isShelfOpen ? 'is-open is-active' : ''}"
+        data-island-trigger="shelf"
+        data-island-action="toggle-shelf"
+        title="灵动岛暂存舱（共 ${shelfCount} 项，拖拽任意内容至此暂存）"
+        aria-expanded="${isShelfOpen ? 'true' : 'false'}">
+        <span class="island-hub-icon" aria-hidden="true">📥</span>
+        <span class="island-hub-badge island-shelf-count" data-island-badge="shelf">${shelfCount}</span>
+      </button>
+      <button type="button"
+        class="island-hub-btn ${trashCount > 0 ? 'has-items' : ''} ${isTrashOpen ? 'is-open is-active' : ''}"
+        data-island-trigger="trash"
+        title="回收站（内置 ${trashCount} 项）"
+        aria-expanded="${isTrashOpen ? 'true' : 'false'}">
+        <span class="island-hub-icon" aria-hidden="true">🗑</span>
+        <span class="island-hub-badge" data-island-badge="trash">${trashCount}</span>
+      </button>
+    </div>
   `;
 }
 
-function refreshIslandShelfTriggerOnly(islandEl) {
-  const trigger = islandEl?.querySelector('.island-shelf-trigger');
-  if (!trigger) return false;
+function refreshIslandHubActionsOnly(islandEl) {
+  const hubEl = islandEl?.querySelector('.island-hub-actions');
+  if (!hubEl) return false;
   const tpl = document.createElement('template');
-  tpl.innerHTML = renderIslandShelfTrigger().trim();
-  const nextTrigger = tpl.content.firstElementChild;
-  if (nextTrigger) {
-    trigger.replaceWith(nextTrigger);
+  tpl.innerHTML = renderIslandHubActions().trim();
+  const nextHub = tpl.content.firstElementChild;
+  if (nextHub) {
+    hubEl.replaceWith(nextHub);
     return true;
   }
   return false;
@@ -568,7 +672,7 @@ function renderDynamicIsland(islandEl, islandState) {
         <button type="button" class="island-pill-btn" data-island-action="sniff-note">📝 存为笔记</button>
         <button type="button" class="island-pill-btn" data-island-action="dismiss" aria-label="关闭">✕</button>
       </div>
-      ${renderIslandShelfTrigger()}
+      ${renderIslandHubActions()}
     `;
     scheduleSniffAutoHide(sniffRemainingMs || 4000);
     return;
@@ -604,7 +708,7 @@ function renderDynamicIsland(islandEl, islandState) {
           <button type="button" class="island-pill-btn is-primary" data-island-action="focus-finish">✓ 结束</button>
         </div>
       </div>
-      ${renderIslandShelfTrigger()}
+      ${renderIslandHubActions()}
     `;
     return;
   }
@@ -634,7 +738,7 @@ function renderDynamicIsland(islandEl, islandState) {
         <button type="button" class="island-pill-btn is-primary" data-island-action="focus-done-submit">✓ 写入</button>
         <button type="button" class="island-pill-btn" data-island-action="dismiss">跳过</button>
       </div>
-      ${renderIslandShelfTrigger()}
+      ${renderIslandHubActions()}
     `;
 
     window.requestAnimationFrame(() => {
@@ -659,7 +763,7 @@ function renderDynamicIsland(islandEl, islandState) {
         <button type="button" class="island-pill-btn is-primary" data-island-action="alert-focus">▶ 专注</button>
         <button type="button" class="island-pill-btn" data-island-action="dismiss" aria-label="关闭">✕</button>
       </div>
-      ${renderIslandShelfTrigger()}
+      ${renderIslandHubActions()}
     `;
     return;
   }
@@ -676,20 +780,20 @@ function renderDynamicIsland(islandEl, islandState) {
 
     if (bgTask.status === 'running') {
       islandEl.innerHTML = `
-        <div class="island-idle-view">
+        <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
           <div class="island-bg-ai-pill is-running">
             <span class="ai-spin-icon" aria-hidden="true">${icon('sparkles', 13)}</span>
             <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
           </div>
         </div>
-        ${renderIslandShelfTrigger()}
+        ${renderIslandHubActions()}
       `;
       return;
     }
 
     if (bgTask.status === 'done') {
       islandEl.innerHTML = `
-        <div class="island-idle-view">
+        <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
           <div class="island-bg-ai-pill is-done">
             <span aria-hidden="true">${icon('sparkles', 13)}</span>
             <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
@@ -697,31 +801,31 @@ function renderDynamicIsland(islandEl, islandState) {
             <button type="button" class="island-pill-btn" data-island-action="dismiss-bg-ai" aria-label="关闭">×</button>
           </div>
         </div>
-        ${renderIslandShelfTrigger()}
+        ${renderIslandHubActions()}
       `;
       return;
     }
 
     islandEl.innerHTML = `
-      <div class="island-idle-view">
+      <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
         <div class="island-bg-ai-pill is-error">
           <span aria-hidden="true">${icon('sparkles', 13)}</span>
           <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
           <button type="button" class="island-pill-btn" data-island-action="dismiss-bg-ai" aria-label="关闭">×</button>
         </div>
       </div>
-      ${renderIslandShelfTrigger()}
+      ${renderIslandHubActions()}
     `;
     return;
   }
 
   const activeName = store.state.activeFile?.name || '本地工作台就绪';
   islandEl.innerHTML = `
-    <div class="island-idle-view">
+    <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
       <span class="island-status-dot" aria-hidden="true"></span>
       <span class="island-label">${escapeHtml(activeName)}</span>
     </div>
-    ${renderIslandShelfTrigger()}
+    ${renderIslandHubActions()}
   `;
 }
 
@@ -877,14 +981,20 @@ async function openSceneCaptureSheet() {
       : `<div class="glass-card" style="color:var(--text-secondary);font-size:12.5px;">未检测到外部桌面窗口，仍可直接保存当前打开文档为场景工作区。</div>`;
 
   const currentFile = store.state.activeFile;
+  const existingNames = (store.state.workspaces || []).map((w) => w?.name || '');
+  const defaultSceneName = typeof store.nextSequentialName === 'function'
+    ? store.nextSequentialName('新建场景', existingNames)
+    : (typeof storeMod.nextSequentialName === 'function'
+      ? storeMod.nextSequentialName('新建场景', existingNames)
+      : '新建场景1');
 
   openSheet({
     title: '捕获当前桌面现场',
     bodyHtml: `
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div>
-          <label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">场景名称</label>
-          <input id="scene-capture-name" class="apple-input" type="text" value="${escapeHtml(currentFile ? `${currentFile.name} 现场` : '我的学习现场')}" />
+          <label for="scene-capture-name" style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">场景名称（留空自动命名为 ${escapeHtml(defaultSceneName)}）</label>
+          <input id="scene-capture-name" class="apple-input" type="text" value="${escapeHtml(defaultSceneName)}" placeholder="留空自动使用 ${escapeHtml(defaultSceneName)}" autocomplete="off" />
         </div>
         <div style="font-size:12px;font-weight:600;color:var(--text-secondary);">桌面运行窗口 (${windowsList.length})</div>
         <div style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;">
@@ -905,9 +1015,12 @@ async function openSceneCaptureSheet() {
       <button type="button" class="pill-btn pill-btn-primary" id="scene-save-btn">固化工作区</button>
     `,
     onMount(card) {
+      const nameInput = card.querySelector('#scene-capture-name');
+      const saveBtn = card.querySelector('#scene-save-btn');
       card.querySelector('#scene-cancel-btn')?.addEventListener('click', closeSheet);
-      card.querySelector('#scene-save-btn')?.addEventListener('click', async () => {
-        const name = card.querySelector('#scene-capture-name')?.value?.trim() || '桌面工作区';
+
+      const submitCapture = async () => {
+        const name = nameInput?.value?.trim() || defaultSceneName;
         const capturedApps = [];
         card.querySelectorAll('.scene-win-check:checked').forEach((chk) => {
           const item = windowsList[Number(chk.dataset.idx)];
@@ -916,6 +1029,7 @@ async function openSceneCaptureSheet() {
         const bindFile = card.querySelector('#scene-bind-active-file')?.checked && currentFile?.path;
         const filePaths = bindFile ? [currentFile.path] : [];
 
+        if (saveBtn) saveBtn.disabled = true;
         try {
           await api.post('/api/workspaces', {
             name,
@@ -928,7 +1042,21 @@ async function openSceneCaptureSheet() {
           showToast(`已捕获并保存场景「${name}」`, 'success');
         } catch (err) {
           showToast(`保存现场失败：${err?.message || '未知错误'}`, 'error');
+        } finally {
+          if (saveBtn) saveBtn.disabled = false;
         }
+      };
+
+      saveBtn?.addEventListener('click', submitCapture);
+      nameInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitCapture();
+        }
+      });
+      window.requestAnimationFrame(() => {
+        nameInput?.focus();
+        nameInput?.select?.();
       });
     },
   });
@@ -2359,9 +2487,17 @@ export function initSpotlight() {
   if (initialized) return;
   initialized = true;
 
+  ensureV72IslandFallbackStyles();
+
   const islandEl = document.getElementById('dynamic-island');
   if (islandEl) {
     renderDynamicIsland(islandEl, store.state.island);
+
+    const refreshBadges = () => {
+      if (!refreshIslandHubActionsOnly(islandEl)) {
+        renderDynamicIsland(islandEl, store.state.island);
+      }
+    };
 
     store.on('island:update', (nextState) => {
       renderDynamicIsland(islandEl, nextState);
@@ -2373,13 +2509,20 @@ export function initSpotlight() {
       }
     });
 
-    store.on('shelf:changed', () => {
-      if (store.state.island?.mode === 'focus-done' && document.activeElement?.id === 'island-done-input') {
-        refreshIslandShelfTriggerOnly(islandEl);
-        return;
+    store.on('shelf:changed', refreshBadges);
+    store.on('shelf:updated', refreshBadges);
+    store.on('trash:updated', refreshBadges);
+    store.on('stickies:count-change', (payload) => {
+      const nextCount = typeof payload === 'number'
+        ? payload
+        : Number(payload?.count ?? getStickiesCount());
+      if (Number.isFinite(nextCount)) {
+        store.state.stickiesCount = Math.max(0, nextCount);
       }
-      renderDynamicIsland(islandEl, store.state.island);
+      refreshBadges();
     });
+    store.on('island:tab-change', refreshBadges);
+    store.on('island:drawer-state', refreshBadges);
 
     store.on('ai:bg-task', () => {
       if (store.state.island?.mode === 'focus-done' && document.activeElement?.id === 'island-done-input') {
@@ -2407,6 +2550,34 @@ export function initSpotlight() {
     });
 
     islandEl.addEventListener('click', (e) => {
+      const quickBtn = e.target.closest('[data-island-quick]');
+      if (quickBtn) {
+        e.stopPropagation();
+        if (quickBtn.dataset.islandQuick === 'new-sticky') {
+          store.emit('sticky:spawn', {});
+        }
+        return;
+      }
+
+      const triggerBtn = e.target.closest('[data-island-trigger]');
+      if (triggerBtn) {
+        e.stopPropagation();
+        const tab = triggerBtn.dataset.islandTrigger;
+        const drawerEl = document.getElementById('island-shelf-drawer');
+        const isOpen = Boolean(drawerEl?.classList.contains('is-open'));
+        const curTab = drawerEl?.dataset?.islandTab || 'shelf';
+        if (isOpen && curTab === tab) {
+          store.emit('island:close-drawer');
+        } else {
+          store.emit('island:switch-tab', tab);
+        }
+        return;
+      }
+
+      if (e.target.closest('.island-hub-actions')) {
+        return;
+      }
+
       const actionBtn = e.target.closest('[data-island-action]');
       if (!actionBtn) {
         if (store.state.island?.mode === 'idle') {

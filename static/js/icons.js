@@ -77,7 +77,18 @@ const ICONS = {
   'clipboard-paste': '<path d="M15 2H9a1 1 0 0 0-1 1v2c0 .6.4 1 1 1h6c.6 0 1-.4 1-1V3c0-.6-.4-1-1-1Z"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2M16 4h2a2 2 0 0 1 2 2v2M11 14h10"/><path d="m17 10 4 4-4 4"/>',
   'columns-2': '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/>',
   'maximize-2': '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/>',
+  'minimize-2': '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/>',
   bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
+  home: '<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+  'folder-plus': '<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  'check-square': '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/>',
+  'corner-up-left': '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
+  'layout-grid': '<rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>',
+  sliders: '<line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/>',
+  'file-image': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="10" cy="12" r="2"/><path d="m20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22"/>',
+  'file-archive': '<path d="M10 12v-1"/><path d="M10 18v-2"/><path d="M10 7V6"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M15.5 22H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v16a2 2 0 0 0 .274 1.01"/><circle cx="10" cy="20" r="2"/>',
+  'file-audio': '<path d="M17.5 22h.5a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 19a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0v-4a6 6 0 0 1 12 0v4a2 2 0 1 1-4 0v-1a2 2 0 1 1 4 0"/>',
+  presentation: '<path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/>',
 };
 
 function escapeAttr(val) {
@@ -100,4 +111,160 @@ export function icon(name, size = 16, extraClass = '') {
   const cls = extraClass ? `sln-icon ${escapeAttr(extraClass)}` : 'sln-icon';
   const body = ICONS[name] || '<circle cx="12" cy="12" r="6"/>';
   return `<svg class="${cls}" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
+
+const CODE_EXTS = new Set([
+  '.py', '.js', '.ts', '.json', '.html', '.css', '.txt', '.yml', '.yaml', '.xml', '.sql', '.sh',
+]);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp']);
+const ARCHIVE_EXTS = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.tgz']);
+const MEDIA_EXTS = new Set(['.mp3', '.wav', '.flac', '.mp4', '.webm', '.mkv', '.mov']);
+
+function extractExt(nameOrExt) {
+  const raw = String(nameOrExt || '').trim();
+  if (!raw) return '';
+  const base = raw.split(/[\\/]/).pop() || raw;
+  if (base.startsWith('.') && !base.slice(1).includes('.')) {
+    return base.toLowerCase();
+  }
+  const dotIdx = base.lastIndexOf('.');
+  if (dotIdx >= 0 && dotIdx < base.length - 1) {
+    return `.${base.slice(dotIdx + 1).toLowerCase()}`;
+  }
+  if (/^[a-z0-9]{1,10}$/i.test(base) && !raw.includes('/') && !raw.includes('\\')) {
+    return `.${base.toLowerCase()}`;
+  }
+  return '';
+}
+
+/**
+ * Return unified semantic color, badge label, icon name, and CSS class for a file or folder.
+ * @param {string} nameOrExt
+ * @param {boolean} [isFolder=false]
+ * @returns {{ key: string, label: string, iconName: string, color: string, bg: string, border: string, cssClass: string }}
+ */
+export function getFileTypeStyle(nameOrExt, isFolder = false) {
+  if (isFolder) {
+    return {
+      key: 'folder',
+      label: 'DIR',
+      iconName: 'folder',
+      color: '#D97706',
+      bg: 'rgba(217,119,6,0.12)',
+      border: 'rgba(217,119,6,0.28)',
+      cssClass: 'ft-folder',
+    };
+  }
+
+  const ext = extractExt(nameOrExt);
+
+  if (ext === '.md' || ext === '.markdown') {
+    return {
+      key: 'md',
+      label: 'MD',
+      iconName: 'file-code',
+      color: '#4F46E5',
+      bg: 'rgba(79,70,229,0.12)',
+      border: 'rgba(79,70,229,0.28)',
+      cssClass: 'ft-md',
+    };
+  }
+  if (ext === '.pdf') {
+    return {
+      key: 'pdf',
+      label: 'PDF',
+      iconName: 'book-open',
+      color: '#DC2626',
+      bg: 'rgba(220,38,38,0.12)',
+      border: 'rgba(220,38,38,0.28)',
+      cssClass: 'ft-pdf',
+    };
+  }
+  if (ext === '.docx' || ext === '.doc') {
+    return {
+      key: 'word',
+      label: 'DOC',
+      iconName: 'file-text',
+      color: '#2563EB',
+      bg: 'rgba(37,99,235,0.12)',
+      border: 'rgba(37,99,235,0.28)',
+      cssClass: 'ft-word',
+    };
+  }
+  if (ext === '.xlsx' || ext === '.xls' || ext === '.xlsm' || ext === '.csv') {
+    return {
+      key: 'excel',
+      label: ext === '.csv' ? 'CSV' : 'XLS',
+      iconName: 'file-spreadsheet',
+      color: '#16A34A',
+      bg: 'rgba(22,163,74,0.12)',
+      border: 'rgba(22,163,74,0.28)',
+      cssClass: 'ft-excel',
+    };
+  }
+  if (ext === '.pptx' || ext === '.ppt') {
+    return {
+      key: 'ppt',
+      label: 'PPT',
+      iconName: 'presentation',
+      color: '#EA580C',
+      bg: 'rgba(234,88,12,0.12)',
+      border: 'rgba(234,88,12,0.28)',
+      cssClass: 'ft-ppt',
+    };
+  }
+  if (IMAGE_EXTS.has(ext)) {
+    return {
+      key: 'image',
+      label: 'IMG',
+      iconName: 'file-image',
+      color: '#9333EA',
+      bg: 'rgba(147,51,234,0.12)',
+      border: 'rgba(147,51,234,0.28)',
+      cssClass: 'ft-image',
+    };
+  }
+  if (CODE_EXTS.has(ext)) {
+    return {
+      key: 'code',
+      label: ext.slice(1).toUpperCase(),
+      iconName: 'file-code',
+      color: '#0D9488',
+      bg: 'rgba(13,148,136,0.12)',
+      border: 'rgba(13,148,136,0.28)',
+      cssClass: 'ft-code',
+    };
+  }
+  if (ARCHIVE_EXTS.has(ext)) {
+    return {
+      key: 'archive',
+      label: 'ZIP',
+      iconName: 'layers',
+      color: '#B45309',
+      bg: 'rgba(180,83,9,0.12)',
+      border: 'rgba(180,83,9,0.28)',
+      cssClass: 'ft-archive',
+    };
+  }
+  if (MEDIA_EXTS.has(ext)) {
+    return {
+      key: 'media',
+      label: 'MEDIA',
+      iconName: 'play',
+      color: '#DB2777',
+      bg: 'rgba(219,39,119,0.12)',
+      border: 'rgba(219,39,119,0.28)',
+      cssClass: 'ft-media',
+    };
+  }
+
+  return {
+    key: 'other',
+    label: ext ? ext.slice(1).toUpperCase().slice(0, 6) : 'FILE',
+    iconName: 'file-text',
+    color: '#64748B',
+    bg: 'rgba(100,116,139,0.12)',
+    border: 'rgba(100,116,139,0.28)',
+    cssClass: 'ft-other',
+  };
 }

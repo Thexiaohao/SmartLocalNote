@@ -18,6 +18,12 @@ import { store, escapeHtml, renderMarkdownSafe, showToast } from './store.js';
 import { icon } from './icons.js';
 
 const TEMPLATE_STORAGE_KEY = 'sln_mindmap_template_v1';
+const CARDS_STACK_STORAGE_KEY = 'sln_mindmap_cards_stack_v1';
+const CARD_POSITIONS_STORAGE_KEY = 'sln_mindmap_card_pos_v1';
+const CARD_W = 312;
+const CARD_COL_GAP = 26;
+const CARD_ROW_GAP = 24;
+const CARD_ACCENTS = ['#007AFF', '#34C759', '#FF9500', '#AF52DE', '#FF2D55', '#5856D6', '#00C7BE'];
 
 const TEMPLATE_LIST = [
   { id: 'logic', label: '逻辑图', title: '向右逻辑树（经典层层拆解）' },
@@ -717,9 +723,6 @@ function computeFishboneLayout(root, collapsedIds) {
 function computeCardsLayout(root, collapsedIds) {
   const PADDING_X = 48;
   const PADDING_Y = 42;
-  const COL_GAP = 28;
-  const ROW_GAP = 28;
-  const CARD_W = 304;
   const nodesList = [];
   const edgesList = [];
   const cards = [];
@@ -728,8 +731,8 @@ function computeCardsLayout(root, collapsedIds) {
   const rootCollapsed = collapsedIds.has(root.id);
   const topBranches = rootCollapsed ? [] : (root.children || []);
 
-  const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(Math.max(1, topBranches.length)))));
-  const boardInnerW = cols * CARD_W + Math.max(0, cols - 1) * COL_GAP;
+  const cols = topBranches.length <= 1 ? 1 : Math.min(3, Math.max(2, topBranches.length));
+  const boardInnerW = cols * CARD_W + Math.max(0, cols - 1) * CARD_COL_GAP;
 
   const layoutRoot = {
     data: root,
@@ -744,11 +747,14 @@ function computeCardsLayout(root, collapsedIds) {
   };
   nodesList.push(layoutRoot);
 
-  const colHeights = new Array(cols).fill(PADDING_Y + rootBox.h + 40);
+  const colHeights = new Array(cols).fill(PADDING_Y + rootBox.h + 44);
 
-  topBranches.forEach((branch, idx) => {
-    const colIdx = idx % cols;
-    const cardX = PADDING_X + colIdx * (CARD_W + COL_GAP);
+  topBranches.forEach((branch) => {
+    let colIdx = 0;
+    for (let c = 1; c < cols; c += 1) {
+      if (colHeights[c] < colHeights[colIdx]) colIdx = c;
+    }
+    const cardX = PADDING_X + colIdx * (CARD_W + CARD_COL_GAP);
     const cardY = colHeights[colIdx];
 
     const bBox = measureNodeBox(branch, false);
@@ -757,16 +763,16 @@ function computeCardsLayout(root, collapsedIds) {
       data: branch,
       level: 1,
       dir: 'card',
-      w: CARD_W - 28,
+      w: CARD_W - 24,
       h: bBox.h,
-      x: cardX + 14,
-      y: cardY + 14,
+      x: cardX + 12,
+      y: cardY + 12,
       hiddenCount: bCollapsed ? countSubtreeNodes(branch) : 0,
       children: [],
     };
     nodesList.push(headerNode);
 
-    let curItemY = cardY + 14 + bBox.h + 12;
+    let curItemY = cardY + 12 + bBox.h + 12;
 
     function placeCardDescendants(parentNode, depthOffset) {
       if (collapsedIds.has(parentNode.id)) return;
@@ -777,21 +783,21 @@ function computeCardsLayout(root, collapsedIds) {
           data: ch,
           level: depthOffset,
           dir: 'card',
-          w: CARD_W - 28 - indent,
+          w: CARD_W - 24 - indent,
           h: box.h,
-          x: cardX + 14 + indent,
+          x: cardX + 12 + indent,
           y: curItemY,
           hiddenCount: collapsedIds.has(ch.id) ? countSubtreeNodes(ch) : 0,
           children: [],
         };
         nodesList.push(itemNode);
-        curItemY += box.h + 8;
+        curItemY += box.h + 6;
         placeCardDescendants(ch, depthOffset + 1);
       }
     }
     placeCardDescendants(branch, 2);
 
-    const cardH = Math.max(82, curItemY - cardY + 10);
+    const cardH = Math.max(82, curItemY - cardY + 12);
     cards.push({
       x: cardX,
       y: cardY,
@@ -802,11 +808,11 @@ function computeCardsLayout(root, collapsedIds) {
 
     edgesList.push({
       from: layoutRoot,
-      to: headerNode,
-      dir: 'down',
+      to: { x: cardX, y: cardY, w: CARD_W, h: cardH },
+      dir: 'card',
     });
 
-    colHeights[colIdx] = cardY + cardH + ROW_GAP;
+    colHeights[colIdx] = cardY + cardH + CARD_ROW_GAP;
   });
 
   const maxBottom = Math.max(260, ...colHeights) + PADDING_Y;
@@ -978,8 +984,25 @@ function computeTemplateLayout(templateId, root, collapsedIds) {
   return computeLogicLayout(root, collapsedIds);
 }
 
+function buildCardEdgePathD(rootRect, cardRect) {
+  const rx = rootRect.x + rootRect.w / 2;
+  const ry = rootRect.y + rootRect.h;
+  const cx = cardRect.x + cardRect.w / 2;
+  if (cardRect.y + cardRect.h < rootRect.y) {
+    const cy = cardRect.y + cardRect.h;
+    const dy = Math.max(24, Math.abs(rootRect.y - cy) * 0.5);
+    return `M ${rx} ${rootRect.y} C ${rx} ${rootRect.y - dy}, ${cx} ${cy + dy}, ${cx} ${cy}`;
+  }
+  const cy = cardRect.y;
+  const dy = Math.max(24, Math.abs(cy - ry) * 0.52);
+  return `M ${rx} ${ry} C ${rx} ${ry + dy}, ${cx} ${cy - dy}, ${cx} ${cy}`;
+}
+
 function buildEdgePathD(edge) {
   const { from, to, dir } = edge;
+  if (dir === 'card') {
+    return buildCardEdgePathD(from, to);
+  }
   if (dir === 'left') {
     const x1 = from.x;
     const y1 = from.y + from.h / 2;
@@ -1002,6 +1025,106 @@ function buildEdgePathD(edge) {
   const y2 = to.y + to.h / 2;
   const dx = Math.max(24, Math.abs(x2 - x1) * 0.52);
   return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+}
+
+function collectAllTreeTitles(root) {
+  const titles = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (node.text) titles.push(node.text);
+    for (const ch of node.children || []) walk(ch);
+  };
+  walk(root);
+  return titles;
+}
+
+function getNextSequentialCardName(prefix = '新建卡片', existingTitles = []) {
+  if (typeof store.nextSequentialName === 'function') {
+    try {
+      const candidate = store.nextSequentialName(prefix, existingTitles);
+      if (candidate) return candidate;
+    } catch {
+      // fallback below
+    }
+  }
+  const used = new Set((existingTitles || []).map((t) => String(t || '').trim()));
+  let idx = 1;
+  while (used.has(`${prefix}${idx}`)) {
+    idx += 1;
+  }
+  return `${prefix}${idx}`;
+}
+
+function findLastDescendantLine(node) {
+  if (!node) return -1;
+  let maxIdx = Number.isInteger(node.lineIdx) ? node.lineIdx : -1;
+  for (const ch of node.children || []) {
+    maxIdx = Math.max(maxIdx, findLastDescendantLine(ch));
+  }
+  return maxIdx;
+}
+
+function getNodeLineRange(markdown, nodeData) {
+  if (!nodeData || nodeData.lineIdx < 0) return null;
+  const lines = String(markdown ?? '').replace(/\r\n/g, '\n').split('\n');
+  const startLine = nodeData.lineIdx;
+  const endLine = Math.min(lines.length - 1, Math.max(startLine, findLastDescendantLine(nodeData)));
+  if (startLine >= lines.length) return null;
+  const subtreeMarkdown = lines.slice(startLine, endLine + 1).join('\n');
+  return { startLine, endLine, subtreeMarkdown };
+}
+
+function removeLineRangeFromMarkdown(markdown, startLine, endLine) {
+  const lines = String(markdown ?? '').replace(/\r\n/g, '\n').split('\n');
+  if (startLine < 0 || startLine >= lines.length || endLine < startLine) return markdown;
+  lines.splice(startLine, endLine - startLine + 1);
+  // Collapse double blank lines at splice boundary
+  if (startLine > 0 && startLine < lines.length && lines[startLine - 1].trim() === '' && lines[startLine].trim() === '') {
+    lines.splice(startLine, 1);
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+function buildCardKeysForBranches(branches) {
+  const seenCounts = new Map();
+  return (branches || []).map((branch) => {
+    const base = `${branch.kind || 'node'}:${branch.headingLevel || 0}:${branch.text || ''}`;
+    const idx = seenCounts.get(base) || 0;
+    seenCounts.set(base, idx + 1);
+    return `${base}#${idx}`;
+  });
+}
+
+function loadAllCardPositions() {
+  try {
+    const raw = localStorage.getItem(CARD_POSITIONS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadDocCardPositions(docKey) {
+  if (!docKey) return {};
+  const all = loadAllCardPositions();
+  const docMap = all[docKey];
+  return docMap && typeof docMap === 'object' ? { ...docMap } : {};
+}
+
+function saveDocCardPositions(docKey, docMap) {
+  if (!docKey) return;
+  try {
+    const all = loadAllCardPositions();
+    if (!docMap || Object.keys(docMap).length === 0) {
+      delete all[docKey];
+    } else {
+      all[docKey] = docMap;
+    }
+    localStorage.setItem(CARD_POSITIONS_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // ignore storage quota errors
+  }
 }
 
 function applyLineTextUpdate(markdown, lineIdx, nextCleanText, nextStatus) {
@@ -1027,9 +1150,10 @@ function applyLineTextUpdate(markdown, lineIdx, nextCleanText, nextStatus) {
   return lines.join('\n');
 }
 
-function appendChildBulletToMarkdown(markdown, parentNode, childText) {
+function appendChildBulletToMarkdown(markdown, parentNode, childText, existingTitles = []) {
   const lines = String(markdown ?? '').replace(/\r\n/g, '\n').split('\n');
-  const cleanChild = String(childText || '新分支节点').trim() || '新分支节点';
+  const rawTrimmed = String(childText || '').trim();
+  const cleanChild = rawTrimmed || getNextSequentialCardName('新建卡片', existingTitles);
 
   if (!parentNode || parentNode.lineIdx < 0 || parentNode.lineIdx >= lines.length) {
     const trimmedEnd = String(markdown ?? '').trimEnd();
@@ -1045,14 +1169,34 @@ function appendChildBulletToMarkdown(markdown, parentNode, childText) {
     newLine = `${baseIndent}  - ${cleanChild}`;
   }
 
-  const findLastDescendantLine = (node) => {
-    let maxIdx = node.lineIdx;
-    for (const ch of node.children || []) {
-      maxIdx = Math.max(maxIdx, findLastDescendantLine(ch));
-    }
-    return maxIdx;
-  };
   const insertAfter = findLastDescendantLine(parentNode);
+  lines.splice(insertAfter + 1, 0, newLine);
+  return lines.join('\n');
+}
+
+function appendSiblingToMarkdown(markdown, targetNode, siblingText, existingTitles = []) {
+  const lines = String(markdown ?? '').replace(/\r\n/g, '\n').split('\n');
+  const rawTrimmed = String(siblingText || '').trim();
+  const cleanSibling = rawTrimmed || getNextSequentialCardName('新建卡片', existingTitles);
+
+  if (!targetNode || targetNode.lineIdx < 0 || targetNode.lineIdx >= lines.length) {
+    const trimmedEnd = String(markdown ?? '').trimEnd();
+    const sep = trimmedEnd ? '\n\n' : '';
+    return `${trimmedEnd}${sep}## ${cleanSibling}\n`;
+  }
+
+  let newLine = '';
+  if (targetNode.kind === 'heading') {
+    const hashes = '#'.repeat(Math.min(6, Math.max(1, targetNode.headingLevel || 2)));
+    newLine = `${hashes} ${cleanSibling}`;
+  } else {
+    const origLine = lines[targetNode.lineIdx] || '';
+    const indentMatch = origLine.match(/^(\s*)/);
+    const baseIndent = indentMatch ? indentMatch[1] : '';
+    newLine = `${baseIndent}- ${cleanSibling}`;
+  }
+
+  const insertAfter = findLastDescendantLine(targetNode);
   lines.splice(insertAfter + 1, 0, newLine);
   return lines.join('\n');
 }
@@ -1075,7 +1219,7 @@ function buildExportSvgString(layout) {
   const cardsSvg = (layout.cards || [])
     .map(
       (c) =>
-        `<rect x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="16" fill="rgba(255,255,255,0.75)" stroke="rgba(0,0,0,0.1)" stroke-width="1.5"/>`
+        `<rect x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="16" fill="rgba(255,255,255,0.88)" stroke="rgba(0,0,0,0.1)" stroke-width="1.5"/>`
     )
     .join('');
 
@@ -1138,6 +1282,8 @@ export function renderMindMap(containerEl, opts = {}) {
   if (!containerEl) return null;
 
   const docName = String(opts.docName || '笔记脑图');
+  const currentDocPath = String(opts.docPath || store.state.activeFile?.path || docName || '');
+  const docPosKey = currentDocPath || docName;
   let currentMarkdown = String(opts.markdown ?? '');
   const collapsedIds = new Set();
 
@@ -1151,12 +1297,29 @@ export function renderMindMap(containerEl, opts = {}) {
     // ignore storage errors
   }
 
+  let isCardsStack = false;
+  try {
+    const savedStack = localStorage.getItem(CARDS_STACK_STORAGE_KEY);
+    isCardsStack = savedStack === 'stack' || savedStack === '1' || savedStack === 'true';
+  } catch {
+    // ignore storage errors
+  }
+
+  let docCardPositions = loadDocCardPositions(docPosKey);
+
   let zoom = 1;
   let panX = 0;
   let panY = 0;
   const lastPointer = { x: null, y: null };
   let currentLayout = null;
+  let currentTreeRoot = null;
+  let currentNodeMap = new Map();
   let nodeMenuEl = null;
+  let tempEditorState = null;
+  let selectedNodeId = null;
+  let topCardZIndex = 30;
+  let topNodeZIndex = 20;
+  let activeCardDrag = null;
 
   const baseTitle = docName.replace(/\.[^.]+$/, '') || 'mindmap';
 
@@ -1171,6 +1334,12 @@ export function renderMindMap(containerEl, opts = {}) {
         <div class="mindmap-toolbar-group" data-mm-role="tpl-group" style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;">
           <span style="font-size:11.5px;font-weight:600;color:var(--text-tertiary);margin-right:2px;">知识视图:</span>
           ${templateBtnsHtml}
+          <span class="mindmap-cards-controls" data-mm-role="cards-controls" style="display:${currentTemplate === 'cards' ? 'inline-flex' : 'none'};align-items:center;gap:4px;margin-left:6px;padding-left:8px;border-left:1px solid var(--border-hairline);">
+            <button type="button" class="pill-btn pill-btn-sm ${!isCardsStack ? 'pill-btn-primary' : ''}" data-mm-cards-mode="tile" title="最短列瀑布流平铺，零重叠">⊞ 平铺</button>
+            <button type="button" class="pill-btn pill-btn-sm ${isCardsStack ? 'pill-btn-primary' : ''}" data-mm-cards-mode="stack" title="紧凑阶梯堆叠，悬停自动浮出置顶">📚 堆叠</button>
+            <button type="button" class="pill-btn pill-btn-sm" data-mm-act="add-root-card" title="新增顶级知识卡片（自动顺延命名）">＋ 新建卡片</button>
+            <button type="button" class="pill-btn pill-btn-sm" data-mm-act="reset-card-pos" title="清除手动拖拽偏移，恢复自动排布">↺ 重置卡片位置</button>
+          </span>
         </div>
         <div class="mindmap-toolbar-group">
           <button type="button" class="pill-btn pill-btn-sm" data-mm-act="zoom-out" title="以指针为中心缩小">－</button>
@@ -1184,12 +1353,12 @@ export function renderMindMap(containerEl, opts = {}) {
           <button type="button" class="pill-btn pill-btn-sm" data-mm-act="export-png">导出 PNG</button>
         </div>
       </div>
-      <div class="mindmap-stage" id="mindmap-canvas">
+      <div class="mindmap-stage" id="mindmap-canvas" tabindex="-1" style="outline:none;">
         <div class="mindmap-viewport" data-mm-role="viewport" style="transform-origin:0 0;">
           <svg class="mindmap-svg" data-mm-role="svg"></svg>
           <div class="mindmap-nodes-layer" data-mm-role="nodes"></div>
         </div>
-        <div class="mindmap-hint-pill">滚轮按鼠标指针位置定点缩放 · 拖动画布 · 顶部切换 6 种知识梳理模板 · 双击节点改名</div>
+        <div class="mindmap-hint-pill" data-mm-role="hint-pill"></div>
       </div>
     </div>
   `;
@@ -1199,12 +1368,44 @@ export function renderMindMap(containerEl, opts = {}) {
   const svgEl = containerEl.querySelector('[data-mm-role="svg"]');
   const nodesLayer = containerEl.querySelector('[data-mm-role="nodes"]');
   const zoomLabelEl = containerEl.querySelector('[data-mm-role="zoom-label"]');
+  const cardsControlsEl = containerEl.querySelector('[data-mm-role="cards-controls"]');
+  const resetPosBtn = containerEl.querySelector('[data-mm-act="reset-card-pos"]');
+  const hintPillEl = containerEl.querySelector('[data-mm-role="hint-pill"]');
+
+  function syncCardsToolbarState() {
+    if (cardsControlsEl) {
+      cardsControlsEl.style.display = currentTemplate === 'cards' ? 'inline-flex' : 'none';
+    }
+    containerEl.querySelectorAll('[data-mm-cards-mode]').forEach((b) => {
+      const mode = b.dataset.mmCardsMode;
+      b.classList.toggle('pill-btn-primary', (mode === 'stack') === isCardsStack);
+    });
+    if (resetPosBtn) {
+      const hasCustom = Object.keys(docCardPositions).length > 0;
+      resetPosBtn.disabled = !hasCustom;
+      resetPosBtn.classList.toggle('pill-btn-primary', hasCustom);
+      resetPosBtn.style.opacity = hasCustom ? '1' : '0.48';
+    }
+    if (hintPillEl) {
+      hintPillEl.textContent =
+        currentTemplate === 'cards'
+          ? '拖动卡片标题栏自由定位 · 拖到顶部灵动岛暂存或底部垃圾桶删除 · 双击/点 ✎ 原位扩大编辑 · Tab 加子项'
+          : '滚轮按鼠标指针位置定点缩放 · 拖动画布 · 顶部切换 6 种知识梳理模板 · 双击节点扩大编辑';
+    }
+  }
 
   function closeNodeMenu() {
     if (nodeMenuEl) {
       nodeMenuEl.remove();
       nodeMenuEl = null;
     }
+  }
+
+  function closeTempEditor(commitChanges = false) {
+    if (!tempEditorState) return;
+    const state = tempEditorState;
+    tempEditorState = null;
+    state.cleanup(commitChanges);
   }
 
   function applyTransform() {
@@ -1256,7 +1457,38 @@ export function renderMindMap(containerEl, opts = {}) {
   }
 
   function findNodeById(id) {
+    if (!id) return null;
+    if (currentNodeMap.has(id)) return currentNodeMap.get(id);
     return currentLayout?.nodes?.find((n) => n.data.id === id)?.data || null;
+  }
+
+  function findEditableTargetEl(nodeId) {
+    if (!nodesLayer || !nodeId) return null;
+    const rawEl = nodesLayer.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+    if (!rawEl) return null;
+    if (rawEl.classList.contains('mindmap-card-box')) {
+      return rawEl.querySelector('.mindmap-card-header') || rawEl;
+    }
+    return rawEl;
+  }
+
+  function addChildToNode(nodeData, childName = '') {
+    if (!nodeData) return;
+    const allTitles = collectAllTreeTitles(currentTreeRoot);
+    const nextName = String(childName || '').trim() || getNextSequentialCardName('新建卡片', allTitles);
+    currentMarkdown = appendChildBulletToMarkdown(currentMarkdown, nodeData, nextName, allTitles);
+    collapsedIds.delete(nodeData.id);
+    opts.onUpdateMarkdown?.(currentMarkdown);
+    renderTree(false);
+  }
+
+  function addSiblingToNode(nodeData, siblingName = '') {
+    if (!nodeData) return;
+    const allTitles = collectAllTreeTitles(currentTreeRoot);
+    const nextName = String(siblingName || '').trim() || getNextSequentialCardName('新建卡片', allTitles);
+    currentMarkdown = appendSiblingToMarkdown(currentMarkdown, nodeData, nextName, allTitles);
+    opts.onUpdateMarkdown?.(currentMarkdown);
+    renderTree(false);
   }
 
   function openNodeContextMenu(nodeData, clientX, clientY) {
@@ -1282,8 +1514,9 @@ export function renderMindMap(containerEl, opts = {}) {
       <button type="button" class="context-menu-item" data-mm-menu="focus-25m"><span>▶ 专注攻克 (25分钟)</span></button>
       <button type="button" class="context-menu-item" data-mm-menu="focus-15s"><span>⚡ 专注演示 (15秒)</span></button>
       <div class="context-menu-sep"></div>
-      <button type="button" class="context-menu-item" data-mm-menu="add-child"><span>+ 添加子节点</span></button>
-      ${nodeData.lineIdx >= 0 ? `<button type="button" class="context-menu-item" data-mm-menu="rename"><span>✎ 重命名节点</span></button>` : ''}
+      <button type="button" class="context-menu-item" data-mm-menu="add-child"><span>+ 添加子节点 (Tab)</span></button>
+      ${nodeData.lineIdx >= 0 ? `<button type="button" class="context-menu-item" data-mm-menu="add-sibling"><span>+ 添加同级卡片 (Enter)</span></button>` : ''}
+      ${nodeData.lineIdx >= 0 ? `<button type="button" class="context-menu-item" data-mm-menu="rename"><span>✎ 编辑节点内容 (F2)</span></button>` : ''}
     `;
 
     document.body.appendChild(menu);
@@ -1307,7 +1540,7 @@ export function renderMindMap(containerEl, opts = {}) {
         }
         currentMarkdown = applyLineTextUpdate(currentMarkdown, nodeData.lineIdx, nodeData.text, nextStatus);
         opts.onUpdateMarkdown?.(currentMarkdown);
-        renderTree();
+        renderTree(false);
         return;
       }
 
@@ -1330,156 +1563,630 @@ export function renderMindMap(containerEl, opts = {}) {
       }
 
       if (act === 'add-child') {
-        currentMarkdown = appendChildBulletToMarkdown(currentMarkdown, nodeData, '新子节点');
-        collapsedIds.delete(nodeData.id);
-        opts.onUpdateMarkdown?.(currentMarkdown);
-        renderTree();
+        addChildToNode(nodeData);
+        return;
+      }
+
+      if (act === 'add-sibling') {
+        addSiblingToNode(nodeData);
         return;
       }
 
       if (act === 'rename') {
-        const nodeEl = nodesLayer?.querySelector(`.mindmap-node[data-node-id="${CSS.escape(nodeData.id)}"]`);
-        if (nodeEl) startInlineRename(nodeEl, nodeData);
+        const targetEl = findEditableTargetEl(nodeData.id);
+        if (targetEl) startInlineRename(targetEl, nodeData);
       }
     });
 
     nodeMenuEl = menu;
   }
 
-  function startInlineRename(nodeEl, nodeData) {
+  function startInlineRename(targetEl, nodeData) {
+    if (!nodeData) return;
     if (nodeData.lineIdx < 0) {
       showToast('根节点名称来自文件名，请添加 # 一级标题后编辑', 'info');
       return;
     }
-    if (nodeEl.classList.contains('is-editing')) return;
-    nodeEl.classList.add('is-editing');
+    closeNodeMenu();
+    closeTempEditor(false);
 
-    const textWrap = nodeEl.querySelector('.mindmap-node-label');
-    if (!textWrap) return;
+    const anchorEl = targetEl || findEditableTargetEl(nodeData.id);
+    if (!anchorEl) return;
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'mindmap-inline-input';
-    input.value = nodeData.text;
-    textWrap.replaceChildren(input);
-    input.focus();
-    input.select();
+    const targetRect = anchorEl.getBoundingClientRect();
+    const editorW = Math.min(560, Math.max(360, Math.round(targetRect.width || 360)));
+    const editor = document.createElement('div');
+    editor.className = 'mindmap-temp-editor';
+    editor.setAttribute('role', 'dialog');
+    editor.setAttribute('aria-label', '编辑节点内容');
+    editor.style.cssText = [
+      'position:fixed',
+      'z-index:9999',
+      `width:${editorW}px`,
+      'max-width:calc(100vw - 24px)',
+      'background:var(--bg-island)',
+      'border:1.5px solid var(--accent)',
+      'border-radius:14px',
+      'box-shadow:var(--shadow-float)',
+      'padding:10px 12px',
+      'display:flex',
+      'flex-direction:column',
+      'gap:8px',
+      'color:var(--text-primary)',
+    ].join(';');
 
-    let committed = false;
-    const commit = (cancel = false) => {
-      if (committed) return;
-      committed = true;
-      nodeEl.classList.remove('is-editing');
-      if (!cancel) {
-        const nextText = input.value.trim();
-        if (nextText && nextText !== nodeData.text) {
-          currentMarkdown = applyLineTextUpdate(currentMarkdown, nodeData.lineIdx, nextText, nodeData.status);
-          opts.onUpdateMarkdown?.(currentMarkdown);
-        }
-      }
-      renderTree();
+    const kindBadge = nodeData.kind === 'heading' ? `H${nodeData.headingLevel || 2} 标题` : '列表条目';
+    editor.innerHTML = `
+      <div class="mindmap-temp-editor-head" style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--text-secondary);">
+        <span style="font-weight:600;color:var(--accent);">✎ 编辑${kindBadge}</span>
+        <span class="mindmap-temp-editor-count" data-mm-edit-count style="font-family:var(--font-mono);font-size:11px;"></span>
+      </div>
+      <textarea class="mindmap-temp-editor-input" rows="2" style="width:100%;min-height:64px;box-sizing:border-box;resize:none;overflow:hidden;border:1px solid var(--border-hairline);border-radius:10px;padding:8px 10px;background:var(--bg-subtle);color:var(--text-primary);font-family:var(--font-sans);font-size:13.5px;line-height:1.5;outline:none;"></textarea>
+      <div class="mindmap-temp-editor-footer" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+        <span style="font-size:11px;color:var(--text-tertiary);">Enter 保存 · Shift+Enter 换行 · Esc 取消</span>
+        <div style="display:inline-flex;align-items:center;gap:6px;">
+          <button type="button" class="pill-btn pill-btn-sm" data-mm-edit-cancel>取消</button>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-mm-edit-save>✓ 保存</button>
+        </div>
+      </div>
+    `;
+
+    const initLeft = Math.max(12, Math.min(Math.round(targetRect.left), window.innerWidth - editorW - 12));
+    const initTop = Math.max(12, Math.min(Math.round(targetRect.top - 6), window.innerHeight - 180));
+    editor.style.left = `${initLeft}px`;
+    editor.style.top = `${initTop}px`;
+    document.body.appendChild(editor);
+
+    const textarea = editor.querySelector('.mindmap-temp-editor-input');
+    const countEl = editor.querySelector('[data-mm-edit-count]');
+    textarea.value = nodeData.text || '';
+
+    const syncEditorLayout = () => {
+      textarea.style.height = 'auto';
+      const maxH = Math.max(150, window.innerHeight - 170);
+      const nextH = Math.min(maxH, Math.max(64, textarea.scrollHeight));
+      textarea.style.height = `${nextH}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxH ? 'auto' : 'hidden';
+      if (countEl) countEl.textContent = `${textarea.value.length} 字`;
+
+      const edRect = editor.getBoundingClientRect();
+      const clampedLeft = Math.max(12, Math.min(edRect.left, window.innerWidth - edRect.width - 12));
+      const clampedTop = Math.max(12, Math.min(edRect.top, window.innerHeight - edRect.height - 12));
+      editor.style.left = `${Math.round(clampedLeft)}px`;
+      editor.style.top = `${Math.round(clampedTop)}px`;
     };
 
-    input.addEventListener('keydown', (e) => {
+    syncEditorLayout();
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    let finished = false;
+    const finish = (commitChanges) => {
+      if (finished) return;
+      finished = true;
+      tempEditorState = null;
+      const rawVal = textarea.value;
+      editor.remove();
+
+      if (!commitChanges) return;
+      const normalized = rawVal.replace(/\r?\n+/g, ' ').trim();
+      if (!normalized || normalized === nodeData.text) return;
+
+      // Preserve custom card position if renaming a top-level card
+      const cardBoxEl = anchorEl.closest('.mindmap-card-box');
+      const oldCardKey = cardBoxEl?.dataset?.cardKey;
+      if (oldCardKey && docCardPositions[oldCardKey]) {
+        const savedPos = docCardPositions[oldCardKey];
+        const parts = oldCardKey.split('#');
+        const suffix = parts.length > 1 ? parts[parts.length - 1] : '0';
+        const newKey = `${nodeData.kind || 'node'}:${nodeData.headingLevel || 0}:${normalized}#${suffix}`;
+        delete docCardPositions[oldCardKey];
+        docCardPositions[newKey] = savedPos;
+        saveDocCardPositions(docPosKey, docCardPositions);
+      }
+
+      currentMarkdown = applyLineTextUpdate(currentMarkdown, nodeData.lineIdx, normalized, nodeData.status);
+      opts.onUpdateMarkdown?.(currentMarkdown);
+      renderTree(false);
+    };
+
+    tempEditorState = {
+      el: editor,
+      cleanup: finish,
+    };
+
+    textarea.addEventListener('input', syncEditorLayout);
+    textarea.addEventListener('keydown', (e) => {
       e.stopPropagation();
-      if (e.key === 'Enter') {
+      if (e.isComposing) return;
+      if (e.key === 'Escape') {
         e.preventDefault();
-        commit(false);
-      } else if (e.key === 'Escape') {
+        finish(false);
+      } else if (e.key === 'Enter' && (!e.shiftKey || e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        commit(true);
+        finish(true);
       }
     });
-    input.addEventListener('blur', () => commit(false));
+
+    editor.querySelector('[data-mm-edit-cancel]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      finish(false);
+    });
+    editor.querySelector('[data-mm-edit-save]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      finish(true);
+    });
+  }
+
+  function renderStandardNodeEl(nodeData, layoutNode) {
+    const isRoot = layoutNode.level === 0;
+    const hasChildren = (nodeData.children?.length || 0) > 0;
+    const isCollapsed = collapsedIds.has(nodeData.id);
+    const statusCls = nodeData.status !== 'none' ? `status-${nodeData.status}` : '';
+    const dirCls = layoutNode.dir === 'left' ? 'is-left' : layoutNode.dir === 'down' ? 'is-down' : '';
+    const selectedCls = selectedNodeId === nodeData.id ? 'is-selected' : '';
+
+    const el = document.createElement('div');
+    el.className = `mindmap-node ${isRoot ? 'is-root' : ''} ${statusCls} ${dirCls} ${selectedCls}`.trim();
+    el.dataset.nodeId = nodeData.id;
+    el.style.left = `${layoutNode.x}px`;
+    el.style.top = `${layoutNode.y}px`;
+    el.style.width = `${layoutNode.w}px`;
+    el.style.minHeight = `${layoutNode.h}px`;
+
+    const milestonePrefix = layoutNode.milestoneBadge
+      ? `<span style="font-size:10px;font-weight:700;font-family:var(--font-mono);padding:1px 5px;border-radius:999px;background:var(--accent-soft);color:var(--accent);flex-shrink:0;">${layoutNode.milestoneBadge}</span>`
+      : '';
+
+    const renderedHtml = renderMarkdownSafe(nodeData.text || '节点', { compactMedia: true })
+      .replace(/^<p>([\s\S]*)<\/p>\n?$/i, '$1');
+
+    const statusDot =
+      nodeData.status === 'mastered'
+        ? '<span class="mm-status-badge" title="已掌握">🟢</span>'
+        : nodeData.status === 'review'
+        ? '<span class="mm-status-badge" title="待巩固">🟡</span>'
+        : nodeData.status === 'weak'
+        ? '<span class="mm-status-badge" title="易错薄弱">🔴</span>'
+        : '';
+
+    const editBtn =
+      nodeData.lineIdx >= 0
+        ? `<button type="button" class="mindmap-node-more" data-mm-edit="${escapeHtml(nodeData.id)}" title="编辑节点内容">✎</button>`
+        : '';
+
+    const foldBadge = hasChildren
+      ? `<button type="button" class="mindmap-fold-btn" data-mm-fold="${escapeHtml(nodeData.id)}" title="${isCollapsed ? '展开分支' : '折叠分支'}">${isCollapsed ? `+${layoutNode.hiddenCount}` : '−'}</button>`
+      : '';
+
+    el.innerHTML = `
+      ${milestonePrefix}
+      ${statusDot}
+      <span class="mindmap-node-label">${renderedHtml}</span>
+      ${editBtn}
+      <button type="button" class="mindmap-node-more" data-mm-more="${escapeHtml(nodeData.id)}" title="学习状态与专注操作">⋯</button>
+      ${foldBadge}
+    `;
+
+    el.addEventListener('pointerenter', () => {
+      topNodeZIndex += 1;
+      el.style.zIndex = String(topNodeZIndex);
+    });
+
+    return el;
+  }
+
+  function renderCardsBoard(treeRoot) {
+    const PADDING_X = 48;
+    const PADDING_Y = 42;
+    const STACK_STEP_X = 18;
+    const STACK_STEP_Y = 56;
+
+    const rootBox = measureNodeBox(treeRoot, true);
+    const rootW = Math.max(rootBox.w, 180);
+    const rootH = rootBox.h;
+    const rootCollapsed = collapsedIds.has(treeRoot.id);
+    const topBranches = rootCollapsed ? [] : (treeRoot.children || []);
+    const cardKeys = buildCardKeysForBranches(topBranches);
+
+    const stageWidth = Math.max(680, stageEl?.clientWidth || 980);
+    const fitCols = Math.floor((stageWidth - PADDING_X * 2 + CARD_COL_GAP) / (CARD_W + CARD_COL_GAP));
+    const cols = topBranches.length <= 1 ? 1 : Math.max(2, Math.min(3, fitCols, topBranches.length));
+    const boardInnerW = cols * CARD_W + Math.max(0, cols - 1) * CARD_COL_GAP;
+
+    const rootX = PADDING_X + Math.max(0, Math.round((boardInnerW - rootW) / 2));
+    const rootY = PADDING_Y;
+
+    const layoutRoot = {
+      data: treeRoot,
+      level: 0,
+      dir: 'center',
+      w: rootW,
+      h: rootH,
+      x: rootX,
+      y: rootY,
+      hiddenCount: rootCollapsed ? countSubtreeNodes(treeRoot) : 0,
+      children: [],
+    };
+
+    nodesLayer.innerHTML = '';
+
+    // 1. Mount Root Node
+    const rootEl = renderStandardNodeEl(treeRoot, layoutRoot);
+    nodesLayer.appendChild(rootEl);
+
+    // 2. Phase 1: Mount real DOM cards into nodesLayer so browser computes exact flow heights
+    const cardEntries = topBranches.map((branch, idx) => {
+      const accent = CARD_ACCENTS[idx % CARD_ACCENTS.length];
+      const cardKey = cardKeys[idx];
+      const isCollapsed = collapsedIds.has(branch.id);
+      const totalSubCount = countSubtreeNodes(branch);
+      const statusCls = branch.status !== 'none' ? `status-${branch.status}` : '';
+      const selectedCls = selectedNodeId === branch.id ? 'is-selected' : '';
+
+      const cardEl = document.createElement('div');
+      cardEl.className = `mindmap-card-box ${statusCls} ${selectedCls}`.trim();
+      cardEl.dataset.nodeId = branch.id;
+      cardEl.dataset.cardKey = cardKey;
+      cardEl.style.cssText = [
+        'position:absolute',
+        'left:0px',
+        'top:0px',
+        `width:${CARD_W}px`,
+        'box-sizing:border-box',
+        'border-radius:16px',
+        'background:var(--bg-island)',
+        'border:1.5px solid var(--border-hairline)',
+        `border-top:3.5px solid ${accent}`,
+        'box-shadow:var(--shadow-island)',
+        'display:flex',
+        'flex-direction:column',
+        'overflow:visible',
+        'transition:transform 160ms var(--ease-spring), opacity 160ms var(--ease-apple)',
+      ].join(';');
+
+      const headerHtml = renderMarkdownSafe(branch.text || '新建卡片', { compactMedia: true })
+        .replace(/^<p>([\s\S]*)<\/p>\n?$/i, '$1');
+
+      const headerStatusDot =
+        branch.status === 'mastered'
+          ? '<span class="mm-status-badge" title="已掌握">🟢</span>'
+          : branch.status === 'review'
+          ? '<span class="mm-status-badge" title="待巩固">🟡</span>'
+          : branch.status === 'weak'
+          ? '<span class="mm-status-badge" title="易错薄弱">🔴</span>'
+          : '';
+
+      const headerEl = document.createElement('div');
+      headerEl.className = 'mindmap-card-header';
+      headerEl.style.cssText = [
+        'display:flex',
+        'align-items:flex-start',
+        'gap:7px',
+        'padding:11px 12px 9px',
+        isCollapsed ? '' : 'border-bottom:1px solid var(--border-hairline)',
+        'cursor:grab',
+        'user-select:none',
+      ].filter(Boolean).join(';');
+
+      headerEl.innerHTML = `
+        <span class="mindmap-card-drag-handle" title="拖拽移动卡片（可拖入顶部灵动岛暂存或底部垃圾桶删除）" style="display:inline-flex;align-items:center;justify-content:center;color:var(--text-tertiary);cursor:grab;padding-top:2px;flex-shrink:0;font-size:13px;line-height:1;">⋮⋮</span>
+        ${headerStatusDot}
+        <span class="mindmap-card-title mindmap-node-label" style="flex:1;min-width:0;font-size:13.5px;font-weight:650;line-height:1.4;color:var(--text-primary);white-space:normal;word-break:break-word;overflow-wrap:anywhere;display:block;-webkit-line-clamp:unset;">${headerHtml}</span>
+        <span class="mindmap-card-count" title="子节点总数" style="flex-shrink:0;font-size:11px;font-weight:600;font-family:var(--font-mono);padding:1px 6px;border-radius:999px;background:var(--bg-subtle);color:var(--text-secondary);">${totalSubCount}</span>
+        <div class="mindmap-card-actions" style="display:inline-flex;align-items:center;gap:2px;flex-shrink:0;">
+          ${branch.lineIdx >= 0 ? `<button type="button" class="mindmap-card-action-btn" data-mm-edit="${escapeHtml(branch.id)}" title="编辑卡片标题" style="width:22px;height:22px;border-radius:999px;border:none;background:var(--bg-subtle);color:var(--text-secondary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:11.5px;">✎</button>` : ''}
+          <button type="button" class="mindmap-card-action-btn mindmap-node-more" data-mm-more="${escapeHtml(branch.id)}" title="更多操作" style="width:22px;height:22px;border-radius:999px;border:none;background:var(--bg-subtle);color:var(--text-secondary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;opacity:1;">⋯</button>
+          ${(branch.children?.length || 0) > 0 ? `<button type="button" class="mindmap-card-action-btn" data-mm-fold="${escapeHtml(branch.id)}" title="${isCollapsed ? '展开卡片' : '折叠卡片'}" style="min-width:22px;height:22px;padding:0 5px;border-radius:999px;border:1px solid var(--border-hairline);background:var(--bg-island);color:var(--text-secondary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">${isCollapsed ? `+${totalSubCount}` : '−'}</button>` : ''}
+        </div>
+      `;
+      cardEl.appendChild(headerEl);
+
+      // Collect descendant items in normal flow
+      const flatItems = [];
+      if (!isCollapsed) {
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 'mindmap-card-body';
+        bodyEl.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding:10px 12px 12px;';
+
+        const walkItems = (parentNode, depthOffset) => {
+          if (collapsedIds.has(parentNode.id)) return;
+          for (const ch of parentNode.children || []) {
+            flatItems.push({ data: ch, depth: depthOffset });
+            walkItems(ch, depthOffset + 1);
+          }
+        };
+        walkItems(branch, 2);
+
+        for (const it of flatItems) {
+          const item = it.data;
+          const indentPx = Math.min(44, Math.max(0, (it.depth - 2) * 14));
+          const itemStatusCls = item.status !== 'none' ? `status-${item.status}` : '';
+          const itemSelectedCls = selectedNodeId === item.id ? 'is-selected' : '';
+          const itemHasChildren = (item.children?.length || 0) > 0;
+          const itemCollapsed = collapsedIds.has(item.id);
+          const itemHiddenCount = itemCollapsed ? countSubtreeNodes(item) : 0;
+
+          const itemEl = document.createElement('div');
+          itemEl.className = `mindmap-card-item ${itemStatusCls} ${itemSelectedCls}`.trim();
+          itemEl.dataset.nodeId = item.id;
+          itemEl.dataset.depth = String(it.depth);
+
+          let statusBg = 'var(--bg-subtle)';
+          let statusBorder = 'var(--border-hairline)';
+          if (item.status === 'mastered') {
+            statusBg = 'var(--success-soft)';
+            statusBorder = 'var(--success)';
+          } else if (item.status === 'review') {
+            statusBg = 'var(--warning-soft)';
+            statusBorder = 'var(--warning)';
+          } else if (item.status === 'weak') {
+            statusBg = 'var(--danger-soft)';
+            statusBorder = 'var(--danger)';
+          }
+
+          const guideLeft = it.depth > 2 ? `box-shadow:-8px 0 0 -6px ${accent};` : '';
+          itemEl.style.cssText = [
+            'display:flex',
+            'align-items:flex-start',
+            'gap:6px',
+            `margin-left:${indentPx}px`,
+            'padding:6px 8px',
+            'border-radius:10px',
+            `background:${statusBg}`,
+            `border:1px solid ${statusBorder}`,
+            guideLeft,
+            'cursor:pointer',
+            'position:relative',
+          ].filter(Boolean).join(';');
+
+          const itemHtml = renderMarkdownSafe(item.text || '节点', { compactMedia: true })
+            .replace(/^<p>([\s\S]*)<\/p>\n?$/i, '$1');
+
+          const itemStatusDot =
+            item.status === 'mastered'
+              ? '<span class="mm-status-badge" title="已掌握">🟢</span>'
+              : item.status === 'review'
+              ? '<span class="mm-status-badge" title="待巩固">🟡</span>'
+              : item.status === 'weak'
+              ? '<span class="mm-status-badge" title="易错薄弱">🔴</span>'
+              : '';
+
+          itemEl.innerHTML = `
+            <span class="mindmap-card-item-dot" style="width:6px;height:6px;border-radius:50%;background:${accent};margin-top:6px;flex-shrink:0;opacity:${it.depth === 2 ? '0.9' : '0.55'};"></span>
+            ${itemStatusDot}
+            <span class="mindmap-card-item-label mindmap-node-label" style="flex:1;min-width:0;font-size:12.5px;line-height:1.45;color:var(--text-primary);white-space:normal;word-break:break-word;overflow-wrap:anywhere;display:block;-webkit-line-clamp:unset;">${itemHtml}</span>
+            <div class="mindmap-card-item-actions" style="display:inline-flex;align-items:center;gap:2px;flex-shrink:0;">
+              ${item.lineIdx >= 0 ? `<button type="button" class="mindmap-card-action-btn" data-mm-edit="${escapeHtml(item.id)}" title="编辑条目" style="width:20px;height:20px;border-radius:999px;border:none;background:transparent;color:var(--text-tertiary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:11px;">✎</button>` : ''}
+              <button type="button" class="mindmap-card-action-btn" data-mm-more="${escapeHtml(item.id)}" title="更多操作" style="width:20px;height:20px;border-radius:999px;border:none;background:transparent;color:var(--text-tertiary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:11.5px;">⋯</button>
+              ${itemHasChildren ? `<button type="button" class="mindmap-card-action-btn" data-mm-fold="${escapeHtml(item.id)}" title="${itemCollapsed ? '展开' : '折叠'}" style="min-width:20px;height:20px;padding:0 4px;border-radius:999px;border:1px solid var(--border-hairline);background:var(--bg-island);color:var(--text-secondary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;">${itemCollapsed ? `+${itemHiddenCount}` : '−'}</button>` : ''}
+            </div>
+          `;
+          bodyEl.appendChild(itemEl);
+        }
+
+        const addChildBtn = document.createElement('button');
+        addChildBtn.type = 'button';
+        addChildBtn.className = 'mindmap-card-add-child';
+        addChildBtn.dataset.mmAddChild = branch.id;
+        addChildBtn.textContent = '+ 添加子项';
+        addChildBtn.style.cssText = 'align-self:flex-start;margin-top:2px;padding:3px 9px;border-radius:999px;font-size:11.5px;color:var(--text-secondary);background:transparent;border:1px dashed var(--border-hairline);cursor:pointer;';
+        bodyEl.appendChild(addChildBtn);
+
+        cardEl.appendChild(bodyEl);
+      }
+
+      // Hover z-index lift (cards never obscure each other on hover)
+      cardEl.addEventListener('pointerenter', () => {
+        if (activeCardDrag && activeCardDrag.cardEl !== cardEl) return;
+        topCardZIndex += 1;
+        cardEl.style.zIndex = String(topCardZIndex);
+        cardEl.classList.add('is-hovered');
+        if (!cardEl.classList.contains('is-dragging')) {
+          cardEl.style.transform = 'translateY(-3px) scale(1.02)';
+          cardEl.style.boxShadow = 'var(--shadow-float)';
+          cardEl.style.borderColor = 'var(--accent)';
+        }
+      });
+
+      cardEl.addEventListener('pointerleave', () => {
+        cardEl.classList.remove('is-hovered');
+        if (!cardEl.classList.contains('is-dragging')) {
+          cardEl.style.transform = '';
+          cardEl.style.boxShadow = 'var(--shadow-island)';
+          cardEl.style.borderColor = 'var(--border-hairline)';
+        }
+      });
+
+      nodesLayer.appendChild(cardEl);
+      return { branch, idx, accent, cardKey, cardEl, headerEl };
+    });
+
+    // 3. Phase 2: Measure real offsetHeight & compute Shortest-Column Masonry or Stack layout
+    const measuredRootW = Math.max(rootW, rootEl.offsetWidth || rootW);
+    const measuredRootH = Math.max(rootH, rootEl.offsetHeight || rootH);
+    layoutRoot.w = measuredRootW;
+    layoutRoot.h = measuredRootH;
+
+    const colHeights = new Array(cols).fill(PADDING_Y + measuredRootH + 46);
+    const stackCols = cardEntries.length <= 2 ? 1 : cardEntries.length <= 6 ? 2 : 3;
+    const cardsPerStack = Math.max(1, Math.ceil(cardEntries.length / stackCols));
+    const stackBaseY = PADDING_Y + measuredRootH + 48;
+
+    const exportCards = [];
+    const exportNodes = [layoutRoot];
+    const exportEdges = [];
+    const edgeHtmlParts = [];
+
+    let maxRight = Math.max(460, rootX + measuredRootW + PADDING_X);
+    let maxBottom = Math.max(280, rootY + measuredRootH + PADDING_Y + 80);
+
+    cardEntries.forEach((entry, i) => {
+      const realH = Math.max(76, entry.cardEl.offsetHeight || 96);
+      const savedPos = docCardPositions[entry.cardKey];
+      let cardX = 0;
+      let cardY = 0;
+      let baseZ = 10 + i;
+
+      if (savedPos && Number.isFinite(savedPos.x) && Number.isFinite(savedPos.y)) {
+        cardX = Math.round(savedPos.x);
+        cardY = Math.round(savedPos.y);
+      } else if (isCardsStack) {
+        const stackIdx = Math.floor(i / cardsPerStack);
+        const posInStack = i % cardsPerStack;
+        const deckSpanW = CARD_W + Math.max(0, cardsPerStack - 1) * STACK_STEP_X;
+        cardX = PADDING_X + stackIdx * (deckSpanW + 38) + posInStack * STACK_STEP_X;
+        cardY = stackBaseY + posInStack * STACK_STEP_Y;
+        baseZ = 10 + stackIdx * 12 + posInStack;
+      } else {
+        let shortestCol = 0;
+        for (let c = 1; c < cols; c += 1) {
+          if (colHeights[c] < colHeights[shortestCol]) shortestCol = c;
+        }
+        cardX = PADDING_X + shortestCol * (CARD_W + CARD_COL_GAP);
+        cardY = colHeights[shortestCol];
+        colHeights[shortestCol] = cardY + realH + CARD_ROW_GAP;
+      }
+
+      entry.x = cardX;
+      entry.y = cardY;
+      entry.w = CARD_W;
+      entry.h = realH;
+      entry.cardEl.style.left = `${cardX}px`;
+      entry.cardEl.style.top = `${cardY}px`;
+      entry.cardEl.style.zIndex = String(baseZ);
+
+      maxRight = Math.max(maxRight, cardX + CARD_W + PADDING_X);
+      maxBottom = Math.max(maxBottom, cardY + realH + PADDING_Y + 24);
+
+      const cardRect = { x: cardX, y: cardY, w: CARD_W, h: realH };
+      exportCards.push({ ...cardRect, title: entry.branch.text, accent: entry.accent });
+      exportEdges.push({ from: layoutRoot, to: cardRect, dir: 'card' });
+      edgeHtmlParts.push(
+        `<path class="mindmap-edge" data-card-edge-id="${escapeHtml(entry.branch.id)}" d="${buildCardEdgePathD(layoutRoot, cardRect)}" />`
+      );
+
+      // Record header & item rects for SVG/PNG export fidelity
+      exportNodes.push({
+        data: entry.branch,
+        level: 1,
+        dir: 'card',
+        x: cardX + 10,
+        y: cardY + 10,
+        w: CARD_W - 20,
+        h: Math.max(28, entry.headerEl.offsetHeight || 34),
+      });
+      entry.cardEl.querySelectorAll('.mindmap-card-item').forEach((itemEl) => {
+        const itemData = currentNodeMap.get(itemEl.dataset.nodeId);
+        if (!itemData) return;
+        exportNodes.push({
+          data: itemData,
+          level: Number(itemEl.dataset.depth) || 2,
+          dir: 'card',
+          x: cardX + itemEl.offsetLeft,
+          y: cardY + itemEl.offsetTop,
+          w: Math.max(80, itemEl.offsetWidth || CARD_W - 36),
+          h: Math.max(24, itemEl.offsetHeight || 30),
+        });
+      });
+    });
+
+    // If Stack Mode or empty board, center root over actual board span
+    if (isCardsStack && cardEntries.length > 0) {
+      const cardsMinX = Math.min(...cardEntries.map((c) => c.x));
+      const cardsMaxX = Math.max(...cardEntries.map((c) => c.x + c.w));
+      const nextRootX = Math.max(PADDING_X, Math.round((cardsMinX + cardsMaxX - measuredRootW) / 2));
+      layoutRoot.x = nextRootX;
+      rootEl.style.left = `${nextRootX}px`;
+      maxRight = Math.max(maxRight, nextRootX + measuredRootW + PADDING_X);
+      edgeHtmlParts.length = 0;
+      exportEdges.length = 0;
+      for (const entry of cardEntries) {
+        const cardRect = { x: entry.x, y: entry.y, w: entry.w, h: entry.h };
+        exportEdges.push({ from: layoutRoot, to: cardRect, dir: 'card' });
+        edgeHtmlParts.push(
+          `<path class="mindmap-edge" data-card-edge-id="${escapeHtml(entry.branch.id)}" d="${buildCardEdgePathD(layoutRoot, cardRect)}" />`
+        );
+      }
+    }
+
+    const totalW = Math.ceil(maxRight);
+    const totalH = Math.ceil(maxBottom);
+
+    if (svgEl) {
+      svgEl.setAttribute('width', String(totalW));
+      svgEl.setAttribute('height', String(totalH));
+      svgEl.setAttribute('viewBox', `0 0 ${totalW} ${totalH}`);
+      svgEl.innerHTML = edgeHtmlParts.join('');
+    }
+    if (nodesLayer) {
+      nodesLayer.style.width = `${totalW}px`;
+      nodesLayer.style.height = `${totalH}px`;
+    }
+
+    currentLayout = {
+      template: 'cards',
+      root: layoutRoot,
+      nodes: exportNodes,
+      edges: exportEdges,
+      spines: [],
+      cards: exportCards,
+      cardEntries,
+      width: totalW,
+      height: totalH,
+    };
   }
 
   function renderTree(shouldCenter = false) {
     closeNodeMenu();
+    closeTempEditor(false);
     const treeRoot = parseMarkdownToTree(currentMarkdown, docName);
-    currentLayout = computeTemplateLayout(currentTemplate, treeRoot, collapsedIds);
+    currentTreeRoot = treeRoot;
 
-    if (svgEl) {
-      svgEl.setAttribute('width', String(currentLayout.width));
-      svgEl.setAttribute('height', String(currentLayout.height));
-      svgEl.setAttribute('viewBox', `0 0 ${currentLayout.width} ${currentLayout.height}`);
+    // Index all nodes in tree by id for O(1) lookup
+    currentNodeMap = new Map();
+    const indexNodes = (n) => {
+      if (!n) return;
+      currentNodeMap.set(n.id, n);
+      for (const ch of n.children || []) indexNodes(ch);
+    };
+    indexNodes(treeRoot);
 
-      const cardsSvg = (currentLayout.cards || [])
-        .map(
-          (c) =>
-            `<rect x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="16" fill="var(--bg-glass)" stroke="var(--border-hairline)" stroke-width="1.5" />`
-        )
-        .join('');
+    syncCardsToolbarState();
 
-      const spinesSvg = (currentLayout.spines || [])
-        .map(
-          (s) =>
-            `<line x1="${s.x1}" y1="${s.y1}" x2="${s.x2}" y2="${s.y2}" stroke="${s.kind === 'main-spine' ? 'var(--accent)' : 'var(--text-tertiary)'}" stroke-opacity="${s.kind === 'main-spine' ? '0.65' : '0.45'}" stroke-width="${s.kind === 'main-spine' ? '3.5' : '2'}" stroke-linecap="round" />`
-        )
-        .join('');
+    if (currentTemplate === 'cards') {
+      renderCardsBoard(treeRoot);
+    } else {
+      currentLayout = computeTemplateLayout(currentTemplate, treeRoot, collapsedIds);
 
-      const edgesSvg = currentLayout.edges
-        .map((edge) => `<path class="mindmap-edge" d="${buildEdgePathD(edge)}" />`)
-        .join('');
+      if (svgEl) {
+        svgEl.setAttribute('width', String(currentLayout.width));
+        svgEl.setAttribute('height', String(currentLayout.height));
+        svgEl.setAttribute('viewBox', `0 0 ${currentLayout.width} ${currentLayout.height}`);
 
-      svgEl.innerHTML = `${cardsSvg}${spinesSvg}${edgesSvg}`;
-    }
+        const spinesSvg = (currentLayout.spines || [])
+          .map(
+            (s) =>
+              `<line x1="${s.x1}" y1="${s.y1}" x2="${s.x2}" y2="${s.y2}" stroke="${s.kind === 'main-spine' ? 'var(--accent)' : 'var(--text-tertiary)'}" stroke-opacity="${s.kind === 'main-spine' ? '0.65' : '0.45'}" stroke-width="${s.kind === 'main-spine' ? '3.5' : '2'}" stroke-linecap="round" />`
+          )
+          .join('');
 
-    if (nodesLayer) {
-      nodesLayer.style.width = `${currentLayout.width}px`;
-      nodesLayer.style.height = `${currentLayout.height}px`;
-      nodesLayer.innerHTML = '';
+        const edgesSvg = currentLayout.edges
+          .map((edge) => `<path class="mindmap-edge" d="${buildEdgePathD(edge)}" />`)
+          .join('');
 
-      for (const n of currentLayout.nodes) {
-        const nodeData = n.data;
-        const isRoot = n.level === 0;
-        const hasChildren = (nodeData.children?.length || 0) > 0;
-        const isCollapsed = collapsedIds.has(nodeData.id);
-        const statusCls = nodeData.status !== 'none' ? `status-${nodeData.status}` : '';
+        svgEl.innerHTML = `${spinesSvg}${edgesSvg}`;
+      }
 
-        const el = document.createElement('div');
-        const dirCls = n.dir === 'left' ? 'is-left' : n.dir === 'down' ? 'is-down' : '';
-        el.className = `mindmap-node ${isRoot ? 'is-root' : ''} ${statusCls} ${dirCls}`.trim();
-        el.dataset.nodeId = nodeData.id;
-        el.style.left = `${n.x}px`;
-        el.style.top = `${n.y}px`;
-        el.style.width = `${n.w}px`;
-        el.style.minHeight = `${n.h}px`;
-        if (n.dir === 'card') {
-          el.style.borderRadius = n.level === 1 ? '12px' : '9px';
-          if (n.level === 1) {
-            el.style.fontWeight = '600';
-            el.style.background = 'var(--accent-soft)';
-          }
+      if (nodesLayer) {
+        nodesLayer.style.width = `${currentLayout.width}px`;
+        nodesLayer.style.height = `${currentLayout.height}px`;
+        nodesLayer.innerHTML = '';
+
+        for (const n of currentLayout.nodes) {
+          const el = renderStandardNodeEl(n.data, n);
+          nodesLayer.appendChild(el);
         }
-        const milestonePrefix = n.milestoneBadge
-          ? `<span style="font-size:10px;font-weight:700;font-family:var(--font-mono);padding:1px 5px;border-radius:999px;background:var(--accent-soft);color:var(--accent);flex-shrink:0;">${n.milestoneBadge}</span>`
-          : '';
-
-        const renderedHtml = renderMarkdownSafe(nodeData.text || '节点', { compactMedia: true })
-          .replace(/^<p>([\s\S]*)<\/p>\n?$/i, '$1');
-
-        const statusDot =
-          nodeData.status === 'mastered'
-            ? '<span class="mm-status-badge" title="已掌握">🟢</span>'
-            : nodeData.status === 'review'
-            ? '<span class="mm-status-badge" title="待巩固">🟡</span>'
-            : nodeData.status === 'weak'
-            ? '<span class="mm-status-badge" title="易错薄弱">🔴</span>'
-            : '';
-
-        const foldBadge = hasChildren
-          ? `<button type="button" class="mindmap-fold-btn" data-mm-fold="${escapeHtml(nodeData.id)}" title="${isCollapsed ? '展开分支' : '折叠分支'}">${isCollapsed ? `+${n.hiddenCount}` : '−'}</button>`
-          : '';
-
-        el.innerHTML = `
-          ${milestonePrefix}
-          ${statusDot}
-          <span class="mindmap-node-label">${renderedHtml}</span>
-          <button type="button" class="mindmap-node-more" data-mm-more="${escapeHtml(nodeData.id)}" title="学习状态与专注操作">⋯</button>
-          ${foldBadge}
-        `;
-
-        nodesLayer.appendChild(el);
       }
     }
 
@@ -1510,6 +2217,21 @@ export function renderMindMap(containerEl, opts = {}) {
       return;
     }
 
+    const cardsModeBtn = e.target.closest('[data-mm-cards-mode]');
+    if (cardsModeBtn) {
+      const nextStack = cardsModeBtn.dataset.mmCardsMode === 'stack';
+      if (nextStack !== isCardsStack) {
+        isCardsStack = nextStack;
+        try {
+          localStorage.setItem(CARDS_STACK_STORAGE_KEY, isCardsStack ? 'stack' : 'tile');
+        } catch {
+          // ignore
+        }
+        renderTree(true);
+      }
+      return;
+    }
+
     const btn = e.target.closest('[data-mm-act]');
     if (!btn) return;
     const act = btn.dataset.mmAct;
@@ -1519,6 +2241,17 @@ export function renderMindMap(containerEl, opts = {}) {
       zoomAtPoint(zoom / 1.16);
     } else if (act === 'center') {
       fitCenter();
+    } else if (act === 'add-root-card') {
+      if (currentTreeRoot) {
+        collapsedIds.delete(currentTreeRoot.id);
+        addChildToNode(currentTreeRoot);
+      }
+    } else if (act === 'reset-card-pos') {
+      if (Object.keys(docCardPositions).length === 0) return;
+      docCardPositions = {};
+      saveDocCardPositions(docPosKey, docCardPositions);
+      renderTree(true);
+      showToast('已重置卡片自动排布', 'success');
     } else if (act === 'ai-generate') {
       opts.onAiGenerate?.();
     } else if (act === 'export-svg') {
@@ -1560,7 +2293,7 @@ export function renderMindMap(containerEl, opts = {}) {
     }
   });
 
-  // Stage interactions: pan, pointer-anchored wheel zoom, portal pill click, fold, more, dblclick, right-click
+  // Stage interactions: card drag, pan, pointer-anchored wheel zoom, portal pill click, fold, edit, more, dblclick, right-click
   if (stageEl) {
     let panning = false;
     let panStartX = 0;
@@ -1568,13 +2301,61 @@ export function renderMindMap(containerEl, opts = {}) {
     let origPanX = 0;
     let origPanY = 0;
 
+    const clearDropZoneHighlights = () => {
+      document
+        .querySelectorAll('#portable-trash-dock.is-drag-over, [data-drop-zone="trash"].is-drag-over, #dynamic-island.is-drag-over, #island-shelf-drawer.is-drag-over')
+        .forEach((el) => el.classList.remove('is-drag-over'));
+    };
+
     stageEl.addEventListener('pointerdown', (e) => {
       const rect = stageEl.getBoundingClientRect();
       lastPointer.x = e.clientX - rect.left;
       lastPointer.y = e.clientY - rect.top;
       if (e.button !== 0) return;
-      if (e.target.closest('.mindmap-node, button, input')) return;
+
+      // Check card header drag first (never conflict with stage panning)
+      const cardHeaderEl = e.target.closest('.mindmap-card-header');
+      if (cardHeaderEl && !e.target.closest('button, .anchor-pill, [data-media-file], input, textarea')) {
+        const cardEl = cardHeaderEl.closest('.mindmap-card-box');
+        const branchId = cardEl?.dataset?.nodeId;
+        const branchData = findNodeById(branchId);
+        if (cardEl && branchData) {
+          closeNodeMenu();
+          closeTempEditor(false);
+          const origX = parseFloat(cardEl.style.left) || 0;
+          const origY = parseFloat(cardEl.style.top) || 0;
+          const cardKey = cardEl.dataset.cardKey || '';
+          const lineInfo = getNodeLineRange(currentMarkdown, branchData);
+
+          activeCardDrag = {
+            pointerId: e.pointerId,
+            cardEl,
+            headerEl: cardHeaderEl,
+            branchData,
+            cardKey,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            origX,
+            origY,
+            curX: origX,
+            curY: origY,
+            cardW: cardEl.offsetWidth || CARD_W,
+            cardH: cardEl.offsetHeight || 100,
+            hasDragged: false,
+            lineInfo,
+          };
+          try {
+            stageEl.setPointerCapture?.(e.pointerId);
+          } catch {
+            // ignore
+          }
+          return;
+        }
+      }
+
+      if (e.target.closest('.mindmap-node, .mindmap-card-box, button, input, textarea')) return;
       closeNodeMenu();
+      closeTempEditor(false);
       panning = true;
       panStartX = e.clientX;
       panStartY = e.clientY;
@@ -1592,13 +2373,210 @@ export function renderMindMap(containerEl, opts = {}) {
       const rect = stageEl.getBoundingClientRect();
       lastPointer.x = e.clientX - rect.left;
       lastPointer.y = e.clientY - rect.top;
+
+      if (activeCardDrag && e.pointerId === activeCardDrag.pointerId) {
+        const dxClient = e.clientX - activeCardDrag.startClientX;
+        const dyClient = e.clientY - activeCardDrag.startClientY;
+
+        if (!activeCardDrag.hasDragged && Math.hypot(dxClient, dyClient) > 8) {
+          activeCardDrag.hasDragged = true;
+          topCardZIndex += 1;
+          activeCardDrag.cardEl.style.zIndex = String(topCardZIndex);
+          activeCardDrag.cardEl.classList.add('is-dragging');
+          activeCardDrag.cardEl.style.transition = 'none';
+          activeCardDrag.cardEl.style.boxShadow = 'var(--shadow-float)';
+          activeCardDrag.cardEl.style.borderColor = 'var(--accent)';
+          activeCardDrag.headerEl.style.cursor = 'grabbing';
+
+          const info = activeCardDrag.lineInfo;
+          store.beginGlobalDrag?.({
+            type: 'mindmap-card',
+            title: activeCardDrag.branchData.text,
+            markdown: info?.subtreeMarkdown || `## ${activeCardDrag.branchData.text}`,
+            lineIndex: info?.startLine ?? activeCardDrag.branchData.lineIdx,
+            endLineIndex: info?.endLine ?? activeCardDrag.branchData.lineIdx,
+            sourceDocPath: currentDocPath,
+          });
+        }
+
+        if (activeCardDrag.hasDragged) {
+          const nextX = Math.round(activeCardDrag.origX + dxClient / zoom);
+          const nextY = Math.round(activeCardDrag.origY + dyClient / zoom);
+          activeCardDrag.curX = nextX;
+          activeCardDrag.curY = nextY;
+          activeCardDrag.cardEl.style.left = `${nextX}px`;
+          activeCardDrag.cardEl.style.top = `${nextY}px`;
+
+          // Live update connected Bezier edge
+          if (svgEl && currentLayout?.root) {
+            const edgeEl = svgEl.querySelector(`[data-card-edge-id="${CSS.escape(activeCardDrag.branchData.id)}"]`);
+            if (edgeEl) {
+              edgeEl.setAttribute(
+                'd',
+                buildCardEdgePathD(currentLayout.root, {
+                  x: nextX,
+                  y: nextY,
+                  w: activeCardDrag.cardW,
+                  h: activeCardDrag.cardH,
+                })
+              );
+            }
+          }
+
+          // Drop zone hover feedback
+          clearDropZoneHighlights();
+          const hitEls = document.elementsFromPoint(e.clientX, e.clientY);
+          const trashTarget = hitEls.find((el) => el.matches?.('#portable-trash-dock, [data-drop-zone="trash"]'))
+            || hitEls.map((el) => el.closest?.('#portable-trash-dock, [data-drop-zone="trash"]')).find(Boolean);
+          const shelfTarget = !trashTarget
+            ? hitEls.find((el) => el.matches?.('#dynamic-island, #island-shelf-drawer'))
+              || hitEls.map((el) => el.closest?.('#dynamic-island, #island-shelf-drawer')).find(Boolean)
+            : null;
+
+          if (trashTarget) {
+            trashTarget.classList.add('is-drag-over');
+            activeCardDrag.cardEl.style.opacity = '0.72';
+          } else if (shelfTarget) {
+            shelfTarget.classList.add('is-drag-over');
+            activeCardDrag.cardEl.style.opacity = '0.84';
+          } else {
+            activeCardDrag.cardEl.style.opacity = '1';
+          }
+        }
+        return;
+      }
+
       if (!panning) return;
       panX = Math.round(origPanX + (e.clientX - panStartX));
       panY = Math.round(origPanY + (e.clientY - panStartY));
       applyTransform();
     });
 
+    const endCardDrag = (e, cancelled = false) => {
+      if (!activeCardDrag) return;
+      const drag = activeCardDrag;
+      activeCardDrag = null;
+
+      if (e?.pointerId != null) {
+        try {
+          stageEl.releasePointerCapture?.(e.pointerId);
+        } catch {
+          // ignore
+        }
+      }
+
+      drag.cardEl.classList.remove('is-dragging');
+      drag.cardEl.style.transition = 'transform 160ms var(--ease-spring), opacity 160ms var(--ease-apple)';
+      drag.cardEl.style.opacity = '1';
+      drag.cardEl.style.boxShadow = 'var(--shadow-island)';
+      drag.cardEl.style.borderColor = 'var(--border-hairline)';
+      drag.headerEl.style.cursor = 'grab';
+      clearDropZoneHighlights();
+
+      if (!drag.hasDragged) return;
+
+      try {
+        if (cancelled) {
+          drag.cardEl.style.left = `${drag.origX}px`;
+          drag.cardEl.style.top = `${drag.origY}px`;
+          const edgeEl = svgEl?.querySelector(`[data-card-edge-id="${CSS.escape(drag.branchData.id)}"]`);
+          if (edgeEl && currentLayout?.root) {
+            edgeEl.setAttribute('d', buildCardEdgePathD(currentLayout.root, { x: drag.origX, y: drag.origY, w: drag.cardW, h: drag.cardH }));
+          }
+          return;
+        }
+
+        const hitEls = document.elementsFromPoint(e.clientX, e.clientY);
+        const overTrash = hitEls.some(
+          (el) => el.matches?.('#portable-trash-dock, [data-drop-zone="trash"]') || el.closest?.('#portable-trash-dock, [data-drop-zone="trash"]')
+        );
+        const overShelf =
+          !overTrash &&
+          hitEls.some(
+            (el) => el.matches?.('#dynamic-island, #island-shelf-drawer') || el.closest?.('#dynamic-island, #island-shelf-drawer')
+          );
+
+        const info = drag.lineInfo;
+        const subtreeMd = info?.subtreeMarkdown || `## ${drag.branchData.text}`;
+
+        if (overTrash) {
+          if (info && info.startLine >= 0) {
+            currentMarkdown = removeLineRangeFromMarkdown(currentMarkdown, info.startLine, info.endLine);
+            opts.onUpdateMarkdown?.(currentMarkdown);
+          }
+          if (drag.cardKey && docCardPositions[drag.cardKey]) {
+            delete docCardPositions[drag.cardKey];
+            saveDocCardPositions(docPosKey, docCardPositions);
+          }
+          store.trashVirtualItem?.({
+            kind: 'mindmap-card',
+            title: drag.branchData.text,
+            payload: { markdown: subtreeMd, docPath: currentDocPath },
+          });
+          showToast(`已将卡片「${drag.branchData.text}」移入回收站`, 'info');
+          renderTree(false);
+          return;
+        }
+
+        if (overShelf) {
+          // Restore card position visually & emit shelf add
+          drag.cardEl.style.left = `${drag.origX}px`;
+          drag.cardEl.style.top = `${drag.origY}px`;
+          const edgeEl = svgEl?.querySelector(`[data-card-edge-id="${CSS.escape(drag.branchData.id)}"]`);
+          if (edgeEl && currentLayout?.root) {
+            edgeEl.setAttribute('d', buildCardEdgePathD(currentLayout.root, { x: drag.origX, y: drag.origY, w: drag.cardW, h: drag.cardH }));
+          }
+          const prevLen = Array.isArray(store.state.shelfItems) ? store.state.shelfItems.length : 0;
+          store.emit('shelf:add-item', {
+            kind: 'text',
+            title: drag.branchData.text,
+            content: subtreeMd,
+            sourceDocPath: currentDocPath,
+          });
+          const afterLen = Array.isArray(store.state.shelfItems) ? store.state.shelfItems.length : 0;
+          if (afterLen === prevLen && typeof store.addToShelf === 'function') {
+            store.addToShelf({
+              type: 'text',
+              label: drag.branchData.text,
+              markdown: subtreeMd,
+              path: currentDocPath,
+            });
+          }
+          showToast(`已将卡片「${drag.branchData.text}」收入灵动岛暂存舱`, 'success');
+          return;
+        }
+
+        // Dropped inside canvas: persist custom coordinates
+        if (drag.cardKey) {
+          docCardPositions[drag.cardKey] = { x: drag.curX, y: drag.curY };
+          saveDocCardPositions(docPosKey, docCardPositions);
+          syncCardsToolbarState();
+        }
+
+        // Expand SVG / layer bounds if dragged outside current box
+        const needW = Math.max(currentLayout?.width || 460, drag.curX + drag.cardW + 48);
+        const needH = Math.max(currentLayout?.height || 280, drag.curY + drag.cardH + 48);
+        if (currentLayout && (needW > currentLayout.width || needH > currentLayout.height)) {
+          currentLayout.width = Math.ceil(needW);
+          currentLayout.height = Math.ceil(needH);
+          svgEl?.setAttribute('width', String(currentLayout.width));
+          svgEl?.setAttribute('height', String(currentLayout.height));
+          svgEl?.setAttribute('viewBox', `0 0 ${currentLayout.width} ${currentLayout.height}`);
+          if (nodesLayer) {
+            nodesLayer.style.width = `${currentLayout.width}px`;
+            nodesLayer.style.height = `${currentLayout.height}px`;
+          }
+        }
+      } finally {
+        store.endGlobalDrag?.();
+      }
+    };
+
     const endPan = (e) => {
+      if (activeCardDrag && e?.pointerId === activeCardDrag.pointerId) {
+        endCardDrag(e, e.type === 'pointercancel');
+        return;
+      }
       if (!panning) return;
       panning = false;
       stageEl.classList.remove('is-panning');
@@ -1669,6 +2647,28 @@ export function renderMindMap(containerEl, opts = {}) {
         return;
       }
 
+      const editBtn = e.target.closest('[data-mm-edit]');
+      if (editBtn) {
+        e.stopPropagation();
+        const id = editBtn.dataset.mmEdit;
+        const nodeData = findNodeById(id);
+        const targetEl = findEditableTargetEl(id);
+        if (nodeData && targetEl) {
+          startInlineRename(targetEl, nodeData);
+        }
+        return;
+      }
+
+      const addChildBtn = e.target.closest('[data-mm-add-child]');
+      if (addChildBtn) {
+        e.stopPropagation();
+        const nodeData = findNodeById(addChildBtn.dataset.mmAddChild);
+        if (nodeData) {
+          addChildToNode(nodeData);
+        }
+        return;
+      }
+
       const foldBtn = e.target.closest('[data-mm-fold]');
       if (foldBtn) {
         e.stopPropagation();
@@ -1687,44 +2687,122 @@ export function renderMindMap(containerEl, opts = {}) {
           const rect = moreBtn.getBoundingClientRect();
           openNodeContextMenu(nodeData, rect.right + 4, rect.bottom + 4);
         }
+        return;
+      }
+
+      // Select clicked node/card item for keyboard shortcuts (Tab/Enter/F2)
+      const clickedTarget = e.target.closest('.mindmap-card-item, .mindmap-card-box, .mindmap-node');
+      if (clickedTarget && clickedTarget.dataset.nodeId) {
+        selectedNodeId = clickedTarget.dataset.nodeId;
+        nodesLayer?.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
+        clickedTarget.classList.add('is-selected');
+        stageEl.focus({ preventScroll: true });
       }
     });
 
     stageEl.addEventListener('dblclick', (e) => {
+      if (e.target.closest('.anchor-pill, [data-media-file], button, input, textarea')) return;
+      const itemEl = e.target.closest('.mindmap-card-item');
+      if (itemEl) {
+        const nodeData = findNodeById(itemEl.dataset.nodeId);
+        if (nodeData) startInlineRename(itemEl, nodeData);
+        return;
+      }
+      const headerEl = e.target.closest('.mindmap-card-header');
+      if (headerEl) {
+        const cardEl = headerEl.closest('.mindmap-card-box');
+        const nodeData = findNodeById(cardEl?.dataset?.nodeId);
+        if (nodeData) startInlineRename(headerEl, nodeData);
+        return;
+      }
       const nodeEl = e.target.closest('.mindmap-node');
-      if (!nodeEl || e.target.closest('.anchor-pill, [data-media-file], button, input')) return;
-      const nodeData = findNodeById(nodeEl.dataset.nodeId);
-      if (nodeData) {
-        startInlineRename(nodeEl, nodeData);
+      if (nodeEl) {
+        const nodeData = findNodeById(nodeEl.dataset.nodeId);
+        if (nodeData) startInlineRename(nodeEl, nodeData);
       }
     });
 
     stageEl.addEventListener('contextmenu', (e) => {
-      const nodeEl = e.target.closest('.mindmap-node');
+      const targetEl = e.target.closest('.mindmap-card-item, .mindmap-card-box, .mindmap-node');
       e.preventDefault();
       e.stopPropagation();
-      if (nodeEl) {
-        const nodeData = findNodeById(nodeEl.dataset.nodeId);
+      if (targetEl) {
+        const nodeData = findNodeById(targetEl.dataset.nodeId);
         if (nodeData) {
+          selectedNodeId = nodeData.id;
           openNodeContextMenu(nodeData, e.clientX, e.clientY);
         }
       } else {
         closeNodeMenu();
       }
     });
+
+    stageEl.addEventListener('keydown', (e) => {
+      if (tempEditorState) return;
+      if (e.target.closest('input, textarea')) return;
+      const selNode = selectedNodeId ? findNodeById(selectedNodeId) : null;
+      if (!selNode) return;
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        addChildToNode(selNode);
+      } else if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        addSiblingToNode(selNode);
+      } else if (e.key === 'F2') {
+        e.preventDefault();
+        const targetEl = findEditableTargetEl(selNode.id);
+        if (targetEl) startInlineRename(targetEl, selNode);
+      }
+    });
   }
+
+  // Listen for trash virtual restore of mindmap-card
+  const unsubscribeRestore = store.on('trash:restore-virtual', (item) => {
+    if (!containerEl.isConnected) {
+      destroy();
+      return;
+    }
+    if (!item || item.kind !== 'mindmap-card') return;
+    if (typeof opts.onUpdateMarkdown !== 'function') return;
+
+    const itemPath = String(item.payload?.docPath || '');
+    if (itemPath && currentDocPath && itemPath !== currentDocPath) return;
+
+    const restoredMd = String(item.payload?.markdown || '').trim();
+    if (!restoredMd) return;
+
+    const trimmed = currentMarkdown.trimEnd();
+    currentMarkdown = trimmed ? `${trimmed}\n\n${restoredMd}\n` : `${restoredMd}\n`;
+    opts.onUpdateMarkdown(currentMarkdown);
+    renderTree(false);
+    showToast(`已将卡片「${item.title || '知识卡片'}」还原到脑图`, 'success');
+  });
 
   const dismissDocHandler = (e) => {
     if (!containerEl.isConnected) {
-      document.removeEventListener('pointerdown', dismissDocHandler);
-      closeNodeMenu();
+      destroy();
       return;
     }
     if (nodeMenuEl && !e.target.closest('.mindmap-node-menu')) {
       closeNodeMenu();
     }
+    if (tempEditorState && !e.target.closest('.mindmap-temp-editor')) {
+      closeTempEditor(true);
+    }
   };
   document.addEventListener('pointerdown', dismissDocHandler);
+
+  function destroy() {
+    document.removeEventListener('pointerdown', dismissDocHandler);
+    if (typeof unsubscribeRestore === 'function') unsubscribeRestore();
+    closeNodeMenu();
+    closeTempEditor(false);
+    if (activeCardDrag) {
+      store.endGlobalDrag?.();
+      activeCardDrag = null;
+    }
+  }
 
   renderTree(true);
 
@@ -1734,6 +2812,6 @@ export function renderMindMap(containerEl, opts = {}) {
       renderTree(false);
     },
     fitCenter,
-    destroy: closeNodeMenu,
+    destroy,
   };
 }

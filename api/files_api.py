@@ -7,9 +7,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api import ok
-from core import doc_engine, safe_io, search_engine
+from core import doc_engine, safe_io, search_engine, todo_indexer
 
-router = APIRouter(prefix="/api/files", tags=["files"])
+router = APIRouter()
+files_router = APIRouter(prefix="/api/files", tags=["files"])
+todos_router = APIRouter(prefix="/api/todos", tags=["todos"])
 
 
 class ImportBody(BaseModel):
@@ -18,9 +20,32 @@ class ImportBody(BaseModel):
 
 
 class CreateNoteBody(BaseModel):
-    title: str
+    title: str = ""
     content: str = ""
     node_id: str | None = None
+    folder_rel: str = ""
+
+
+class CreateFolderBody(BaseModel):
+    parent_dir: str = ""
+    name: str = ""
+
+
+class TrashFileBody(BaseModel):
+    path: str
+    mode: str = ""
+
+
+class ToggleTodoBody(BaseModel):
+    file_path: str
+    line_no: int
+    checked: bool
+    expected_text: str = ""
+
+
+class AddTodoBody(BaseModel):
+    file_path: str
+    text: str = ""
 
 
 class WriteFileBody(BaseModel):
@@ -67,27 +92,37 @@ class RemoveFileBody(BaseModel):
     path: str
 
 
-@router.get("/list")
+@files_router.get("/list")
 def list_files() -> dict:
     return ok(doc_engine.list_workspace_files())
 
 
-@router.post("/import")
+@files_router.post("/import")
 def import_files(body: ImportBody) -> dict:
     return ok(safe_io.register_import(body.paths, is_dir=body.is_dir))
 
 
-@router.post("/create-note")
+@files_router.post("/create-note")
 def create_note(body: CreateNoteBody) -> dict:
-    return ok(doc_engine.create_note(body.title, body.content, body.node_id))
+    return ok(doc_engine.create_note(body.title, body.content, body.node_id, folder_rel=body.folder_rel))
 
 
-@router.get("/read")
+@files_router.post("/create-folder")
+def create_folder(body: CreateFolderBody) -> dict:
+    return ok(doc_engine.create_folder(body.parent_dir, body.name))
+
+
+@files_router.post("/trash")
+def trash_file(body: TrashFileBody) -> dict:
+    return ok(doc_engine.delete_file_to_trash(body.path, body.mode))
+
+
+@files_router.get("/read")
 def read_file(path: str = Query(...)) -> dict:
     return ok(doc_engine.read_document(path))
 
 
-@router.get("/expand-content")
+@files_router.get("/expand-content")
 def expand_file_content(
     path: str = Query(...),
     page: int | None = Query(default=None),
@@ -98,73 +133,92 @@ def expand_file_content(
     return ok(doc_engine.extract_inline_content(path, page=page, sheet=sheet, cell=cell, member=member))
 
 
-@router.put("/write")
+@files_router.put("/write")
 def write_file(body: WriteFileBody) -> dict:
     return ok(doc_engine.write_text_document(body.path, body.content))
 
 
-@router.get("/pdf-stream")
+@files_router.get("/pdf-stream")
 def stream_pdf(path: str = Query(...)) -> FileResponse:
     target = safe_io.resolve_safe_path(path, must_exist=True)
     return FileResponse(target, media_type="application/pdf", headers={"Content-Disposition": "inline"})
 
 
-@router.post("/pdf-annotate")
+@files_router.post("/pdf-annotate")
 def annotate_pdf(body: PdfAnnotateBody) -> dict:
     return ok(doc_engine.annotate_pdf(body.path, body.page, body.note_text, color=body.color))
 
 
-@router.post("/privacy")
+@files_router.post("/privacy")
 def set_privacy(body: PrivacyBody) -> dict:
     return ok(safe_io.set_private(body.path, body.private))
 
 
-@router.get("/snapshots")
+@files_router.get("/snapshots")
 def get_snapshots(path: str = Query(...)) -> dict:
     return ok(safe_io.list_snapshots(path))
 
 
-@router.post("/snapshots")
+@files_router.post("/snapshots")
 def restore_snapshot(body: RestoreSnapshotBody) -> dict:
     return ok(safe_io.restore_snapshot(body.path, body.snapshot_id))
 
 
-@router.get("/raw-stream")
+@files_router.get("/raw-stream")
 def raw_stream(path: str = Query(...)) -> FileResponse:
     target = safe_io.resolve_safe_path(path, must_exist=True)
     return FileResponse(target, media_type=doc_engine.guess_mime_type(target), headers={"Content-Disposition": "inline"})
 
 
-@router.get("/archive-entry")
+@files_router.get("/archive-entry")
 def read_archive_entry(path: str = Query(...), member: str = Query(...)) -> dict:
     return ok(doc_engine.read_archive_entry(path, member))
 
 
-@router.post("/open-external")
+@files_router.post("/open-external")
 def open_external(body: OpenExternalBody) -> dict:
     return ok(doc_engine.open_external(body.path, body.reveal_folder))
 
 
-@router.post("/open-url")
+@files_router.post("/open-url")
 def open_url(body: OpenUrlBody) -> dict:
     return ok(doc_engine.open_external_url(body.url))
 
 
-@router.post("/relocate")
+@files_router.post("/relocate")
 def relocate_file(body: RelocateBody) -> dict:
     return ok(doc_engine.relocate_missing_file(body.filename))
 
 
-@router.get("/backlinks")
+@files_router.get("/backlinks")
 def get_backlinks(path: str = Query(...)) -> dict:
     return ok(search_engine.find_backlinks(path))
 
 
-@router.post("/rename")
+@files_router.post("/rename")
 def rename_file(body: RenameFileBody) -> dict:
     return ok(doc_engine.rename_file(body.path, body.new_name))
 
 
-@router.post("/remove")
+@files_router.post("/remove")
 def remove_file(body: RemoveFileBody) -> dict:
     return ok(doc_engine.remove_from_workspace(body.path))
+
+
+@todos_router.get("/all")
+def list_all_todos() -> dict:
+    return ok(todo_indexer.scan_all_todos())
+
+
+@todos_router.post("/toggle")
+def toggle_todo(body: ToggleTodoBody) -> dict:
+    return ok(todo_indexer.toggle_todo(body.file_path, body.line_no, body.checked, body.expected_text))
+
+
+@todos_router.post("/add")
+def add_todo(body: AddTodoBody) -> dict:
+    return ok(todo_indexer.add_todo(body.file_path, body.text))
+
+
+router.include_router(files_router)
+router.include_router(todos_router)

@@ -4,6 +4,7 @@
  */
 
 import { icon } from './icons.js';
+import { api } from './api_client.js';
 
 const THEME_STORAGE_KEY = 'sln_theme';
 const DOC_FONT_SIZE_KEY = 'sln_doc_font_size';
@@ -52,6 +53,13 @@ const DEFAULT_UI_LAYOUT = {
   ],
   scratchpadText: '',
   moduleHeights: {},
+  moduleSizePresets: {},
+  floatingModules: {},
+};
+
+export const DEFAULT_RIGHT_MODULES = {
+  summary: DEFAULT_UI_LAYOUT.rightSummaryModules.map((m) => ({ ...m })),
+  tools: DEFAULT_UI_LAYOUT.rightToolModules.map((m) => ({ ...m })),
 };
 
 const listeners = new Map();
@@ -64,6 +72,8 @@ function cloneDefaultUiLayout() {
     rightToolModules: DEFAULT_UI_LAYOUT.rightToolModules.map((m) => ({ ...m })),
     scratchpadText: DEFAULT_UI_LAYOUT.scratchpadText,
     moduleHeights: {},
+    moduleSizePresets: {},
+    floatingModules: {},
   };
 }
 
@@ -111,6 +121,37 @@ function normalizeModuleHeights(rawHeights) {
   return result;
 }
 
+function normalizeModuleSizePresets(rawPresets) {
+  const result = {};
+  if (!rawPresets || typeof rawPresets !== 'object') return result;
+  for (const [key, val] of Object.entries(rawPresets)) {
+    if (!key) continue;
+    const preset = String(val || '').trim().toLowerCase();
+    if (['s', 'm', 'l', 'auto'].includes(preset)) {
+      result[key] = preset;
+    }
+  }
+  return result;
+}
+
+function normalizeFloatingModules(rawFloating) {
+  const result = {};
+  if (!rawFloating || typeof rawFloating !== 'object') return result;
+  for (const [modId, val] of Object.entries(rawFloating)) {
+    if (!modId || !val || typeof val !== 'object') continue;
+    result[modId] = {
+      open: Boolean(val.open),
+      x: clampNumber(val.x, 8, 2400, 120),
+      y: clampNumber(val.y, 48, 1600, 96),
+      w: clampNumber(val.w, 240, 960, 340),
+      h: clampNumber(val.h, 180, 900, 420),
+      title: typeof val.title === 'string' ? val.title : '',
+      panel: val.panel === 'right' ? 'right' : 'left',
+    };
+  }
+  return result;
+}
+
 function normalizeUiLayout(raw) {
   const def = cloneDefaultUiLayout();
   if (!raw || typeof raw !== 'object') return def;
@@ -130,6 +171,8 @@ function normalizeUiLayout(raw) {
     rightToolModules: mergeModuleList(raw.rightToolModules, def.rightToolModules),
     scratchpadText: typeof raw.scratchpadText === 'string' ? raw.scratchpadText : def.scratchpadText,
     moduleHeights: normalizeModuleHeights(raw.moduleHeights),
+    moduleSizePresets: normalizeModuleSizePresets(raw.moduleSizePresets),
+    floatingModules: normalizeFloatingModules(raw.floatingModules),
   };
 }
 
@@ -343,7 +386,9 @@ export const store = {
     activeDragPayload: null,
     systemInfo: null,
     config: {},
-    files: { items: [], dirs: [], private_files: [] },
+    files: { items: [], dirs: [], folders: [], private_files: [] },
+    folders: [],
+    activeCenterView: 'doc',
     activeFile: null,
     activeDocumentText: '',
     selectedContextPaths: [],
@@ -351,6 +396,17 @@ export const store = {
     workspaces: [],
     tree: { nodes: [] },
     reminders: [],
+    trash: {
+      items: [],
+      settings: { mode: 'system', auto_purge_days: 15 },
+      stats: { count: 0, total_bytes: 0 },
+    },
+    todos: {
+      items: [],
+      by_file: {},
+      stats: { total: 0, done: 0, open: 0 },
+    },
+    globalDrag: null,
     leftCollapsed: false,
     rightCollapsed: false,
     mobileTab: 'doc',
@@ -424,6 +480,9 @@ export const store = {
     const nextPatch = typeof patch === 'function' ? patch(store.state) : patch;
     if (!nextPatch || typeof nextPatch !== 'object') return store.state;
     Object.assign(store.state, nextPatch);
+    if (nextPatch.files && typeof nextPatch.files === 'object' && Array.isArray(nextPatch.files.folders) && !('folders' in nextPatch)) {
+      store.state.folders = nextPatch.files.folders;
+    }
     store.emit('state:changed', { keys: Object.keys(nextPatch), state: store.state });
     if (eventName) {
       store.emit(eventName, store.state);
@@ -553,6 +612,86 @@ export const store = {
 
   closeSplitDoc() {
     return closeSplitDoc();
+  },
+
+  nextSequentialName(prefix, existingNames = []) {
+    return nextSequentialName(prefix, existingNames);
+  },
+
+  setCenterView(view) {
+    return setCenterView(view);
+  },
+
+  refreshFilesList() {
+    return refreshFilesList();
+  },
+
+  refreshTrash() {
+    return refreshTrash();
+  },
+
+  trashFile(path, mode = '') {
+    return trashFile(path, mode);
+  },
+
+  trashVirtualItem(opts) {
+    return trashVirtualItem(opts);
+  },
+
+  restoreTrashItem(trashId) {
+    return restoreTrashItem(trashId);
+  },
+
+  emptyTrash(trashId = '') {
+    return emptyTrash(trashId);
+  },
+
+  updateTrashSettings(patch) {
+    return updateTrashSettings(patch);
+  },
+
+  createFolder(parentDir = '', name = '') {
+    return createFolder(parentDir, name);
+  },
+
+  refreshAllTodos() {
+    return refreshAllTodos();
+  },
+
+  toggleWorkspaceTodo(opts) {
+    return toggleWorkspaceTodo(opts);
+  },
+
+  addWorkspaceTodo(file_path, text = '') {
+    return addWorkspaceTodo(file_path, text);
+  },
+
+  beginGlobalDrag(payload) {
+    return beginGlobalDrag(payload);
+  },
+
+  endGlobalDrag() {
+    return endGlobalDrag();
+  },
+
+  getGlobalDrag() {
+    return getGlobalDrag();
+  },
+
+  setModuleSizePreset(panel, modId, preset) {
+    return setModuleSizePreset(panel, modId, preset);
+  },
+
+  toggleModuleFloat(modId, meta) {
+    return toggleModuleFloat(modId, meta);
+  },
+
+  updateFloatingModuleRect(modId, rect, opts) {
+    return updateFloatingModuleRect(modId, rect, opts);
+  },
+
+  openFocusDurationPopover(anchorEl, opts) {
+    return openFocusDurationPopover(anchorEl, opts);
   },
 };
 
@@ -1102,12 +1241,13 @@ export function applyPaneWidths(leftW, rightW) {
 export function setModuleHeight(moduleId, px) {
   const id = String(moduleId || '').trim();
   if (!id) return store.state.uiLayout;
-  const clamped = clampNumber(px, 100, 640, 240);
   const current = store.state.uiLayout || cloneDefaultUiLayout();
-  const nextHeights = {
-    ...(current.moduleHeights || {}),
-    [id]: clamped,
-  };
+  const nextHeights = { ...(current.moduleHeights || {}) };
+  if (px === null || px === undefined || px === '') {
+    delete nextHeights[id];
+  } else {
+    nextHeights[id] = clampNumber(px, 100, 640, 240);
+  }
   return updateUiLayout({ moduleHeights: nextHeights });
 }
 
@@ -1222,6 +1362,9 @@ export function setDragPayload(event, payload) {
     } catch {
       // ignore
     }
+  }
+  if (normalized.type !== 'module-reorder' && normalized.type !== 'tool-module') {
+    beginGlobalDrag(normalized);
   }
   return normalized;
 }
@@ -2815,3 +2958,545 @@ export function closeSplitDoc() {
   store.emit('split:changed', null);
   return null;
 }
+
+// ============================================================================
+// V7.2 Infrastructure: Unified Namer, Explorer/Folder, Dual-Mode Trash,
+// Workspace Todos, Global Drag Bus, Module Size Presets & Floating Modules,
+// Focus Duration Popover Bridge
+// ============================================================================
+
+function escapeRegExp(str) {
+  return String(str ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Generate the next sequential name like `${prefix}1`, `${prefix}2`, ...
+ * Strips directory paths and file extensions before matching `^${prefix}(\d+)$`.
+ * @param {string} prefix
+ * @param {Array<string | { name?: string, title?: string, path?: string }>} [existingNames=[]]
+ * @returns {string}
+ */
+export function nextSequentialName(prefix, existingNames = []) {
+  const cleanPrefix = String(prefix ?? '').trim() || '新建项目';
+  const re = new RegExp(`^${escapeRegExp(cleanPrefix)}(\\d+)$`);
+  let maxNum = 0;
+
+  if (Array.isArray(existingNames)) {
+    for (const item of existingNames) {
+      const raw = typeof item === 'object' && item !== null
+        ? String(item.name || item.title || item.path || '')
+        : String(item ?? '');
+      const base = raw.split(/[\\/]/).pop()?.trim() || '';
+      if (!base) continue;
+      const stem = base.replace(/\.[^./\\]+$/, '');
+      for (const candidate of [stem, base]) {
+        const m = candidate.match(re);
+        if (m) {
+          const n = Number.parseInt(m[1], 10);
+          if (Number.isFinite(n) && n > maxNum) {
+            maxNum = n;
+          }
+        }
+      }
+    }
+  }
+
+  return `${cleanPrefix}${maxNum + 1}`;
+}
+
+/**
+ * Switch center main view between 'doc' and 'explorer' and emit 'center-view:change'.
+ * @param {'doc'|'explorer'} view
+ * @returns {'doc'|'explorer'}
+ */
+export function setCenterView(view) {
+  const next = view === 'explorer' ? 'explorer' : 'doc';
+  store.state.activeCenterView = next;
+  store.emit('state:changed', { keys: ['activeCenterView'], state: store.state });
+  store.emit('center-view:change', next);
+  return next;
+}
+
+/**
+ * Refresh workspace files & folders from /api/files/list and sync store.state.folders.
+ */
+export async function refreshFilesList() {
+  const data = await api.get('/api/files/list');
+  const nextFiles = {
+    items: Array.isArray(data?.items) ? data.items : [],
+    dirs: Array.isArray(data?.dirs) ? data.dirs : [],
+    folders: Array.isArray(data?.folders) ? data.folders : [],
+    private_files: Array.isArray(data?.private_files) ? data.private_files : [],
+  };
+  store.state.files = nextFiles;
+  store.state.folders = nextFiles.folders;
+  store.emit('state:changed', { keys: ['files', 'folders'], state: store.state });
+  store.emit('files:updated', nextFiles);
+  return nextFiles;
+}
+
+function normalizeTrashState(data) {
+  const prev = store.state.trash || {
+    items: [],
+    settings: { mode: 'system', auto_purge_days: 15 },
+    stats: { count: 0, total_bytes: 0 },
+  };
+  const items = Array.isArray(data?.items) ? data.items : prev.items;
+  const rawSettings = data?.settings && typeof data.settings === 'object' ? data.settings : prev.settings;
+  const mode = rawSettings?.mode === 'app' ? 'app' : 'system';
+  const autoPurgeDays = Number.isFinite(Number(rawSettings?.auto_purge_days))
+    ? Number(rawSettings.auto_purge_days)
+    : 15;
+  const rawStats = data?.stats && typeof data.stats === 'object' ? data.stats : {};
+  const count = Number.isFinite(Number(rawStats.count)) ? Number(rawStats.count) : items.length;
+  const totalBytes = Number.isFinite(Number(rawStats.total_bytes))
+    ? Number(rawStats.total_bytes)
+    : items.reduce((acc, it) => acc + (Number(it?.size_bytes) || 0), 0);
+
+  return {
+    items,
+    settings: { mode, auto_purge_days: autoPurgeDays },
+    stats: { count, total_bytes: totalBytes },
+  };
+}
+
+/**
+ * Fetch trash items, settings & stats from GET /api/trash and emit 'trash:updated'.
+ */
+export async function refreshTrash() {
+  const data = await api.get('/api/trash');
+  const nextTrash = normalizeTrashState(data);
+  store.state.trash = nextTrash;
+  store.emit('state:changed', { keys: ['trash'], state: store.state });
+  store.emit('trash:updated', nextTrash);
+  return nextTrash;
+}
+
+/**
+ * Move a local file or folder to Windows Recycle Bin or built-in trash via POST /api/files/trash.
+ * @param {string} path
+ * @param {'system'|'app'|''} [mode='']
+ */
+export async function trashFile(path, mode = '') {
+  const targetPath = String(path || '').trim();
+  if (!targetPath) {
+    throw new Error('文件路径不能为空');
+  }
+  const body = { path: targetPath };
+  const cleanMode = String(mode || '').trim().toLowerCase();
+  if (cleanMode === 'system' || cleanMode === 'app') {
+    body.mode = cleanMode;
+  }
+  const res = await api.post('/api/files/trash', body);
+  await Promise.allSettled([refreshFilesList(), refreshTrash()]);
+
+  const usedMode = res?.mode || cleanMode || store.state.trash?.settings?.mode || 'system';
+  const fileName = targetPath.split(/[\\/]/).pop() || targetPath;
+  if (usedMode === 'system' || res?.recycled_to_system) {
+    showToast(`已将「${fileName}」移至 Windows 系统回收站`, 'success');
+  } else {
+    showToast(`已将「${fileName}」移入内置回收站（可随时还原）`, 'success');
+  }
+  return res;
+}
+
+/**
+ * Store a deleted virtual item (sticky/mindmap/snippet/staging/workspace/app/category) into built-in trash.
+ */
+export async function trashVirtualItem({ kind, title, payload, source_path = '' } = {}) {
+  const res = await api.post('/api/trash/item', {
+    kind: String(kind || 'snippet'),
+    title: String(title || '').trim(),
+    payload: payload ?? {},
+    source_path: String(source_path || ''),
+  });
+  await refreshTrash().catch(() => {});
+  return res;
+}
+
+/**
+ * Restore an item from built-in trash via POST /api/trash/restore.
+ * Refreshes file list for disk items, or emits 'trash:restore-virtual' for virtual items.
+ * @param {string} trashId
+ */
+export async function restoreTrashItem(trashId) {
+  const cleanId = String(trashId || '').trim();
+  if (!cleanId) {
+    throw new Error('trash_id 不能为空');
+  }
+  const res = await api.post('/api/trash/restore', { trash_id: cleanId, id: cleanId });
+  await refreshTrash().catch(() => {});
+
+  const kind = String(res?.kind || res?.item?.kind || '');
+  if (kind === 'file' || kind === 'folder' || res?.restored_path) {
+    await refreshFilesList().catch(() => {});
+  } else {
+    store.emit('trash:restore-virtual', res);
+  }
+  return res;
+}
+
+/**
+ * Permanently delete a single trash entry or empty all built-in trash via POST /api/trash/empty.
+ * @param {string} [trashId='']
+ */
+export async function emptyTrash(trashId = '') {
+  const cleanId = String(trashId || '').trim();
+  const body = cleanId ? { trash_id: cleanId, id: cleanId } : { trash_id: '' };
+  const res = await api.post('/api/trash/empty', body);
+  await refreshTrash().catch(() => {});
+  return res;
+}
+
+/**
+ * Update trash settings (mode / auto_purge_days) via PUT /api/trash/settings.
+ * @param {{ mode?: 'system'|'app', auto_purge_days?: number }} patch
+ */
+export async function updateTrashSettings(patch = {}) {
+  const res = await api.put('/api/trash/settings', patch || {});
+  await refreshTrash().catch(() => {
+    const nextSettings = {
+      ...(store.state.trash?.settings || { mode: 'system', auto_purge_days: 15 }),
+      ...(res && typeof res === 'object' ? res : patch),
+    };
+    store.state.trash = normalizeTrashState({
+      ...(store.state.trash || {}),
+      settings: nextSettings,
+    });
+    store.emit('trash:updated', store.state.trash);
+  });
+  return res;
+}
+
+/**
+ * Create a new folder on disk via POST /api/files/create-folder and refresh workspace files.
+ * @param {string} [parentDir='']
+ * @param {string} [name='']
+ */
+export async function createFolder(parentDir = '', name = '') {
+  const res = await api.post('/api/files/create-folder', {
+    parent_dir: String(parentDir || ''),
+    name: String(name || ''),
+  });
+  await refreshFilesList().catch(() => {});
+  return res;
+}
+
+function normalizeTodosState(data) {
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const byFile = data?.by_file && typeof data.by_file === 'object' ? data.by_file : {};
+  const rawStats = data?.stats && typeof data.stats === 'object' ? data.stats : {};
+  const total = Number.isFinite(Number(rawStats.total)) ? Number(rawStats.total) : items.length;
+  const done = Number.isFinite(Number(rawStats.done))
+    ? Number(rawStats.done)
+    : items.filter((it) => Boolean(it?.checked)).length;
+  const open = Number.isFinite(Number(rawStats.open)) ? Number(rawStats.open) : Math.max(0, total - done);
+  return {
+    items,
+    by_file: byFile,
+    stats: { total, done, open },
+  };
+}
+
+/**
+ * Scan and refresh workspace-wide GFM todos via GET /api/todos/all and emit 'todos:updated'.
+ */
+export async function refreshAllTodos() {
+  const data = await api.get('/api/todos/all');
+  const nextTodos = normalizeTodosState(data);
+  store.state.todos = nextTodos;
+  store.emit('state:changed', { keys: ['todos'], state: store.state });
+  store.emit('todos:updated', nextTodos);
+  return nextTodos;
+}
+
+/**
+ * Toggle a GFM todo item atomically via POST /api/todos/toggle and emit 'todos:toggled'.
+ */
+export async function toggleWorkspaceTodo({ file_path, line_no, checked, expected_text = '' } = {}) {
+  const res = await api.post('/api/todos/toggle', {
+    file_path: String(file_path || ''),
+    line_no: Number(line_no),
+    checked: Boolean(checked),
+    expected_text: String(expected_text || ''),
+  });
+  store.emit('todos:toggled', {
+    ...(res && typeof res === 'object' ? res : {}),
+    file_path: String(file_path || ''),
+    line_no: Number(line_no),
+    checked: Boolean(checked),
+  });
+  await refreshAllTodos().catch(() => {});
+  return res;
+}
+
+/**
+ * Append a new GFM todo item to a Markdown note via POST /api/todos/add and refresh todos.
+ * @param {string} file_path
+ * @param {string} [text='']
+ */
+export async function addWorkspaceTodo(file_path, text = '') {
+  const res = await api.post('/api/todos/add', {
+    file_path: String(file_path || ''),
+    text: String(text || ''),
+  });
+  await refreshAllTodos().catch(() => {});
+  return res;
+}
+
+/**
+ * Begin a unified global drag session, mark body.is-global-dragging, and emit 'drag:global-start'.
+ * @param {object} [payload={}]
+ */
+export function beginGlobalDrag(payload = {}) {
+  const next = payload && typeof payload === 'object'
+    ? { ...payload }
+    : { data: payload };
+  store.state.globalDrag = next;
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.add('is-global-dragging');
+  }
+  store.emit('drag:global-start', next);
+  return next;
+}
+
+/**
+ * End the active global drag session, clear body.is-global-dragging, and emit 'drag:global-end'.
+ */
+export function endGlobalDrag() {
+  const prev = store.state.globalDrag;
+  store.state.globalDrag = null;
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.remove('is-global-dragging');
+  }
+  if (prev !== null) {
+    store.emit('drag:global-end', prev);
+  }
+  return prev;
+}
+
+/**
+ * Return the current global drag payload or null.
+ */
+export function getGlobalDrag() {
+  return store.state.globalDrag;
+}
+
+const MODULE_SIZE_PRESET_PX = {
+  s: 150,
+  m: 280,
+  l: 460,
+};
+
+/**
+ * Apply and persist a module size preset ('s' | 'm' | 'l' | 'auto') into uiLayout.
+ * @param {'left'|'right'} panel
+ * @param {string} modId
+ * @param {'s'|'m'|'l'|'auto'} preset
+ */
+export function setModuleSizePreset(panel, modId, preset) {
+  const cleanPanel = panel === 'right' ? 'right' : 'left';
+  const cleanModId = String(modId || '').trim();
+  if (!cleanModId) return store.state.uiLayout;
+
+  const normPreset = ['s', 'm', 'l', 'auto'].includes(String(preset || '').trim().toLowerCase())
+    ? String(preset).trim().toLowerCase()
+    : 'auto';
+
+  const heightKey = cleanPanel === 'right' && !cleanModId.startsWith('right_')
+    ? `right_${cleanModId}`
+    : cleanModId;
+  const presetKey = `${cleanPanel}:${cleanModId}`;
+
+  const current = store.state.uiLayout || cloneDefaultUiLayout();
+  const nextHeights = { ...(current.moduleHeights || {}) };
+  const nextPresets = { ...(current.moduleSizePresets || {}) };
+
+  if (normPreset === 'auto') {
+    delete nextHeights[heightKey];
+    if (cleanPanel === 'right') {
+      delete nextHeights[cleanModId];
+    }
+    nextPresets[presetKey] = 'auto';
+  } else {
+    nextHeights[heightKey] = MODULE_SIZE_PRESET_PX[normPreset];
+    nextPresets[presetKey] = normPreset;
+  }
+
+  return updateUiLayout({
+    moduleHeights: nextHeights,
+    moduleSizePresets: nextPresets,
+  });
+}
+
+/**
+ * Toggle or set a module's floating window state in uiLayout.floatingModules and emit 'module:float-change'.
+ * @param {string} modId
+ * @param {object} [meta={}]
+ */
+export function toggleModuleFloat(modId, meta = {}) {
+  const id = String(modId || '').trim();
+  if (!id) return null;
+
+  const current = store.state.uiLayout || cloneDefaultUiLayout();
+  const prevMap = { ...(current.floatingModules || {}) };
+  const prevEntry = prevMap[id] && typeof prevMap[id] === 'object' ? prevMap[id] : {};
+
+  const nextOpen = typeof meta?.open === 'boolean' ? meta.open : !Boolean(prevEntry.open);
+  const nextEntry = {
+    open: nextOpen,
+    x: clampNumber(meta?.x ?? prevEntry.x, 8, 2400, 120),
+    y: clampNumber(meta?.y ?? prevEntry.y, 48, 1600, 96),
+    w: clampNumber(meta?.w ?? prevEntry.w, 240, 960, 340),
+    h: clampNumber(meta?.h ?? prevEntry.h, 180, 900, 420),
+    title: typeof meta?.title === 'string' && meta.title ? meta.title : (prevEntry.title || id),
+    panel: meta?.panel === 'right' || prevEntry.panel === 'right' ? 'right' : 'left',
+  };
+
+  prevMap[id] = nextEntry;
+  updateUiLayout({ floatingModules: prevMap });
+  store.emit('module:float-change', {
+    modId: id,
+    entry: nextEntry,
+    floatingModules: prevMap,
+  });
+  return nextEntry;
+}
+
+/**
+ * Persist updated floating module window geometry { x, y, w, h }.
+ * @param {string} modId
+ * @param {{ x?: number, y?: number, w?: number, h?: number }} [rect={}]
+ * @param {{ emit?: boolean }} [opts={}]
+ */
+export function updateFloatingModuleRect(modId, rect = {}, opts = {}) {
+  const id = String(modId || '').trim();
+  if (!id) return null;
+
+  const current = store.state.uiLayout || cloneDefaultUiLayout();
+  const prevMap = { ...(current.floatingModules || {}) };
+  const prevEntry = prevMap[id] && typeof prevMap[id] === 'object'
+    ? prevMap[id]
+    : { open: true, x: 120, y: 96, w: 340, h: 420, title: id, panel: 'left' };
+
+  const nextEntry = {
+    ...prevEntry,
+    x: clampNumber(rect?.x ?? prevEntry.x, 8, 2400, prevEntry.x ?? 120),
+    y: clampNumber(rect?.y ?? prevEntry.y, 48, 1600, prevEntry.y ?? 96),
+    w: clampNumber(rect?.w ?? prevEntry.w, 240, 960, prevEntry.w ?? 340),
+    h: clampNumber(rect?.h ?? prevEntry.h, 180, 900, prevEntry.h ?? 420),
+  };
+
+  prevMap[id] = nextEntry;
+  const merged = normalizeUiLayout({ ...current, floatingModules: prevMap });
+  store.state.uiLayout = merged;
+  persistStorageJson(UI_LAYOUT_KEY, merged);
+
+  if (opts?.emit !== false) {
+    store.emit('module:float-change', {
+      modId: id,
+      entry: nextEntry,
+      floatingModules: prevMap,
+      rectOnly: true,
+    });
+  }
+  return nextEntry;
+}
+
+/**
+ * Open the lightweight Focus Duration Picker popover anchored to anchorEl.
+ * @param {HTMLElement | null} anchorEl
+ * @param {{ title?: string, workspaceId?: string, filePath?: string }} [opts={}]
+ */
+export function openFocusDurationPopover(anchorEl, opts = {}) {
+  const payload = {
+    ...(opts && typeof opts === 'object' ? opts : {}),
+    anchorEl: anchorEl || null,
+  };
+  store.emit('focus:pick-duration', payload);
+  return payload;
+}
+
+function inferDragPayloadFromEvent(e) {
+  if (store.state.activeDragPayload && typeof store.state.activeDragPayload === 'object') {
+    return store.state.activeDragPayload;
+  }
+  const target = e?.target && typeof e.target.closest === 'function' ? e.target : null;
+  const holder = target?.closest?.(
+    '[data-file-path], [data-path], [data-shelf-id], [data-sticky-id], [data-spark-id], [data-anchor-raw], [draggable="true"]'
+  );
+  if (!holder) return { kind: 'drag' };
+
+  const ds = holder.dataset || {};
+  const path = ds.filePath || ds.path || ds.mediaPath || '';
+  const id = ds.shelfId || ds.stickyId || ds.sparkId || '';
+  const title = ds.fileName || ds.title || holder.getAttribute?.('title') || holder.textContent?.trim()?.slice(0, 40) || '';
+  const kind = ds.stickyId || ds.sparkId
+    ? 'sticky'
+    : ds.shelfId
+      ? 'shelf'
+      : path
+        ? 'file'
+        : 'drag';
+  return {
+    kind,
+    type: kind,
+    path,
+    id,
+    title,
+    markdown: ds.anchorRaw || ds.mediaRaw || '',
+  };
+}
+
+let globalDragBridgeBound = false;
+
+function bindGlobalDragBridge() {
+  if (globalDragBridgeBound || typeof document === 'undefined') return;
+  globalDragBridgeBound = true;
+
+  let dropCleanupTimer = 0;
+
+  document.addEventListener('dragstart', (e) => {
+    if (dropCleanupTimer) {
+      window.clearTimeout(dropCleanupTimer);
+      dropCleanupTimer = 0;
+    }
+    const target = e?.target && typeof e.target.closest === 'function' ? e.target : null;
+    if (target?.closest('.module-drag-handle, [data-drag-module]')) {
+      return;
+    }
+    const dtTypes = Array.from(e?.dataTransfer?.types || []);
+    if (dtTypes.includes('application/x-sln-tool-module')) {
+      return;
+    }
+    const active = store.state.activeDragPayload;
+    if (active && (active.type === 'module-reorder' || active.type === 'tool-module')) {
+      return;
+    }
+    if (!store.state.globalDrag) {
+      beginGlobalDrag(inferDragPayloadFromEvent(e));
+    }
+  });
+
+  document.addEventListener('dragend', () => {
+    if (dropCleanupTimer) {
+      window.clearTimeout(dropCleanupTimer);
+      dropCleanupTimer = 0;
+    }
+    endGlobalDrag();
+  });
+
+  document.addEventListener('drop', () => {
+    if (dropCleanupTimer) {
+      window.clearTimeout(dropCleanupTimer);
+    }
+    dropCleanupTimer = window.setTimeout(() => {
+      dropCleanupTimer = 0;
+      if (store.state.globalDrag) {
+        endGlobalDrag();
+      }
+    }, 60);
+  });
+}
+
+bindGlobalDragBridge();

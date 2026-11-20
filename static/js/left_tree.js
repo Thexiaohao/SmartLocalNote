@@ -14,7 +14,7 @@
 
 import * as storeMod from './store.js';
 import { api } from './api_client.js';
-import { icon } from './icons.js';
+import { icon, getFileTypeStyle } from './icons.js';
 
 const {
   store,
@@ -27,6 +27,11 @@ const {
   setDragPayload,
   clearDragPayload,
   copyInternal,
+  nextSequentialName,
+  setModuleSizePreset,
+  toggleModuleFloat,
+  openFocusDurationPopover,
+  applyPaneWidths,
 } = storeMod;
 
 const MAX_CONTEXT_FILES = Number(storeMod.MAX_CONTEXT_FILES) || 20;
@@ -166,6 +171,33 @@ function getModuleHeight(modId) {
   return null;
 }
 
+function getModuleSizePreset(panel, modId) {
+  const presetKey = `${panel}:${modId}`;
+  const raw = store.state.uiLayout?.moduleSizePresets?.[presetKey];
+  if (raw === 's' || raw === 'm' || raw === 'l' || raw === 'auto') {
+    return raw;
+  }
+  const h = getModuleHeight(panel === 'right' && !modId.startsWith('right_') ? `right_${modId}` : modId);
+  if (!h) return 'auto';
+  if (h <= 170) return 's';
+  if (h <= 320) return 'm';
+  return 'l';
+}
+
+function isModuleFloating(modId) {
+  return Boolean(store.state.uiLayout?.floatingModules?.[modId]?.open);
+}
+
+function renderFileTypeIconHtml(nameOrExt, size = 14) {
+  const ft = getFileTypeStyle(nameOrExt);
+  return `<span class="ft-icon ${escapeHtml(ft.cssClass)}" style="--ft-color:${ft.color};--ft-bg:${ft.bg};--ft-border:${ft.border}">${icon(ft.iconName, size)}</span>`;
+}
+
+function renderFileTypeBadgeHtml(nameOrExt) {
+  const ft = getFileTypeStyle(nameOrExt);
+  return `<span class="file-ext-badge ft-badge ${escapeHtml(ft.cssClass)}" style="--ft-color:${ft.color};--ft-bg:${ft.bg};--ft-border:${ft.border}">${escapeHtml(ft.label)}</span>`;
+}
+
 function persistModuleHeight(modId, px) {
   if (typeof storeMod.setModuleHeight === 'function') {
     return storeMod.setModuleHeight(modId, px);
@@ -192,9 +224,10 @@ function resetAllLayout() {
   }
   if (store.state.uiLayout && typeof store.state.uiLayout === 'object') {
     store.state.uiLayout.moduleHeights = {};
+    store.state.uiLayout.moduleSizePresets = {};
   }
-  if (typeof storeMod.applyPaneWidths === 'function') {
-    storeMod.applyPaneWidths(260, 360);
+  if (typeof applyPaneWidths === 'function') {
+    applyPaneWidths(260, 360);
   }
   renderLeftPanel(containerRef);
   showToast('已一键恢复默认三栏宽度与模块尺寸', 'success');
@@ -463,11 +496,14 @@ function groupFiles(items, sortCfg = getLeftFileSort()) {
 async function loadFiles() {
   try {
     const data = await api.get('/api/files/list');
+    const folders = Array.isArray(data?.folders) ? data.folders : [];
     store.state.files = {
       items: Array.isArray(data?.items) ? data.items : [],
       dirs: Array.isArray(data?.dirs) ? data.dirs : [],
+      folders,
       private_files: Array.isArray(data?.private_files) ? data.private_files : [],
     };
+    store.state.folders = folders;
   } catch (err) {
     showToast(`加载文件列表失败：${err.message}`, 'error');
   }
@@ -618,16 +654,14 @@ function renderFilesSection(items, selectedSet, activePath) {
                           title="勾选参与右侧联合问答（最多 ${MAX_CONTEXT_FILES} 份）"
                           aria-label="勾选 ${escapeHtml(name)} 参与联合问答"
                         />
-                        <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
-                          ${icon(getFileIconName(ext), 15)}
-                        </span>
+                        ${renderFileTypeIconHtml(name, 14)}
                         <span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;">
                           <span style="display:flex;align-items:center;gap:4px;min-width:0;">
                             <span class="file-name" title="${escapeHtml(path)}（支持拖拽至中间笔记生成锚点 · 右键更多操作）">${escapeHtml(name)}</span>
                             ${isPinned ? `<span class="file-pin-badge" title="已置顶" aria-label="已置顶">${icon('pin', 10)}</span>` : ''}
                           </span>
                           <span style="display:flex;align-items:center;gap:5px;min-width:0;">
-                            <span class="file-ext-badge" style="padding:0 5px;font-size:9.5px;">${escapeHtml(ext)}</span>
+                            ${renderFileTypeBadgeHtml(name)}
                             ${mtimeText ? `<span class="file-meta-time" style="font-size:10px;color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(mtimeText)}</span>` : ''}
                           </span>
                         </span>
@@ -682,57 +716,46 @@ function renderAppsSection(apps) {
 }
 
 function renderWorkspacesSection(workspaces) {
-  const subtitleHtml = `<p style="margin:0 0 8px;font-size:11.5px;color:var(--text-tertiary);line-height:1.4;">打包常用文件+本地软件，一键联启进入学习/办公模式</p>`;
   if (workspaces.length === 0) {
-    return `${subtitleHtml}<p class="empty-desc" style="margin:4px 0;">暂无一键场景包，点击「捕获现场」一键打包当前桌面</p>`;
+    return `<p class="empty-desc" style="margin:2px 0;">暂无一键场景包，点击「捕获现场」一键打包</p>`;
   }
-  return (
-    subtitleHtml +
-    workspaces
-      .map((ws) => {
-        const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
-        const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
-        return `
-        <div class="workspace-card" draggable="true" data-workspace-id="${escapeHtml(ws.id)}" title="按住拖入中间笔记生成工作区锚点">
-          <div class="workspace-card-head">
-            <span class="workspace-name" title="${escapeHtml(ws.name)}">${escapeHtml(ws.name)}</span>
-            <span class="workspace-meta">${appCount} 软件 · ${fileCount} 文档</span>
+  return workspaces
+    .map((ws) => {
+      const appCount = Array.isArray(ws.app_ids) ? ws.app_ids.length : 0;
+      const fileCount = Array.isArray(ws.file_paths) ? ws.file_paths.length : 0;
+      const badgeLabel = `${appCount}软件${fileCount ? `·${fileCount}档` : ''}`;
+      return `
+        <div class="workspace-card workspace-row-compact" draggable="true" data-workspace-id="${escapeHtml(ws.id)}" title="按住拖入中间笔记生成工作区锚点，或拖入下方垃圾桶移除">
+          <div class="workspace-row-main" style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
+            <span class="workspace-name" title="${escapeHtml(ws.name)}" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ws.name)}</span>
+            <span class="file-ext-badge workspace-count-badge" title="${appCount} 个软件 · ${fileCount} 份文档">${escapeHtml(badgeLabel)}</span>
           </div>
-          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <div class="workspace-row-actions" style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
             <button
               type="button"
               class="pill-btn pill-btn-sm pill-btn-primary"
               data-action="launch-workspace"
               data-ws-id="${escapeHtml(ws.id)}"
+              title="一键联启关联软件与文档"
+              style="height:24px;padding:0 8px;font-size:11px;"
             >
-              ${icon('rocket', 12)} 联启
+              🚀 联启
             </button>
-            <select
-              class="apple-select"
-              data-role="ws-focus-duration"
-              data-ws-id="${escapeHtml(ws.id)}"
-              aria-label="选择专注时长"
-              style="width:auto;padding:4px 8px;height:28px;font-size:11.5px;border-radius:var(--radius-pill);"
-            >
-              ${FOCUS_DURATION_OPTIONS.map(
-                (opt) =>
-                  `<option value="${opt.seconds}" ${opt.seconds === 1500 ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`
-              ).join('')}
-            </select>
             <button
               type="button"
               class="pill-btn pill-btn-sm"
               data-action="focus-workspace"
               data-ws-id="${escapeHtml(ws.id)}"
+              title="选择专注时长并开启灵动岛专注"
+              style="height:24px;padding:0 8px;font-size:11px;"
             >
-              ${icon('play', 12)} 专注
+              ⏱ 专注
             </button>
           </div>
         </div>
       `;
-      })
-      .join('')
-  );
+    })
+    .join('');
 }
 
 function renderKnowledgeTreeSection(treeNodes, activePath) {
@@ -770,10 +793,9 @@ function renderKnowledgeTreeSection(treeNodes, activePath) {
                   tabindex="0"
                   style="padding-left:20px;"
                 >
-                  <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
-                    ${icon(getFileIconName(ext), 13)}
-                  </span>
+                  ${renderFileTypeIconHtml(name, 14)}
                   <span class="file-name" title="${escapeHtml(path)}">${escapeHtml(name)}</span>
+                  ${renderFileTypeBadgeHtml(name)}
                   ${status ? `<span class="file-ext-badge">${escapeHtml(status)}</span>` : ''}
                 </div>
               `;
@@ -850,11 +872,9 @@ function renderRecentFilesSection(recentFiles, activePath) {
           role="button"
           tabindex="0"
         >
-          <span style="display:inline-flex;flex-shrink:0;color:var(--text-secondary);">
-            ${icon(getFileIconName(ext), 14)}
-          </span>
+          ${renderFileTypeIconHtml(name, 14)}
           <span class="file-name" title="${escapeHtml(path)}">${escapeHtml(name)}</span>
-          <span class="file-ext-badge">${escapeHtml(ext)}</span>
+          ${renderFileTypeBadgeHtml(name)}
         </div>
       `;
     })
@@ -893,7 +913,10 @@ function renderPomodoroMiniSection() {
 
 function getModuleQuickActionsHtml(modId, _selectedCount, itemsCount) {
   if (modId === 'files') {
-    return `<span data-role="files-count-label" style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>`;
+    return `
+      <button type="button" class="pill-btn pill-btn-sm left-root-back-btn" data-action="back-to-notes-root" title="清除筛选并回到默认笔记主文件夹顶部" style="height:20px;padding:0 6px;font-size:10.5px;">⌂ 主目录顶部</button>
+      <span data-role="files-count-label" style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>
+    `;
   }
   if (modId === 'workspaces') {
     return `
@@ -917,6 +940,44 @@ function getModuleQuickActionsHtml(modId, _selectedCount, itemsCount) {
     `;
   }
   return '';
+}
+
+function isModuleBodyEmpty(modId, ctx) {
+  switch (modId) {
+    case 'files':
+      return !isLoadingInitial && (ctx.items || []).length === 0;
+    case 'workspaces':
+      return (ctx.workspaces || []).length === 0;
+    case 'apps':
+      return (ctx.apps || []).length === 0;
+    case 'tree':
+      return (ctx.treeNodes || []).filter((n) => !n.parent_id).length === 0;
+    case 'recent_files':
+      return (ctx.recentFiles || []).length === 0;
+    default:
+      return false;
+  }
+}
+
+function renderLeftModuleHeaderControlsHtml(mod) {
+  const curPreset = getModuleSizePreset('left', mod.id);
+  const floated = isModuleFloating(mod.id);
+  const presets = [
+    { key: 's', label: 'S', title: '小尺寸 (150px)' },
+    { key: 'm', label: 'M', title: '中尺寸 (280px)' },
+    { key: 'l', label: 'L', title: '大尺寸 (460px)' },
+    { key: 'auto', label: 'Auto', title: '自适应高度' },
+  ];
+  return `
+    <span class="module-size-controls" role="group" aria-label="模块高度">
+      ${presets
+        .map(
+          (p) => `<button type="button" class="module-size-pill ${curPreset === p.key ? 'is-active' : ''}" data-action="set-module-size" data-panel="left" data-mod-id="${escapeHtml(mod.id)}" data-preset="${p.key}" title="${p.title}">${p.label}</button>`
+        )
+        .join('')}
+    </span>
+    <button type="button" class="left-icon-btn is-xs module-float-btn ${floated ? 'is-active' : ''}" data-action="toggle-module-float" data-panel="left" data-mod-id="${escapeHtml(mod.id)}" data-mod-title="${escapeHtml(mod.title)}" title="${floated ? '吸回侧栏' : '弹出为独立浮窗'}" aria-label="${floated ? '吸回侧栏' : '弹出为独立浮窗'}">⧉</button>
+  `;
 }
 
 function renderModuleBodyHtml(modId, ctx) {
@@ -1031,6 +1092,9 @@ function renderStickyTopHtml(selectedCount) {
           <button type="button" class="left-icon-btn" data-action="new-note" title="新建笔记 (Ctrl+N)" aria-label="新建笔记 (Ctrl+N)">
             ${icon('plus', 14)}
           </button>
+          <button type="button" class="left-icon-btn" data-action="new-folder" title="新建文件夹" aria-label="新建文件夹">
+            ${icon('folder-plus', 14)}
+          </button>
           <button type="button" class="left-icon-btn" data-action="import-open" title="导入文件 / 挂载目录" aria-label="导入文件 / 挂载目录">
             ${icon('download', 14)}
           </button>
@@ -1092,6 +1156,11 @@ function renderStickyTopHtml(selectedCount) {
           ${icon('arrow-up', 14)}
         </button>
       </div>
+      <div class="left-quick-bar" style="display:flex;align-items:center;gap:5px;margin-top:6px;flex-wrap:wrap;">
+        <button type="button" class="pill-btn pill-btn-sm" data-action="new-note" title="新建笔记 (Ctrl+N)" style="height:24px;padding:0 8px;font-size:11px;">+ 笔记</button>
+        <button type="button" class="pill-btn pill-btn-sm" data-action="new-folder" title="新建文件夹" style="height:24px;padding:0 8px;font-size:11px;">+ 文件夹</button>
+        <button type="button" class="pill-btn pill-btn-sm" data-action="back-to-notes-root" title="清除筛选并回到默认笔记主文件夹顶部" style="height:24px;padding:0 8px;font-size:11px;margin-left:auto;">⌂ 主目录顶部</button>
+      </div>
     </div>
   `;
 }
@@ -1125,9 +1194,13 @@ function buildModulesHtml() {
     .map((mod) => {
       const collapsed = Boolean(mod.collapsed);
       const customH = getModuleHeight(mod.id);
+      const isAuto = !customH;
+      const isEmpty = isModuleBodyEmpty(mod.id, ctx);
       const scrollStyle = customH
         ? `height:${customH}px;max-height:${customH}px;overflow-y:auto;`
-        : '';
+        : isEmpty
+          ? 'min-height:0;'
+          : '';
 
       return `
         <section
@@ -1156,13 +1229,16 @@ function buildModulesHtml() {
                 <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(mod.title)}</span>
               </button>
             </div>
-            <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+            <div class="module-header-right" style="display:inline-flex;align-items:center;gap:3px;flex-shrink:0;">
               ${getModuleQuickActionsHtml(mod.id, selectedSet.size, items.length)}
+              <span class="module-hover-controls" style="display:inline-flex;align-items:center;gap:3px;">
+                ${renderLeftModuleHeaderControlsHtml(mod)}
+              </span>
             </div>
           </div>
           <div class="module-content">
             <div
-              class="module-scroll-body"
+              class="module-scroll-body${isAuto ? ' is-auto-height' : ''}${isEmpty ? ' is-empty-compact' : ''}"
               data-scroll-module="${escapeHtml(mod.id)}"
               ${scrollStyle ? `style="${scrollStyle}"` : ''}
             >
@@ -1294,13 +1370,38 @@ function renderLeftPanel(containerEl) {
 function openCustomizeModulesSheet() {
   openSheet({
     title: '自定义左侧模块',
-    bodyHtml: `<div id="left-modules-manager" style="display:flex;flex-direction:column;gap:8px;"></div>`,
+    bodyHtml: `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div id="left-pane-width-box"></div>
+        <div id="left-modules-manager" style="display:flex;flex-direction:column;gap:8px;"></div>
+      </div>
+    `,
     footerHtml: `
       <button type="button" class="pill-btn pill-btn-ghost" id="left-modules-reset">恢复默认尺寸与布局</button>
       <button type="button" class="pill-btn pill-btn-primary" id="left-modules-done">完成</button>
     `,
     onMount(card) {
+      const widthBoxEl = card.querySelector('#left-pane-width-box');
       const listEl = card.querySelector('#left-modules-manager');
+
+      const renderWidthControls = () => {
+        if (!widthBoxEl) return;
+        const curLeftW = Math.round(Number(store.state.paneWidths?.left) || 260);
+        widthBoxEl.innerHTML = `
+          <div class="glass-card" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <span style="font-size:12.5px;font-weight:600;color:var(--text-primary);">左侧栏整体宽度 (200~480px)</span>
+              <span id="left-pane-width-val" style="font-size:12px;font-weight:600;color:var(--accent);">${curLeftW}px</span>
+            </div>
+            <input type="range" id="left-pane-width-range" min="200" max="480" step="2" value="${curLeftW}" style="width:100%;" />
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="pill-btn pill-btn-sm ${Math.abs(curLeftW - 230) <= 10 ? 'pill-btn-primary' : ''}" data-left-w="230">窄 230</button>
+              <button type="button" class="pill-btn pill-btn-sm ${Math.abs(curLeftW - 270) <= 15 ? 'pill-btn-primary' : ''}" data-left-w="270">标准 270</button>
+              <button type="button" class="pill-btn pill-btn-sm ${Math.abs(curLeftW - 360) <= 20 ? 'pill-btn-primary' : ''}" data-left-w="360">宽 360</button>
+            </div>
+          </div>
+        `;
+      };
 
       const renderManagerRows = () => {
         if (!listEl) return;
@@ -1310,44 +1411,72 @@ function openCustomizeModulesSheet() {
             const desc = MODULE_DESCRIPTIONS[mod.id] || '';
             const isFirst = idx === 0;
             const isLast = idx === modules.length - 1;
+            const curPreset = getModuleSizePreset('left', mod.id);
+            const floated = isModuleFloating(mod.id);
             return `
               <div
                 class="glass-card"
                 data-mod-row="${escapeHtml(mod.id)}"
-                style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;"
+                style="display:flex;flex-direction:column;gap:8px;padding:10px 12px;"
               >
-                <label style="display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0;cursor:pointer;">
-                  <input
-                    type="checkbox"
-                    class="file-check"
-                    data-mod-toggle="${escapeHtml(mod.id)}"
-                    ${mod.visible !== false ? 'checked' : ''}
-                    style="margin-top:2px;"
-                  />
-                  <div style="min-width:0;">
-                    <div style="font-size:13px;font-weight:600;color:var(--text-primary);">${escapeHtml(mod.title)}</div>
-                    ${desc ? `<div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">${escapeHtml(desc)}</div>` : ''}
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                  <label style="display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0;cursor:pointer;">
+                    <input
+                      type="checkbox"
+                      class="file-check"
+                      data-mod-toggle="${escapeHtml(mod.id)}"
+                      ${mod.visible !== false ? 'checked' : ''}
+                      style="margin-top:2px;"
+                    />
+                    <div style="min-width:0;">
+                      <div style="font-size:13px;font-weight:600;color:var(--text-primary);">${escapeHtml(mod.title)}</div>
+                      ${desc ? `<div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">${escapeHtml(desc)}</div>` : ''}
+                    </div>
+                  </label>
+                  <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+                    <button
+                      type="button"
+                      class="pill-btn pill-btn-sm"
+                      data-mod-move="up"
+                      data-mod-id="${escapeHtml(mod.id)}"
+                      ${isFirst ? 'disabled' : ''}
+                      title="上移"
+                      style="height:26px;padding:0 8px;font-size:12px;"
+                    >↑</button>
+                    <button
+                      type="button"
+                      class="pill-btn pill-btn-sm"
+                      data-mod-move="down"
+                      data-mod-id="${escapeHtml(mod.id)}"
+                      ${isLast ? 'disabled' : ''}
+                      title="下移"
+                      style="height:26px;padding:0 8px;font-size:12px;"
+                    >↓</button>
                   </div>
-                </label>
-                <div style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding-left:24px;flex-wrap:wrap;">
+                  <div style="display:inline-flex;align-items:center;gap:4px;">
+                    <span style="font-size:11px;color:var(--text-tertiary);margin-right:2px;">高度：</span>
+                    ${[
+                      { key: 's', label: 'S' },
+                      { key: 'm', label: 'M' },
+                      { key: 'l', label: 'L' },
+                      { key: 'auto', label: 'Auto' },
+                    ]
+                      .map(
+                        (p) => `<button type="button" class="pill-btn pill-btn-sm ${curPreset === p.key ? 'pill-btn-primary' : ''}" data-mod-size="${p.key}" data-mod-id="${escapeHtml(mod.id)}" style="height:22px;padding:0 8px;font-size:11px;">${p.label}</button>`
+                      )
+                      .join('')}
+                  </div>
                   <button
                     type="button"
-                    class="pill-btn pill-btn-sm"
-                    data-mod-move="up"
-                    data-mod-id="${escapeHtml(mod.id)}"
-                    ${isFirst ? 'disabled' : ''}
-                    title="上移"
-                    style="height:26px;padding:0 8px;font-size:12px;"
-                  >↑</button>
-                  <button
-                    type="button"
-                    class="pill-btn pill-btn-sm"
-                    data-mod-move="down"
-                    data-mod-id="${escapeHtml(mod.id)}"
-                    ${isLast ? 'disabled' : ''}
-                    title="下移"
-                    style="height:26px;padding:0 8px;font-size:12px;"
-                  >↓</button>
+                    class="pill-btn pill-btn-sm ${floated ? 'pill-btn-primary' : ''}"
+                    data-mod-float="${escapeHtml(mod.id)}"
+                    data-mod-title="${escapeHtml(mod.title)}"
+                    style="height:22px;padding:0 9px;font-size:11px;"
+                  >
+                    ⧉ ${floated ? '已浮窗（点此吸回）' : '弹出浮窗'}
+                  </button>
                 </div>
               </div>
             `;
@@ -1355,7 +1484,31 @@ function openCustomizeModulesSheet() {
           .join('');
       };
 
+      renderWidthControls();
       renderManagerRows();
+
+      widthBoxEl?.addEventListener('input', (e) => {
+        const range = e.target.closest('#left-pane-width-range');
+        if (!range) return;
+        const nextW = Number(range.value) || 260;
+        applyPaneWidths?.(nextW, store.state.paneWidths?.right ?? 360);
+        const valEl = widthBoxEl.querySelector('#left-pane-width-val');
+        if (valEl) valEl.textContent = `${nextW}px`;
+      });
+
+      widthBoxEl?.addEventListener('change', (e) => {
+        if (e.target.closest('#left-pane-width-range')) {
+          renderWidthControls();
+        }
+      });
+
+      widthBoxEl?.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-left-w]');
+        if (!btn) return;
+        const w = Number(btn.dataset.leftW) || 270;
+        applyPaneWidths?.(w, store.state.paneWidths?.right ?? 360);
+        renderWidthControls();
+      });
 
       listEl?.addEventListener('change', (e) => {
         const cb = e.target.closest('[data-mod-toggle]');
@@ -1368,6 +1521,28 @@ function openCustomizeModulesSheet() {
       });
 
       listEl?.addEventListener('click', (e) => {
+        const sizeBtn = e.target.closest('[data-mod-size]');
+        if (sizeBtn) {
+          const modId = sizeBtn.dataset.modId;
+          const preset = sizeBtn.dataset.modSize;
+          if (modId && preset) {
+            setModuleSizePreset?.('left', modId, preset);
+            renderManagerRows();
+          }
+          return;
+        }
+
+        const floatBtn = e.target.closest('[data-mod-float]');
+        if (floatBtn) {
+          const modId = floatBtn.dataset.modFloat;
+          const modTitle = floatBtn.dataset.modTitle || modId;
+          if (modId) {
+            toggleModuleFloat?.(modId, { title: modTitle, panel: 'left' });
+            renderManagerRows();
+          }
+          return;
+        }
+
         const btn = e.target.closest('[data-mod-move]');
         if (!btn) return;
         const modId = btn.dataset.modId;
@@ -1385,6 +1560,7 @@ function openCustomizeModulesSheet() {
 
       card.querySelector('#left-modules-reset')?.addEventListener('click', () => {
         resetAllLayout();
+        renderWidthControls();
         renderManagerRows();
       });
 
@@ -1398,6 +1574,8 @@ function openCreateNoteSheet() {
   const nodeOptions = nodes
     .map((n) => `<option value="${escapeHtml(n.id)}">${escapeHtml(n.name)}</option>`)
     .join('');
+  const existingNotes = (store.state.files?.items || []).map((f) => f.name || getBasename(f.path));
+  const defaultTitle = nextSequentialName('新建笔记', existingNotes);
 
   openSheet({
     title: '新建本地笔记',
@@ -1405,7 +1583,7 @@ function openCreateNoteSheet() {
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div>
           <label for="new-note-title" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">笔记标题</label>
-          <input id="new-note-title" type="text" class="apple-input" placeholder="例如：高数第三章错题复盘" />
+          <input id="new-note-title" type="text" class="apple-input" placeholder="留空直接创建：${escapeHtml(defaultTitle)}" />
         </div>
         <div>
           <label for="new-note-node" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">关联知识树节点（可选）</label>
@@ -1434,12 +1612,7 @@ function openCreateNoteSheet() {
       card.querySelector('#note-sheet-cancel')?.addEventListener('click', closeSheet);
 
       const doSubmit = async () => {
-        const title = titleInput?.value?.trim();
-        if (!title) {
-          showToast('请输入笔记标题', 'warning');
-          titleInput?.focus();
-          return;
-        }
+        const title = titleInput?.value?.trim() || defaultTitle;
         const content = contentInput?.value ?? '';
         const nodeId = nodeSelect?.value?.trim() || null;
 
@@ -1749,6 +1922,7 @@ function openRenameFileSheet(item) {
 }
 
 function openAddAppSheet() {
+  const defaultAppName = nextSequentialName('新建软件', (store.state.apps || []).map((a) => a?.name || ''));
   openSheet({
     title: '添加本地软件直达',
     bodyHtml: `
@@ -1764,8 +1938,8 @@ function openAddAppSheet() {
         </div>
 
         <div>
-          <label for="add-app-name" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">软件名称</label>
-          <input id="add-app-name" type="text" class="apple-input" placeholder="例如：WPS Office / Edge" />
+          <label for="add-app-name" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">软件名称（可留空）</label>
+          <input id="add-app-name" type="text" class="apple-input" placeholder="留空自动取程序文件名或 ${escapeHtml(defaultAppName)}" />
         </div>
         <div>
           <label for="add-app-aliases" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">别名关键词（逗号分隔，供 AI 自动匹配）</label>
@@ -1825,16 +1999,12 @@ function openAddAppSheet() {
       });
 
       saveBtn?.addEventListener('click', async () => {
-        const name = nameInput?.value?.trim();
         const path = pathInput?.value?.trim();
+        const derivedName = path ? getBasename(path).replace(/\.(exe|lnk|bat|cmd)$/i, '').trim() : '';
+        const name = nameInput?.value?.trim() || derivedName || defaultAppName;
         const aliasesRaw = aliasesInput?.value || '';
         const args = argsInput?.value?.trim() || '';
 
-        if (!name) {
-          showToast('请输入软件名称', 'warning');
-          nameInput?.focus();
-          return;
-        }
         if (!path) {
           showToast('请输入或选择软件可执行路径', 'warning');
           pathInput?.focus();
@@ -1871,6 +2041,7 @@ function openCaptureSceneSheet() {
   const files = store.state.files?.items || [];
   const registeredApps = store.state.apps || [];
   const activePath = store.state.activeFile?.path || '';
+  const defaultWsName = nextSequentialName('新建场景', (store.state.workspaces || []).map((w) => w?.name || ''));
 
   const filesCheckHtml =
     files.length === 0
@@ -1916,7 +2087,7 @@ function openCaptureSceneSheet() {
       <div style="display:flex;flex-direction:column;gap:14px;">
         <div>
           <label for="capture-ws-name" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">一键场景包名称</label>
-          <input id="capture-ws-name" type="text" class="apple-input" placeholder="如：高数复习场景包" />
+          <input id="capture-ws-name" type="text" class="apple-input" value="${escapeHtml(defaultWsName)}" placeholder="留空自动命名：${escapeHtml(defaultWsName)}" />
         </div>
 
         <div class="glass-card">
@@ -2012,14 +2183,10 @@ function openCaptureSceneSheet() {
       rescanBtn?.addEventListener('click', scanRunningWindows);
       scanRunningWindows();
       wsNameInput?.focus();
+      wsNameInput?.select();
 
       saveBtn?.addEventListener('click', async () => {
-        const name = wsNameInput?.value?.trim();
-        if (!name) {
-          showToast('请输入工作区名称（如：高数复习现场）', 'warning');
-          wsNameInput?.focus();
-          return;
-        }
+        const name = wsNameInput?.value?.trim() || defaultWsName;
 
         const appIds = Array.from(card.querySelectorAll('.capture-registered-app:checked'))
           .map((cb) => cb.value)
@@ -2195,6 +2362,68 @@ async function handleRemoveFileFromWorkspace(item) {
     showToast(`已从工作台列表移除：${item.name || getBasename(item.path)}（原文件保留）`, 'info');
   } catch (err) {
     showToast(`移除失败：${err.message}`, 'error');
+  }
+}
+
+async function handleTrashFile(item) {
+  if (!item?.path) return;
+  try {
+    if (Array.isArray(store.state.selectedContextPaths)) {
+      const filtered = store.state.selectedContextPaths.filter((p) => p !== item.path);
+      if (filtered.length !== store.state.selectedContextPaths.length) {
+        store.state.selectedContextPaths = filtered;
+        store.emit('context:changed', filtered);
+      }
+    }
+    if (typeof store.trashFile === 'function') {
+      await store.trashFile(item.path);
+    } else {
+      await api.post('/api/files/trash', { path: item.path });
+      await loadFiles();
+      emitWithGuard('files', store.state.files);
+    }
+    renderPanelBody(containerRef);
+  } catch (err) {
+    showToast(`移入回收站失败：${err.message}`, 'error');
+  }
+}
+
+function handleBackToNotesRoot(containerEl = containerRef) {
+  if (!containerEl) return;
+  leftFilterQuery = '';
+  store.state.leftFileFilter = '';
+  const filterInput = containerEl.querySelector('.left-filter-input');
+  if (filterInput) {
+    filterInput.value = '';
+  }
+  updateFilterUiState(containerEl);
+
+  const mods = getLeftModules();
+  const filesMod = mods.find((m) => m.id === 'files');
+  if (filesMod && (filesMod.visible === false || filesMod.collapsed)) {
+    const nextModules = mods.map((m) =>
+      m.id === 'files' ? { ...m, visible: true, collapsed: false } : { ...m }
+    );
+    updateUiLayout({ leftModules: nextModules });
+  }
+
+  collapsedGroups.delete('source:notes');
+  updateFilesSectionOnly(containerEl);
+
+  const bodyEl = containerEl.querySelector('.panel-body');
+  const filesBlock = containerEl.querySelector('.module-block[data-module-id="files"]');
+  const filesScroll = filesBlock?.querySelector('.module-scroll-body');
+  const targetTop = filesBlock ? Math.max(0, filesBlock.offsetTop - 6) : 0;
+  bodyEl?.scrollTo({ top: targetTop, behavior: 'smooth' });
+  filesScroll?.scrollTo({ top: 0, behavior: 'smooth' });
+
+  const notesGroup = filesBlock?.querySelector('.tree-group[data-group-key="source:notes"] .tree-folder-row');
+  if (notesGroup) {
+    notesGroup.classList.add('is-root-highlight');
+    notesGroup.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    window.setTimeout(() => {
+      notesGroup.classList.remove('is-root-highlight');
+    }, 1200);
   }
 }
 
@@ -2474,19 +2703,24 @@ function startInlineNewNote() {
     return;
   }
 
-  const existingRow = filesListEl.querySelector('.inline-quick-create-row');
+  const existingRow = filesListEl.querySelector('.inline-quick-create-row[data-create-kind="note"]');
   if (existingRow) {
     const inp = existingRow.querySelector('.inline-rename-input');
     inp?.focus();
     inp?.select();
     return;
   }
+  filesListEl.querySelectorAll('.inline-quick-create-row').forEach((el) => el.remove());
+
+  const existingNotes = (store.state.files?.items || []).map((f) => f.name || getBasename(f.path));
+  const defaultTitle = nextSequentialName('新建笔记', existingNotes);
 
   const row = document.createElement('div');
   row.className = 'inline-quick-create-row';
+  row.dataset.createKind = 'note';
   row.innerHTML = `
-    <span style="display:inline-flex;flex-shrink:0;color:var(--accent);">${icon('file-text', 14)}</span>
-    <input type="text" class="inline-rename-input" placeholder="输入笔记名，回车创建…" autocomplete="off" spellcheck="false" />
+    ${renderFileTypeIconHtml(`${defaultTitle}.md`, 14)}
+    <input type="text" class="inline-rename-input" placeholder="笔记名（留空回车：${escapeHtml(defaultTitle)}）" autocomplete="off" spellcheck="false" />
     <button type="button" class="icon-pill" data-role="inline-create-ok" title="创建" aria-label="确认创建" style="width:22px;height:22px;flex-shrink:0;">
       ${icon('check', 12)}
     </button>
@@ -2512,12 +2746,7 @@ function startInlineNewNote() {
   const submit = async () => {
     if (busy) return;
     const raw = input?.value?.trim() || '';
-    if (!raw) {
-      showToast('请输入笔记名称', 'warning');
-      input?.focus();
-      return;
-    }
-    const title = raw.replace(/\.md$/i, '').trim() || raw;
+    const title = (raw ? raw.replace(/\.md$/i, '').trim() : '') || defaultTitle;
     busy = true;
     if (input) input.disabled = true;
     if (okBtn) okBtn.disabled = true;
@@ -2574,6 +2803,124 @@ function startInlineNewNote() {
   });
 }
 
+function startInlineNewFolder() {
+  const existingFolders = [
+    ...(store.state.folders || []),
+    ...(store.state.files?.folders || []),
+  ].map((f) => (typeof f === 'string' ? f : f?.name || f?.rel_dir || f?.path || ''));
+  const defaultFolderName = nextSequentialName('新建文件夹', existingFolders);
+
+  if (!containerRef) {
+    store.createFolder?.('', defaultFolderName).catch((err) => {
+      showToast(`创建文件夹失败：${err?.message || '未知错误'}`, 'error');
+    });
+    return;
+  }
+
+  const mods = getLeftModules();
+  const filesMod = mods.find((m) => m.id === 'files');
+  if (filesMod && (filesMod.visible === false || filesMod.collapsed)) {
+    const nextModules = mods.map((m) =>
+      m.id === 'files' ? { ...m, visible: true, collapsed: false } : { ...m }
+    );
+    updateUiLayout({ leftModules: nextModules });
+  }
+
+  const filesListEl = containerRef.querySelector('.left-files-list');
+  if (!filesListEl) {
+    store.createFolder?.('', defaultFolderName).then((res) => {
+      renderPanelBody(containerRef);
+      showToast(`已创建文件夹：${res?.name || defaultFolderName}`, 'success');
+    }).catch((err) => {
+      showToast(`创建文件夹失败：${err?.message || '未知错误'}`, 'error');
+    });
+    return;
+  }
+
+  const existingRow = filesListEl.querySelector('.inline-quick-create-row[data-create-kind="folder"]');
+  if (existingRow) {
+    const inp = existingRow.querySelector('.inline-rename-input');
+    inp?.focus();
+    inp?.select();
+    return;
+  }
+  filesListEl.querySelectorAll('.inline-quick-create-row').forEach((el) => el.remove());
+
+  const row = document.createElement('div');
+  row.className = 'inline-quick-create-row';
+  row.dataset.createKind = 'folder';
+  row.innerHTML = `
+    <span style="display:inline-flex;flex-shrink:0;color:#D97706;">${icon('folder-plus', 14)}</span>
+    <input type="text" class="inline-rename-input" placeholder="文件夹名（留空回车：${escapeHtml(defaultFolderName)}）" autocomplete="off" spellcheck="false" />
+    <button type="button" class="icon-pill" data-role="inline-folder-ok" title="创建文件夹" aria-label="确认创建文件夹" style="width:22px;height:22px;flex-shrink:0;">
+      ${icon('check', 12)}
+    </button>
+    <button type="button" class="icon-pill" data-role="inline-folder-cancel" title="取消" aria-label="取消" style="width:22px;height:22px;flex-shrink:0;">
+      ${icon('x', 12)}
+    </button>
+  `;
+
+  filesListEl.prepend(row);
+  const input = row.querySelector('.inline-rename-input');
+  const okBtn = row.querySelector('[data-role="inline-folder-ok"]');
+  const cancelBtn = row.querySelector('[data-role="inline-folder-cancel"]');
+
+  window.requestAnimationFrame(() => {
+    input?.focus();
+  });
+
+  let busy = false;
+  const cleanup = () => {
+    row.remove();
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const raw = input?.value?.trim() || '';
+    const folderName = raw || defaultFolderName;
+    busy = true;
+    if (input) input.disabled = true;
+    if (okBtn) okBtn.disabled = true;
+
+    try {
+      const res = typeof store.createFolder === 'function'
+        ? await store.createFolder('', folderName)
+        : await api.post('/api/files/create-folder', { parent_dir: '', name: folderName });
+      cleanup();
+      await loadFiles();
+      renderLeftPanel(containerRef);
+      showToast(`已创建文件夹：${res?.name || folderName}`, 'success');
+    } catch (err) {
+      busy = false;
+      if (input) input.disabled = false;
+      if (okBtn) okBtn.disabled = false;
+      showToast(`创建文件夹失败：${err.message}`, 'error');
+      input?.focus();
+    }
+  };
+
+  okBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    submit();
+  });
+
+  cancelBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    cleanup();
+  });
+
+  input?.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cleanup();
+    }
+  });
+}
+
 export function triggerInlineNewNote() {
   startInlineNewNote();
 }
@@ -2587,6 +2934,8 @@ function openFileContextMenu(clientX, clientY, rowEl) {
   const isInContext = (store.state.selectedContextPaths || []).includes(path);
   const isPrivate = Boolean(item.is_private);
   const isPinned = getPinnedFilesList().includes(path);
+  const trashMode = store.state.trash?.settings?.mode === 'app' ? 'app' : 'system';
+  const trashLabel = trashMode === 'app' ? '移入内置回收站' : '移入系统回收站';
 
   const menuItems = [
     { id: 'open', icon: '📖', label: '打开文件' },
@@ -2600,7 +2949,8 @@ function openFileContextMenu(clientX, clientY, rowEl) {
     { id: 'open-external', icon: '🚀', label: '用系统默认程序打开' },
     { id: 'reveal-folder', icon: '📂', label: '打开所在文件夹' },
     { sep: true },
-    { id: 'remove', icon: '🗑', label: '从工作台列表移除（不删原文件）', danger: true },
+    { id: 'remove', icon: '➖', label: '从工作台列表移除（不删原文件）' },
+    { id: 'trash-file', icon: '🗑', label: trashLabel, danger: true },
   ];
 
   showLeftContextMenu(clientX, clientY, item.name || name, menuItems, (actionId) => {
@@ -2649,6 +2999,9 @@ function openFileContextMenu(clientX, clientY, rowEl) {
         break;
       case 'remove':
         handleRemoveFileFromWorkspace(item);
+        break;
+      case 'trash-file':
+        handleTrashFile(item);
         break;
       default:
         break;
@@ -2701,6 +3054,7 @@ function ensureModuleContextMenuDismissListeners() {
 }
 
 function getNamedLayoutPresets() {
+  if (Array.isArray(store.state.layoutMemory?.presets)) return store.state.layoutMemory.presets;
   if (Array.isArray(store.state.layoutPresets)) return store.state.layoutPresets;
   if (Array.isArray(store.state.uiLayout?.layoutPresets)) return store.state.uiLayout.layoutPresets;
   if (Array.isArray(store.state.uiLayout?.presets)) return store.state.uiLayout.presets;
@@ -2805,10 +3159,11 @@ function openModuleContextMenu(opts = {}) {
       `
       : '';
 
+    const defaultPresetName = nextSequentialName('新建布局', presets.map((p) => p?.name || ''));
     const presetInputHtml = showPresetInput
       ? `
         <div class="inline-quick-create-row" data-role="mctx-preset-row" style="margin:4px 6px;">
-          <input type="text" class="inline-rename-input" data-role="mctx-preset-input" placeholder="预设名，回车保存…" autocomplete="off" />
+          <input type="text" class="inline-rename-input" data-role="mctx-preset-input" placeholder="预设名（留空：${escapeHtml(defaultPresetName)}）" autocomplete="off" />
           <button type="button" class="icon-pill" data-mctx-act="confirm-save-preset" title="保存" style="width:22px;height:22px;flex-shrink:0;">${icon('check', 11)}</button>
           <button type="button" class="icon-pill" data-mctx-act="cancel-save-preset" title="取消" style="width:22px;height:22px;flex-shrink:0;">${icon('x', 11)}</button>
         </div>
@@ -2872,12 +3227,8 @@ function openModuleContextMenu(opts = {}) {
 
   const commitPreset = () => {
     const inp = menu.querySelector('[data-role="mctx-preset-input"]');
-    const name = inp?.value?.trim();
-    if (!name) {
-      showToast('请输入预设名称', 'warning');
-      inp?.focus();
-      return;
-    }
+    const fallbackName = nextSequentialName('新建布局', getNamedLayoutPresets().map((p) => p?.name || ''));
+    const name = inp?.value?.trim() || fallbackName;
     storeMod.saveNamedLayoutPreset?.(name);
     store.emit('layout:persist-backend');
     hideModuleContextMenu();
@@ -3065,11 +3416,35 @@ function openAppContextMenu(clientX, clientY, pillEl) {
 
 function bindModuleHeightResizers(containerEl) {
   let activeDrag = null;
+  let tooltipEl = null;
+
+  const showResizeTooltip = (x, y, px) => {
+    if (typeof document === 'undefined') return;
+    if (!tooltipEl) {
+      tooltipEl = document.createElement('div');
+      tooltipEl.className = 'resize-pixel-tooltip';
+      tooltipEl.style.cssText =
+        'position:fixed;z-index:1600;pointer-events:none;padding:3px 8px;border-radius:9999px;font-size:11px;font-weight:600;color:#fff;background:rgba(28,28,30,0.88);backdrop-filter:blur(8px);box-shadow:0 4px 12px rgba(0,0,0,0.18);white-space:nowrap;';
+      document.body.appendChild(tooltipEl);
+    }
+    tooltipEl.textContent = `高 ${px}px`;
+    tooltipEl.style.left = `${Math.min(window.innerWidth - 90, Math.round(x + 12))}px`;
+    tooltipEl.style.top = `${Math.max(8, Math.round(y - 14))}px`;
+    tooltipEl.hidden = false;
+  };
+
+  const hideResizeTooltip = () => {
+    if (tooltipEl) {
+      tooltipEl.remove();
+      tooltipEl = null;
+    }
+  };
 
   const stopResize = (e) => {
     if (!activeDrag) return;
     const { resizer, modId, currentH } = activeDrag;
     activeDrag = null;
+    hideResizeTooltip();
     resizer.classList.remove('is-dragging');
     document.body.style.cursor = '';
     if (e?.pointerId != null) {
@@ -3113,6 +3488,7 @@ function bindModuleHeightResizers(containerEl) {
 
     resizer.classList.add('is-dragging');
     document.body.style.cursor = 'row-resize';
+    showResizeTooltip(e.clientX, e.clientY, startH);
     try {
       resizer.setPointerCapture?.(e.pointerId);
     } catch {
@@ -3125,9 +3501,11 @@ function bindModuleHeightResizers(containerEl) {
     const dy = e.clientY - activeDrag.startY;
     const nextH = Math.max(MODULE_MIN_HEIGHT, Math.min(MODULE_MAX_HEIGHT, Math.round(activeDrag.startH + dy)));
     activeDrag.currentH = nextH;
+    activeDrag.scrollBody.classList.remove('is-auto-height');
     activeDrag.scrollBody.style.height = `${nextH}px`;
     activeDrag.scrollBody.style.maxHeight = `${nextH}px`;
     activeDrag.scrollBody.style.overflowY = 'auto';
+    showResizeTooltip(e.clientX, e.clientY, nextH);
   });
 
   window.addEventListener('pointerup', stopResize);
@@ -3138,10 +3516,12 @@ function bindModuleHeightResizers(containerEl) {
     if (!resizer) return;
     e.preventDefault();
     e.stopPropagation();
+    hideResizeTooltip();
     const modId = resizer.dataset.resizeModule;
     const block = resizer.closest('.module-block');
     const scrollBody = block?.querySelector('.module-scroll-body');
     if (scrollBody) {
+      scrollBody.classList.add('is-auto-height');
       scrollBody.style.height = '';
       scrollBody.style.maxHeight = '';
       scrollBody.style.overflowY = '';
@@ -3149,11 +3529,15 @@ function bindModuleHeightResizers(containerEl) {
     if (modId) {
       isResizingModule = true;
       try {
-        persistModuleHeight(modId, null);
+        if (typeof setModuleSizePreset === 'function') {
+          setModuleSizePreset('left', modId, 'auto');
+        } else {
+          persistModuleHeight(modId, null);
+        }
       } finally {
         isResizingModule = false;
       }
-      showToast('已恢复模块自动高度', 'info', { duration: 1600 });
+      showToast('已恢复模块自适应高度', 'info', { duration: 1600 });
     }
   });
 }
@@ -3225,6 +3609,86 @@ export function initLeftTree(containerEl) {
     if (mutating.tree) return;
     await loadTree();
     renderPanelBody(containerEl);
+  });
+
+  store.on('trash:consumed-drag', async (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const kind = String(payload.kind || payload.type || '');
+    if (kind === 'workspace') {
+      const wsId =
+        payload.workspaceId ||
+        payload.id ||
+        (store.state.workspaces || []).find((w) => w.name === payload.label)?.id;
+      if (!wsId) return;
+      try {
+        await api.del(`/api/workspaces?workspace_id=${encodeURIComponent(wsId)}`);
+        await loadWorkspaces();
+        emitWithGuard('workspaces', store.state.workspaces);
+        renderPanelBody(containerEl);
+      } catch (err) {
+        showToast(`移除场景包失败：${err?.message || '未知错误'}`, 'error');
+      }
+    } else if (kind === 'app-portal' || kind === 'app') {
+      const appId =
+        payload.appId ||
+        payload.id ||
+        (store.state.apps || []).find((a) => a.name === payload.label)?.id;
+      if (!appId) return;
+      try {
+        await api.del(`/api/apps?app_id=${encodeURIComponent(appId)}`);
+        await loadApps();
+        emitWithGuard('apps', store.state.apps);
+        renderPanelBody(containerEl);
+      } catch (err) {
+        showToast(`移除软件失败：${err?.message || '未知错误'}`, 'error');
+      }
+    }
+  });
+
+  store.on('trash:restore-virtual', async (res) => {
+    if (!res || typeof res !== 'object') return;
+    const kind = String(res.kind || res.item?.kind || '');
+    const p = res.payload || res.item?.payload || {};
+    const title = res.title || res.item?.title || p.label || '';
+    if (kind === 'workspace') {
+      const wsData = p.workspace || p;
+      const wsName = wsData.name || title || nextSequentialName('新建场景', (store.state.workspaces || []).map((w) => w?.name || ''));
+      try {
+        await api.post('/api/workspaces', {
+          name: wsName,
+          app_ids: Array.isArray(wsData.app_ids) ? wsData.app_ids : [],
+          file_paths: Array.isArray(wsData.file_paths) ? wsData.file_paths : [],
+          captured_apps: [],
+        });
+        await loadWorkspaces();
+        emitWithGuard('workspaces', store.state.workspaces);
+        renderPanelBody(containerEl);
+        showToast(`已还原一键场景包「${wsName}」`, 'success');
+      } catch (err) {
+        showToast(`还原场景包失败：${err?.message || '未知错误'}`, 'error');
+      }
+    } else if (kind === 'app-portal' || kind === 'app') {
+      const appData = p.app || p;
+      const appName = appData.name || title || nextSequentialName('新建软件', (store.state.apps || []).map((a) => a?.name || ''));
+      if (!appData.path) {
+        showToast(`「${appName}」缺少可执行路径，请重新添加`, 'warning');
+        return;
+      }
+      try {
+        await api.post('/api/apps', {
+          name: appName,
+          path: appData.path,
+          aliases: Array.isArray(appData.aliases) ? appData.aliases : [],
+          args: appData.args || '',
+        });
+        await loadApps();
+        emitWithGuard('apps', store.state.apps);
+        renderPanelBody(containerEl);
+        showToast(`已还原本地软件「${appName}」`, 'success');
+      } catch (err) {
+        showToast(`还原软件失败：${err?.message || '未知错误'}`, 'error');
+      }
+    }
   });
 
   // Dedicated Left-Panel Right-Click Context Menu (#8 & #11)
@@ -3313,11 +3777,16 @@ export function initLeftTree(containerEl) {
 
     const appPill = e.target.closest('.app-launcher-pill[data-app-id]');
     if (appPill) {
+      const appId = appPill.dataset.appId || '';
       const appName = (appPill.dataset.appName || appPill.textContent || '').trim();
+      const appObj = (store.state.apps || []).find((a) => String(a.id) === String(appId)) || null;
       if (appName) {
         setDragPayload(e, {
           type: 'app-portal',
+          appId,
+          id: appId,
           label: appName,
+          app: appObj ? { name: appObj.name, path: appObj.path, aliases: appObj.aliases || [], args: appObj.args || '' } : null,
           markdown: '[[app:' + appName + ']]',
         });
         store.emit('drag:active', true);
@@ -3342,6 +3811,12 @@ export function initLeftTree(containerEl) {
         type: 'workspace',
         label: ws.name,
         workspaceId: ws.id,
+        id: ws.id,
+        workspace: {
+          name: ws.name,
+          app_ids: Array.isArray(ws.app_ids) ? ws.app_ids : [],
+          file_paths: Array.isArray(ws.file_paths) ? ws.file_paths : [],
+        },
         markdown: parts.join('\n'),
       });
       store.emit('drag:active', true);
@@ -3637,6 +4112,32 @@ export function initLeftTree(containerEl) {
       return;
     }
 
+    if (action === 'back-to-notes-root') {
+      e.stopPropagation();
+      handleBackToNotesRoot(containerEl);
+      return;
+    }
+
+    if (action === 'set-module-size') {
+      e.stopPropagation();
+      const modId = actionEl.dataset.modId;
+      const preset = actionEl.dataset.preset || 'auto';
+      if (modId) {
+        setModuleSizePreset?.('left', modId, preset);
+      }
+      return;
+    }
+
+    if (action === 'toggle-module-float') {
+      e.stopPropagation();
+      const modId = actionEl.dataset.modId;
+      const modTitle = actionEl.dataset.modTitle || modId;
+      if (modId) {
+        toggleModuleFloat?.(modId, { title: modTitle, panel: 'left' });
+      }
+      return;
+    }
+
     if (action === 'reset-layout') {
       resetAllLayout();
       return;
@@ -3718,6 +4219,11 @@ export function initLeftTree(containerEl) {
       return;
     }
 
+    if (action === 'new-folder') {
+      startInlineNewFolder();
+      return;
+    }
+
     if (action === 'import-open') {
       openImportSheet();
       return;
@@ -3746,12 +4252,14 @@ export function initLeftTree(containerEl) {
     }
 
     if (action === 'focus-workspace') {
+      e.stopPropagation();
       const wsId = actionEl.dataset.wsId;
-      const ws = (store.state.workspaces || []).find((w) => w.id === wsId);
-      const card = actionEl.closest('.workspace-card');
-      const selectEl = card?.querySelector('[data-role="ws-focus-duration"]');
-      const seconds = Number(selectEl?.value || 1500);
-      handleStartWorkspaceFocus(ws, seconds);
+      const ws = (store.state.workspaces || []).find((w) => String(w.id) === String(wsId));
+      openFocusDurationPopover?.(actionEl, {
+        title: ws?.name || '工作区专注',
+        workspaceId: ws?.id || wsId,
+        filePath: Array.isArray(ws?.file_paths) ? ws.file_paths[0] || '' : '',
+      });
       return;
     }
 

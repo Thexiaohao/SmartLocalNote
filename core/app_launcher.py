@@ -86,12 +86,18 @@ def resolve_lnk(path_str: str) -> tuple[str, str]:
             "@{{target=$s.TargetPath;args=$s.Arguments}}|ConvertTo-Json -Compress"
         ).format(path=escaped)
         try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             proc = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
                 capture_output=True,
                 text=True,
                 timeout=8,
                 check=False,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 parsed = json.loads(proc.stdout.strip())
@@ -212,7 +218,7 @@ def delete_app(app_id: str) -> dict[str, Any]:
 
 
 def get_running_windows() -> dict[str, Any]:
-    """Capture visible running desktop windows via PowerShell on Windows (no pywin32/psutil)."""
+    """Capture visible running desktop windows via pure Win32 ctypes (zero subprocess/PowerShell flash)."""
     if sys.platform != "win32":
         return {
             "windows": [],
@@ -221,18 +227,92 @@ def get_running_windows() -> dict[str, Any]:
             "message": "当前非 Windows 桌面环境，可手动添加常用程序或直接使用示例工作区",
         }
 
-    ps_cmd = (
-        "Get-Process | Where-Object {$_.MainWindowTitle -ne \"\" -and $_.Path} | "
-        "Select-Object ProcessName, MainWindowTitle, Path | ConvertTo-Json -Compress"
-    )
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+
+    windows: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    current_pid = os.getpid()
+
+    def _enum_cb(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+
+        title_buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title_buf, length + 1)
+        title = title_buf.value.strip()
+        if not title or title == "SmartLocalNote":
+            return True
+
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value or pid.value == current_pid:
+            return True
+
+        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not h_proc:
+            return True
+        try:
+            path_buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if not kernel32.QueryFullProcessImageNameW(h_proc, 0, path_buf, ctypes.byref(size)):
+                return True
+            exe_path = path_buf.value.strip()
+        finally:
+            kernel32.CloseHandle(h_proc)
+
+        if not exe_path:
+            return True
+        proc_name = Path(exe_path).stem.strip()
+        if not proc_name or proc_name.lower() in _IGNORED_PROCESS_NAMES:
+            return True
+
+        norm_key = exe_path.lower()
+        if norm_key in seen_paths:
+            return True
+        seen_paths.add(norm_key)
+        windows.append({
+            "process": proc_name,
+            "process_name": proc_name,
+            "title": title,
+            "path": exe_path,
+        })
+        return True
+
     try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
     except Exception as exc:
         return {
             "windows": [],
@@ -240,49 +320,6 @@ def get_running_windows() -> dict[str, Any]:
             "supported": True,
             "message": f"获取桌面窗口失败：{exc}",
         }
-
-    raw_out = (proc.stdout or "").strip()
-    if proc.returncode != 0 or not raw_out:
-        return {
-            "windows": [],
-            "platform": sys.platform,
-            "supported": True,
-            "message": "",
-        }
-
-    try:
-        parsed = json.loads(raw_out)
-    except json.JSONDecodeError:
-        return {
-            "windows": [],
-            "platform": sys.platform,
-            "supported": True,
-            "message": "解析桌面窗口输出失败",
-        }
-
-    rows = [parsed] if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
-    windows: list[dict[str, str]] = []
-    seen_paths: set[str] = set()
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        proc_name = str(row.get("ProcessName") or "").strip()
-        title = str(row.get("MainWindowTitle") or "").strip()
-        exe_path = str(row.get("Path") or "").strip()
-        if not proc_name or not title or not exe_path:
-            continue
-        if proc_name.lower() in _IGNORED_PROCESS_NAMES:
-            continue
-        norm_key = exe_path.lower()
-        if norm_key in seen_paths:
-            continue
-        seen_paths.add(norm_key)
-        windows.append({
-            "process_name": proc_name,
-            "title": title,
-            "path": exe_path,
-        })
 
     return {
         "windows": windows,
@@ -297,19 +334,29 @@ def list_workspaces() -> list[dict[str, Any]]:
     return list_apps_and_workspaces()["workspaces"]
 
 
+def _next_sequential_workspace_name(workspaces: list[dict[str, Any]], prefix: str = "新建场景") -> str:
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_num = 0
+    for ws in workspaces:
+        name = str(ws.get("name") or "").strip()
+        m = pattern.fullmatch(name)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return f"{prefix}{max_num + 1}"
+
+
 def create_workspace(
-    name: str,
+    name: str = "",
     app_ids: list[str] | None = None,
     file_paths: list[str] | None = None,
     captured_apps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create a scene workspace, auto-registering any `captured_apps` into `apps.json`."""
-    ws_name = str(name or "").strip()
-    if not ws_name:
-        raise ValueError("工作区名称不能为空")
+    raw_name = str(name or "").strip()
 
     with _LOCK:
         data = _load_apps_data()
+        ws_name = raw_name or _next_sequential_workspace_name(data["workspaces"])
         final_app_ids: list[str] = []
         seen_ids: set[str] = set()
 

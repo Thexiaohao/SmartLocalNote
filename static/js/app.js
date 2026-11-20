@@ -7,11 +7,14 @@
 import * as storeMod from './store.js';
 import {
   store,
+  escapeHtml,
+  nextSequentialName,
   applyTheme,
   applyDocTypography,
   applyPaneWidths,
   recordRecentFile,
   clearDragPayload,
+  readDragPayload,
   setIsland,
   showToast,
   openSheet,
@@ -61,9 +64,38 @@ function updateThemeButtonIcon() {
 function bindTopBarControls() {
   const btnLeft = document.getElementById('btn-toggle-left');
   const btnTabletDrawer = document.getElementById('btn-tablet-drawer');
+  const btnCenterHome = document.getElementById('btn-center-home');
   const btnRight = document.getElementById('btn-toggle-right');
   const btnTheme = document.getElementById('btn-theme');
   const drawerBackdrop = document.getElementById('drawer-backdrop');
+
+  const syncCenterHomeBtn = () => {
+    const view = store.state.activeCenterView === 'explorer' ? 'explorer' : 'doc';
+    const isExplorer = view === 'explorer';
+    const shell = document.getElementById('app-shell') || document.body;
+    if (shell) {
+      shell.dataset.centerView = view;
+    }
+    if (btnCenterHome) {
+      btnCenterHome.classList.toggle('is-active', isExplorer);
+      btnCenterHome.setAttribute('aria-pressed', isExplorer ? 'true' : 'false');
+    }
+  };
+
+  btnCenterHome?.addEventListener('click', () => {
+    const nextView = store.state.activeCenterView === 'explorer' ? 'doc' : 'explorer';
+    if (window.innerWidth <= 767) {
+      store.setState({ mobileTab: 'doc' });
+      syncLayoutClasses();
+    }
+    if (typeof store.setCenterView === 'function') {
+      store.setCenterView(nextView);
+    } else {
+      store.setState({ activeCenterView: nextView }, 'center-view:change');
+    }
+  });
+  store.on('center-view:change', syncCenterHomeBtn);
+  syncCenterHomeBtn();
 
   btnLeft?.addEventListener('click', () => {
     store.setState({ leftCollapsed: !store.state.leftCollapsed });
@@ -137,13 +169,16 @@ function bindTopBarControls() {
 }
 
 function openQuickNewNoteSheet() {
+  const existingNames = (store.state.files?.items || []).map((f) => f?.name || f?.path || '');
+  const defaultTitle = nextSequentialName('新建笔记', existingNames);
+
   openSheet({
     title: '新建本地笔记 (Ctrl+N)',
     bodyHtml: `
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div>
-          <label for="global-new-note-title" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">笔记标题</label>
-          <input id="global-new-note-title" type="text" class="apple-input" placeholder="例如：高数第三章错题复盘" autocomplete="off" />
+          <label for="global-new-note-title" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">笔记标题（留空自动顺延命名）</label>
+          <input id="global-new-note-title" type="text" class="apple-input" value="${escapeHtml(defaultTitle)}" placeholder="留空自动命名为 ${escapeHtml(defaultTitle)}" autocomplete="off" />
         </div>
         <div>
           <label for="global-new-note-content" style="display:block;font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">初始正文（可选，支持 Markdown 与 [[锚点]]）</label>
@@ -160,16 +195,14 @@ function openQuickNewNoteSheet() {
       const contentInput = card.querySelector('#global-new-note-content');
       const submitBtn = card.querySelector('#global-note-submit');
 
-      window.requestAnimationFrame(() => titleInput?.focus());
+      window.requestAnimationFrame(() => {
+        titleInput?.focus();
+        titleInput?.select?.();
+      });
       card.querySelector('#global-note-cancel')?.addEventListener('click', closeSheet);
 
       const doCreate = async () => {
-        const title = titleInput?.value?.trim();
-        if (!title) {
-          showToast('请输入笔记标题', 'warning');
-          titleInput?.focus();
-          return;
-        }
+        const title = titleInput?.value?.trim() || defaultTitle;
         const content = contentInput?.value ?? '';
         if (submitBtn) submitBtn.disabled = true;
         try {
@@ -255,7 +288,53 @@ function bindGlobalShortcuts() {
   });
 }
 
-function bindPaneResizers() {
+export function bindPaneResizers() {
+  let tooltipEl = null;
+
+  const ensureTooltip = () => {
+    if (tooltipEl && document.body.contains(tooltipEl)) return tooltipEl;
+    tooltipEl = document.getElementById('pane-resize-tooltip');
+    if (!tooltipEl) {
+      tooltipEl = document.createElement('div');
+      tooltipEl.id = 'pane-resize-tooltip';
+      tooltipEl.className = 'pane-resize-tooltip';
+      tooltipEl.style.cssText = [
+        'position:fixed',
+        'z-index:9999',
+        'pointer-events:none',
+        'padding:3px 8px',
+        'border-radius:999px',
+        'font-size:11px',
+        'font-weight:600',
+        'font-variant-numeric:tabular-nums',
+        'background:var(--surface-elevated, rgba(24,24,28,0.88))',
+        'color:var(--text-primary, #ffffff)',
+        'border:1px solid var(--border-subtle, rgba(128,128,140,0.28))',
+        'box-shadow:0 6px 16px rgba(0,0,0,0.16)',
+        'backdrop-filter:blur(10px)',
+      ].join(';');
+      tooltipEl.hidden = true;
+      document.body.appendChild(tooltipEl);
+    }
+    return tooltipEl;
+  };
+
+  const showTooltip = (x, y, px) => {
+    const tip = ensureTooltip();
+    tip.textContent = `${Math.round(px)}px`;
+    tip.hidden = false;
+    const left = Math.min(window.innerWidth - 72, Math.max(8, x + 14));
+    const top = Math.min(window.innerHeight - 36, Math.max(8, y - 28));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  };
+
+  const hideTooltip = () => {
+    if (tooltipEl) {
+      tooltipEl.hidden = true;
+    }
+  };
+
   const attachResizer = (el, side) => {
     if (!el) return;
     let dragging = false;
@@ -267,6 +346,7 @@ function bindPaneResizers() {
       dragging = false;
       el.classList.remove('is-dragging');
       document.body.classList.toggle('is-resizing', false);
+      hideTooltip();
       if (e?.pointerId != null) {
         try {
           el.releasePointerCapture?.(e.pointerId);
@@ -285,6 +365,7 @@ function bindPaneResizers() {
       startW = side === 'left' ? cur.left : cur.right;
       el.classList.add('is-dragging');
       document.body.classList.toggle('is-resizing', true);
+      showTooltip(e.clientX, e.clientY, startW);
       try {
         el.setPointerCapture?.(e.pointerId);
       } catch {
@@ -296,10 +377,13 @@ function bindPaneResizers() {
       if (!dragging) return;
       const dx = e.clientX - startX;
       const cur = store.state.paneWidths || { left: 260, right: 360 };
+      let applied;
       if (side === 'left') {
-        applyPaneWidths(startW + dx, cur.right);
+        applied = applyPaneWidths(startW + dx, cur.right);
+        showTooltip(e.clientX, e.clientY, applied.left);
       } else {
-        applyPaneWidths(cur.left, startW - dx);
+        applied = applyPaneWidths(cur.left, startW - dx);
+        showTooltip(e.clientX, e.clientY, applied.right);
       }
     });
 
@@ -310,8 +394,10 @@ function bindPaneResizers() {
       const cur = store.state.paneWidths || { left: 260, right: 360 };
       if (side === 'left') {
         applyPaneWidths(260, cur.right);
+        showToast('左侧栏已恢复默认宽度 (260px)', 'info', { duration: 1500 });
       } else {
         applyPaneWidths(cur.left, 360);
+        showToast('右侧栏已恢复默认宽度 (360px)', 'info', { duration: 1500 });
       }
     });
   };
@@ -461,6 +547,525 @@ async function loadSystemInfo() {
   }
 }
 
+export function initFocusDurationPopover() {
+  let popEl = document.getElementById('focus-duration-popover');
+  if (!popEl) {
+    popEl = document.createElement('div');
+    popEl.id = 'focus-duration-popover';
+    popEl.className = 'focus-duration-popover';
+    popEl.setAttribute('role', 'dialog');
+    popEl.setAttribute('aria-label', '选择专注时长');
+    popEl.hidden = true;
+    document.body.appendChild(popEl);
+  }
+
+  let currentOpts = null;
+
+  const closePopover = () => {
+    if (!popEl) return;
+    popEl.hidden = true;
+    popEl.classList.remove('is-open');
+    popEl.innerHTML = '';
+    currentOpts = null;
+  };
+
+  const triggerStart = (minutes) => {
+    const mins = Math.min(240, Math.max(1, Math.round(Number(minutes) || 25)));
+    const payload = { ...(currentOpts || {}), minutes: mins };
+    closePopover();
+    store.emit('focus:start', payload);
+  };
+
+  const openPopover = (opts = {}) => {
+    currentOpts = opts && typeof opts === 'object' ? { ...opts } : {};
+    const titleHint = currentOpts.title
+      ? `<div class="focus-pop-title">${icon('clock', 12)} <span>${escapeHtml(String(currentOpts.title).slice(0, 28))}</span></div>`
+      : `<div class="focus-pop-title">${icon('clock', 12)} <span>选择专注时长</span></div>`;
+
+    popEl.innerHTML = `
+      ${titleHint}
+      <div class="focus-pop-presets">
+        <button type="button" class="pill-btn pill-btn-sm" data-focus-min="15">15分</button>
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-focus-min="25">25分</button>
+        <button type="button" class="pill-btn pill-btn-sm" data-focus-min="45">45分</button>
+      </div>
+      <div class="focus-pop-custom">
+        <input type="number" class="apple-input focus-pop-input" id="focus-pop-custom-min" min="1" max="240" value="25" aria-label="自定义分钟数" />
+        <span class="focus-pop-unit">分钟</span>
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-focus-action="start">开始专注</button>
+      </div>
+    `;
+
+    popEl.hidden = false;
+    popEl.classList.add('is-open');
+
+    const anchor = currentOpts.anchorEl && typeof currentOpts.anchorEl.getBoundingClientRect === 'function'
+      ? currentOpts.anchorEl
+      : null;
+
+    const popW = popEl.offsetWidth || 248;
+    const popH = popEl.offsetHeight || 118;
+    let left = Math.round((window.innerWidth - popW) / 2);
+    let top = 72;
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      left = Math.min(window.innerWidth - popW - 12, Math.max(12, Math.round(rect.left)));
+      const belowTop = Math.round(rect.bottom + 8);
+      const aboveTop = Math.round(rect.top - popH - 8);
+      top = belowTop + popH <= window.innerHeight - 12
+        ? belowTop
+        : Math.max(12, aboveTop);
+    }
+
+    popEl.style.position = 'fixed';
+    popEl.style.left = `${left}px`;
+    popEl.style.top = `${top}px`;
+    popEl.style.zIndex = '1400';
+
+    const customInput = popEl.querySelector('#focus-pop-custom-min');
+    popEl.querySelectorAll('[data-focus-min]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        triggerStart(btn.dataset.focusMin);
+      });
+    });
+    popEl.querySelector('[data-focus-action="start"]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      triggerStart(customInput?.value);
+    });
+    customInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        triggerStart(customInput.value);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closePopover();
+      }
+    });
+  };
+
+  store.on('focus:pick-duration', openPopover);
+
+  document.addEventListener('pointerdown', (e) => {
+    if (popEl.hidden) return;
+    if (popEl.contains(e.target)) return;
+    if (currentOpts?.anchorEl && currentOpts.anchorEl.contains?.(e.target)) return;
+    closePopover();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !popEl.hidden) {
+      closePopover();
+    }
+  });
+}
+
+export function initFloatingModulesHost() {
+  let layerEl = document.getElementById('floating-modules-layer');
+  if (!layerEl) {
+    layerEl = document.createElement('div');
+    layerEl.id = 'floating-modules-layer';
+    layerEl.className = 'floating-modules-layer';
+    layerEl.setAttribute('aria-label', '浮动模块窗口层');
+    document.body.appendChild(layerEl);
+  }
+
+  const floatedMap = new Map();
+  let topZ = 1120;
+
+  const clampRect = (rect = {}) => {
+    const maxW = Math.max(260, window.innerWidth - 24);
+    const maxH = Math.max(200, window.innerHeight - 68);
+    const w = Math.min(maxW, Math.max(240, Math.round(Number(rect.w) || 340)));
+    const h = Math.min(maxH, Math.max(180, Math.round(Number(rect.h) || 420)));
+    const x = Math.min(Math.max(8, window.innerWidth - w - 8), Math.max(8, Math.round(Number(rect.x) || 120)));
+    const y = Math.min(Math.max(52, window.innerHeight - Math.min(h, 80) - 8), Math.max(52, Math.round(Number(rect.y) || 96)));
+    return { x, y, w, h };
+  };
+
+  const applyWinRect = (winEl, rect) => {
+    const c = clampRect(rect);
+    winEl.style.left = `${c.x}px`;
+    winEl.style.top = `${c.y}px`;
+    winEl.style.width = `${c.w}px`;
+    winEl.style.height = `${c.h}px`;
+    return c;
+  };
+
+  const findSidebarModuleEl = (modId) => {
+    const esc = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(modId)
+      : modId.replace(/"/g, '\\"');
+    for (const rootId of ['left-panel', 'right-panel']) {
+      const root = document.getElementById(rootId);
+      if (!root) continue;
+      const found = root.querySelector(`[data-module-id="${esc}"], [data-summary-module-id="${esc}"]`);
+      if (found && !layerEl.contains(found)) {
+        return found;
+      }
+    }
+    return null;
+  };
+
+  const dockBack = (modId) => {
+    const rec = floatedMap.get(modId);
+    if (!rec) return;
+    if (rec.placeholderEl?.isConnected && rec.moduleEl) {
+      rec.placeholderEl.replaceWith(rec.moduleEl);
+    } else {
+      rec.placeholderEl?.remove();
+    }
+    rec.winEl?.remove();
+    floatedMap.delete(modId);
+  };
+
+  const openFloatWindow = (modId, entry = {}) => {
+    const existing = floatedMap.get(modId);
+    if (existing && existing.winEl?.isConnected) {
+      if (existing.winEl.dataset.dragging !== '1') {
+        applyWinRect(existing.winEl, entry);
+      }
+      // If sidebar re-rendered a fresh copy, swap it in and re-insert placeholder
+      if (!existing.placeholderEl?.isConnected) {
+        const fresh = findSidebarModuleEl(modId);
+        if (fresh && fresh !== existing.moduleEl && fresh.parentNode) {
+          const ph = document.createElement('span');
+          ph.className = 'floating-module-placeholder';
+          ph.dataset.floatingPlaceholder = modId;
+          ph.hidden = true;
+          fresh.parentNode.insertBefore(ph, fresh);
+          if (fresh.tagName === 'DETAILS') fresh.open = true;
+          fresh.classList.remove('is-collapsed');
+          existing.bodyEl.innerHTML = '';
+          existing.bodyEl.appendChild(fresh);
+          existing.placeholderEl = ph;
+          existing.moduleEl = fresh;
+        }
+      }
+      return true;
+    }
+
+    const moduleEl = findSidebarModuleEl(modId);
+    if (!moduleEl || !moduleEl.parentNode) return false;
+
+    const placeholderEl = document.createElement('span');
+    placeholderEl.className = 'floating-module-placeholder';
+    placeholderEl.dataset.floatingPlaceholder = modId;
+    placeholderEl.hidden = true;
+    moduleEl.parentNode.insertBefore(placeholderEl, moduleEl);
+
+    if (moduleEl.tagName === 'DETAILS') {
+      moduleEl.open = true;
+    }
+    moduleEl.classList.remove('is-collapsed');
+
+    const titleText = entry.title
+      || moduleEl.querySelector('.module-header, .tool-card-summary')?.textContent?.trim()?.slice(0, 32)
+      || modId;
+
+    const winEl = document.createElement('section');
+    winEl.className = 'floating-module-window';
+    winEl.dataset.floatingModuleId = modId;
+    winEl.style.zIndex = String(++topZ);
+
+    const handles = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
+      .map((dir) => `<div class="float-resize-handle float-resize-${dir}" data-resize-dir="${dir}" aria-hidden="true"></div>`)
+      .join('');
+
+    winEl.innerHTML = `
+      <header class="floating-module-header" data-float-drag-handle="1">
+        <span class="floating-module-title">${escapeHtml(titleText)}</span>
+        <button type="button" class="pill-btn pill-btn-sm floating-dock-btn" data-float-action="dock" title="吸回侧栏">
+          ${icon('corner-up-left', 12)} 吸回侧栏
+        </button>
+      </header>
+      <div class="floating-module-body"></div>
+      ${handles}
+    `;
+
+    const bodyEl = winEl.querySelector('.floating-module-body');
+    bodyEl.appendChild(moduleEl);
+
+    const rect = applyWinRect(winEl, entry);
+    let curRect = { ...rect };
+
+    winEl.addEventListener('pointerdown', () => {
+      winEl.style.zIndex = String(++topZ);
+    });
+
+    winEl.querySelector('[data-float-action="dock"]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof store.toggleModuleFloat === 'function') {
+        store.toggleModuleFloat(modId, { open: false });
+      } else {
+        dockBack(modId);
+      }
+    });
+
+    // Header drag move
+    const headerEl = winEl.querySelector('[data-float-drag-handle]');
+    headerEl?.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button, input, a') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      e.preventDefault();
+      winEl.dataset.dragging = '1';
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const origin = { ...curRect };
+
+      const onMove = (ev) => {
+        curRect = applyWinRect(winEl, {
+          ...origin,
+          x: origin.x + (ev.clientX - startX),
+          y: origin.y + (ev.clientY - startY),
+        });
+      };
+      const onUp = () => {
+        delete winEl.dataset.dragging;
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        store.updateFloatingModuleRect?.(modId, curRect, { emit: false });
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    });
+
+    // 8-direction (5-way + 4-corner) resize handles
+    winEl.querySelectorAll('.float-resize-handle').forEach((handle) => {
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        winEl.dataset.dragging = '1';
+        const dir = handle.dataset.resizeDir || 'se';
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const origin = { ...curRect };
+
+        const onMove = (ev) => {
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          let { x, y, w, h } = origin;
+
+          if (dir.includes('e')) {
+            w = Math.max(240, origin.w + dx);
+          }
+          if (dir.includes('s')) {
+            h = Math.max(180, origin.h + dy);
+          }
+          if (dir.includes('w')) {
+            const nextW = Math.max(240, origin.w - dx);
+            x = origin.x + (origin.w - nextW);
+            w = nextW;
+          }
+          if (dir.includes('n')) {
+            const nextH = Math.max(180, origin.h - dy);
+            y = origin.y + (origin.h - nextH);
+            h = nextH;
+          }
+          curRect = applyWinRect(winEl, { x, y, w, h });
+        };
+        const onUp = () => {
+          delete winEl.dataset.dragging;
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          store.updateFloatingModuleRect?.(modId, curRect, { emit: false });
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+      });
+    });
+
+    layerEl.appendChild(winEl);
+    floatedMap.set(modId, { modId, winEl, bodyEl, placeholderEl, moduleEl });
+    return true;
+  };
+
+  const syncFloatingModules = () => {
+    const map = store.state.uiLayout?.floatingModules || {};
+    for (const modId of Array.from(floatedMap.keys())) {
+      if (!map[modId]?.open) {
+        dockBack(modId);
+      }
+    }
+    for (const [modId, entry] of Object.entries(map)) {
+      if (entry?.open) {
+        openFloatWindow(modId, entry);
+      }
+    }
+  };
+
+  store.on('module:float-change', (evt) => {
+    if (evt?.rectOnly) return;
+    syncFloatingModules();
+  });
+  store.on('ui:layout-changed', syncFloatingModules);
+  store.on('files:updated', () => window.requestAnimationFrame(syncFloatingModules));
+  window.addEventListener('resize', () => {
+    for (const rec of floatedMap.values()) {
+      const r = {
+        x: parseFloat(rec.winEl.style.left) || 120,
+        y: parseFloat(rec.winEl.style.top) || 96,
+        w: parseFloat(rec.winEl.style.width) || 340,
+        h: parseFloat(rec.winEl.style.height) || 420,
+      };
+      applyWinRect(rec.winEl, r);
+    }
+  });
+
+  window.requestAnimationFrame(syncFloatingModules);
+  window.setTimeout(syncFloatingModules, 360);
+}
+
+function bindIslandDrawerTabs() {
+  const drawer = document.getElementById('island-shelf-drawer');
+  if (!drawer || drawer.dataset.tabsBound === '1') return;
+  drawer.dataset.tabsBound = '1';
+
+  const switchTab = (tabName, { openDrawer = false } = {}) => {
+    const targetTab = ['shelf', 'stickies', 'trash'].includes(tabName) ? tabName : 'shelf';
+    drawer.dataset.islandTab = targetTab;
+    drawer.querySelectorAll('.island-drawer-tab[data-island-tab]').forEach((btn) => {
+      const active = btn.dataset.islandTab === targetTab;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    drawer.querySelectorAll('.island-drawer-pane[data-island-pane]').forEach((pane) => {
+      const active = pane.dataset.islandPane === targetTab;
+      pane.classList.toggle('is-active', active);
+      pane.hidden = !active;
+    });
+    if (openDrawer) {
+      drawer.hidden = false;
+      drawer.removeAttribute('hidden');
+      drawer.classList.add('is-open');
+      drawer.dataset.state = 'open';
+    }
+    store.emit('island:tab-change', targetTab);
+  };
+
+  drawer.addEventListener('click', (e) => {
+    const tabBtn = e.target.closest('.island-drawer-tab[data-island-tab]');
+    if (!tabBtn) return;
+    e.stopPropagation();
+    switchTab(tabBtn.dataset.islandTab);
+  });
+
+  store.on('island:switch-tab', (tabName) => {
+    switchTab(tabName, { openDrawer: true });
+  });
+}
+
+function bindPortableTrashDock() {
+  const dockEl = document.getElementById('portable-trash-dock');
+  if (!dockEl || dockEl.dataset.bound === '1') return;
+  dockEl.dataset.bound = '1';
+
+  const syncDockMode = () => {
+    const mode = store.state.trash?.settings?.mode === 'app' ? 'app' : 'system';
+    dockEl.dataset.trashMode = mode;
+    const badgeEl = dockEl.querySelector('[data-trash-role="mode-label"]');
+    if (badgeEl) {
+      badgeEl.textContent = mode === 'system' ? '系统回收站模式' : '内置回收站模式';
+    }
+  };
+
+  const showDock = (payload) => {
+    if (payload?.type === 'module-reorder' || payload?.type === 'tool-module') return;
+    syncDockMode();
+    dockEl.hidden = false;
+    dockEl.removeAttribute('hidden');
+    window.requestAnimationFrame(() => dockEl.classList.add('is-visible'));
+  };
+
+  const hideDock = () => {
+    dockEl.classList.remove('is-drag-over', 'is-visible');
+    window.setTimeout(() => {
+      if (!store.state.globalDrag) {
+        dockEl.hidden = true;
+      }
+    }, 180);
+  };
+
+  store.on('trash:updated', syncDockMode);
+  store.on('drag:global-start', showDock);
+  store.on('drag:global-end', hideDock);
+
+  dockEl.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dockEl.classList.add('is-drag-over');
+  });
+  dockEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    dockEl.classList.add('is-drag-over');
+  });
+  dockEl.addEventListener('dragleave', (e) => {
+    if (!dockEl.contains(e.relatedTarget)) {
+      dockEl.classList.remove('is-drag-over');
+    }
+  });
+  dockEl.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dockEl.classList.remove('is-drag-over');
+    const payload = readDragPayload(e) || store.getGlobalDrag() || {};
+    clearDragPayload();
+    store.endGlobalDrag?.();
+
+    const kind = String(payload?.kind || payload?.type || '');
+    try {
+      if (payload?.sourceShelfId) {
+        store.removeFromShelf(payload.sourceShelfId);
+        await store.trashVirtualItem({
+          kind: 'staging',
+          title: payload.label || '暂存片段',
+          payload,
+          source_path: payload.path || payload.sourceDocPath || '',
+        });
+        showToast('已将暂存片段移入内置回收站', 'info');
+      } else if (payload?.path && !['snippet', 'block', 'lp-block', 'sticky', 'ai', 'summary', 'chat', 'mindmap-card', 'workspace', 'app', 'app-portal', 'capsule'].includes(kind)) {
+        await store.trashFile(payload.path);
+      } else if (payload && Object.keys(payload).length > 0) {
+        await store.trashVirtualItem({
+          kind: kind || 'snippet',
+          title: payload.title || payload.label || '内容片段',
+          payload,
+          source_path: payload.sourceDocPath || payload.path || '',
+        });
+        store.emit('trash:consumed-drag', payload);
+        showToast('已移入内置回收站', 'info');
+      }
+    } catch (err) {
+      showToast(`移入回收站失败：${err?.message || '未知错误'}`, 'error');
+    }
+  });
+
+  dockEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-trash-dock-action]');
+    if (!btn) return;
+    const action = btn.dataset.trashDockAction;
+    if (action === 'toggle-mode') {
+      const cur = store.state.trash?.settings?.mode === 'app' ? 'app' : 'system';
+      const next = cur === 'system' ? 'app' : 'system';
+      try {
+        await store.updateTrashSettings({ mode: next });
+        syncDockMode();
+        showToast(next === 'system' ? '已切换：Windows 系统回收站模式' : '已切换：应用内置回收站模式', 'success');
+      } catch (err) {
+        showToast(`切换模式失败：${err?.message || '未知错误'}`, 'error');
+      }
+    } else if (action === 'open-trash') {
+      store.emit('island:switch-tab', 'trash');
+    }
+  });
+
+  syncDockMode();
+}
+
 async function bootstrap() {
   window.__SLN_BOOTED__ = true;
   // 1. Apply saved theme, typography & pane widths immediately
@@ -490,13 +1095,18 @@ async function bootstrap() {
   safeMount('stickies', () => initStickies());
   safeMount('drag_shelf', () => initDragShelf());
 
-  // 3. Bind shell controls, pane resizers, drag cleanup & responsive state
+  // 3. Bind shell controls, pane resizers, floating hosts, trash dock, drag cleanup & responsive state
   bindTopBarControls();
   bindGlobalShortcuts();
   bindPaneResizers();
   bindMobileControls();
+  initFocusDurationPopover();
+  initFloatingModulesHost();
+  bindIslandDrawerTabs();
+  bindPortableTrashDock();
   window.addEventListener('dragend', () => {
     clearDragPayload();
+    store.endGlobalDrag?.();
     store.emit('drag:active', false);
   });
   syncLayoutClasses();
@@ -504,8 +1114,13 @@ async function bootstrap() {
   // 4. Initialize Dynamic Island to idle
   setIsland('idle', { label: 'Local-First 工作台就绪' });
 
-  // 5. Fetch system info & config silently, then connect SSE stream
+  // 5. Fetch system info, config, trash & todos silently, then connect SSE stream
   await loadSystemInfo();
+  Promise.allSettled([
+    store.refreshTrash?.().catch(() => {}),
+    store.refreshAllTodos?.().catch(() => {}),
+    (!store.state.folders?.length ? store.refreshFilesList?.().catch(() => {}) : Promise.resolve()),
+  ]);
   connectEventStream((evt) => {
     if (!evt) return;
     if (evt.type === 'reminder:fired') {
