@@ -920,42 +920,291 @@ export function initFloatingModulesHost() {
   window.setTimeout(syncFloatingModules, 360);
 }
 
-function bindIslandDrawerTabs() {
-  const drawer = document.getElementById('island-shelf-drawer');
-  if (!drawer || drawer.dataset.tabsBound === '1') return;
-  drawer.dataset.tabsBound = '1';
-
-  const switchTab = (tabName, { openDrawer = false } = {}) => {
-    const targetTab = ['shelf', 'stickies', 'trash'].includes(tabName) ? tabName : 'shelf';
-    drawer.dataset.islandTab = targetTab;
-    drawer.querySelectorAll('.island-drawer-tab[data-island-tab]').forEach((btn) => {
-      const active = btn.dataset.islandTab === targetTab;
-      btn.classList.toggle('is-active', active);
-      btn.setAttribute('aria-selected', active ? 'true' : 'false');
-    });
-    drawer.querySelectorAll('.island-drawer-pane[data-island-pane]').forEach((pane) => {
-      const active = pane.dataset.islandPane === targetTab;
-      pane.classList.toggle('is-active', active);
-      pane.hidden = !active;
-    });
-    if (openDrawer) {
-      drawer.hidden = false;
-      drawer.removeAttribute('hidden');
-      drawer.classList.add('is-open');
-      drawer.dataset.state = 'open';
-    }
-    store.emit('island:tab-change', targetTab);
+function initStandaloneFloatingHubs() {
+  const configs = {
+    stickies: {
+      id: 'floating-stickies-win',
+      storageKey: 'sln_float_win_stickies_v1',
+      defaultRect: () => ({
+        x: Math.max(16, Math.round(window.innerWidth / 2 - 175)),
+        y: 64,
+        w: 350,
+        h: 390,
+      }),
+    },
+    trash: {
+      id: 'floating-trash-win',
+      storageKey: 'sln_float_win_trash_v1',
+      defaultRect: () => ({
+        x: Math.max(16, Math.round(window.innerWidth / 2 - 200)),
+        y: 64,
+        w: 400,
+        h: 430,
+      }),
+    },
   };
 
-  drawer.addEventListener('click', (e) => {
-    const tabBtn = e.target.closest('.island-drawer-tab[data-island-tab]');
-    if (!tabBtn) return;
-    e.stopPropagation();
-    switchTab(tabBtn.dataset.islandTab);
+  let topZ = 1220;
+
+  const clampRect = (rect = {}) => {
+    const maxW = Math.max(260, window.innerWidth - 20);
+    const maxH = Math.max(200, window.innerHeight - 64);
+    const w = Math.min(maxW, Math.max(260, Math.round(Number(rect.w) || 360)));
+    const h = Math.min(maxH, Math.max(200, Math.round(Number(rect.h) || 400)));
+    const x = Math.min(Math.max(8, window.innerWidth - w - 8), Math.max(8, Math.round(Number(rect.x) || 120)));
+    const y = Math.min(Math.max(50, window.innerHeight - Math.min(h, 80) - 8), Math.max(50, Math.round(Number(rect.y) || 64)));
+    return { x, y, w, h };
+  };
+
+  const loadRect = (cfg) => {
+    try {
+      const raw = localStorage.getItem(cfg.storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return clampRect(parsed);
+      }
+    } catch {
+      // ignore
+    }
+    return clampRect(cfg.defaultRect());
+  };
+
+  const saveRect = (cfg, rect) => {
+    try {
+      localStorage.setItem(cfg.storageKey, JSON.stringify(rect));
+    } catch {
+      // ignore
+    }
+  };
+
+  const applyRect = (winEl, rect) => {
+    const c = clampRect(rect);
+    winEl.style.position = 'fixed';
+    winEl.style.left = `${c.x}px`;
+    winEl.style.top = `${c.y}px`;
+    winEl.style.width = `${c.w}px`;
+    winEl.style.height = `${c.h}px`;
+    return c;
+  };
+
+  const bindWin = (key, cfg) => {
+    const winEl = document.getElementById(cfg.id);
+    if (!winEl || winEl.dataset.floatBound === '1') return;
+    winEl.dataset.floatBound = '1';
+
+    let curRect = applyRect(winEl, loadRect(cfg));
+
+    winEl.addEventListener('pointerdown', () => {
+      winEl.style.zIndex = String(++topZ);
+    });
+
+    winEl.querySelector(`[data-float-win-close="${key}"]`)?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      winEl.hidden = true;
+      winEl.classList.remove('is-open');
+      store.emit('island:float-state', { which: key, open: false });
+    });
+
+    const headerEl = winEl.querySelector('[data-float-drag-handle]');
+    headerEl?.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button, input, select, a') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      e.preventDefault();
+      winEl.style.zIndex = String(++topZ);
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const origin = { ...curRect };
+      const onMove = (ev) => {
+        curRect = applyRect(winEl, {
+          ...origin,
+          x: origin.x + (ev.clientX - startX),
+          y: origin.y + (ev.clientY - startY),
+        });
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        saveRect(cfg, curRect);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    });
+
+    winEl.querySelectorAll('.float-resize-handle').forEach((handle) => {
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        winEl.style.zIndex = String(++topZ);
+        const dir = handle.dataset.resizeDir || 'se';
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const origin = { ...curRect };
+        const onMove = (ev) => {
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          let { x, y, w, h } = origin;
+          if (dir.includes('e')) w = Math.max(260, origin.w + dx);
+          if (dir.includes('s')) h = Math.max(200, origin.h + dy);
+          if (dir.includes('w')) {
+            const nextW = Math.max(260, origin.w - dx);
+            x = origin.x + (origin.w - nextW);
+            w = nextW;
+          }
+          if (dir.includes('n')) {
+            const nextH = Math.max(200, origin.h - dy);
+            y = origin.y + (origin.h - nextH);
+            h = nextH;
+          }
+          curRect = applyRect(winEl, { x, y, w, h });
+        };
+        const onUp = () => {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          saveRect(cfg, curRect);
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+      });
+    });
+  };
+
+  Object.entries(configs).forEach(([k, cfg]) => bindWin(k, cfg));
+
+  const setWinOpen = (which, shouldOpen) => {
+    const cfg = configs[which];
+    if (!cfg) return;
+    const winEl = document.getElementById(cfg.id);
+    if (!winEl) return;
+    const isCurrentlyOpen = !winEl.hidden;
+    const nextOpen = typeof shouldOpen === 'boolean' ? shouldOpen : !isCurrentlyOpen;
+    if (nextOpen) {
+      applyRect(winEl, loadRect(cfg));
+      winEl.style.zIndex = String(++topZ);
+      winEl.hidden = false;
+      winEl.removeAttribute('hidden');
+      winEl.classList.add('is-open');
+      if (which === 'trash') {
+        store.refreshTrash?.().catch(() => {});
+      }
+      store.emit('island:tab-change', which);
+    } else {
+      winEl.hidden = true;
+      winEl.classList.remove('is-open');
+    }
+    store.emit('island:float-state', { which, open: nextOpen });
+  };
+
+  store.on('island:toggle-float', (which) => {
+    if (which === 'stickies' || which === 'trash') {
+      setWinOpen(which);
+    }
   });
 
   store.on('island:switch-tab', (tabName) => {
-    switchTab(tabName, { openDrawer: true });
+    if (tabName === 'stickies' || tabName === 'trash') {
+      setWinOpen(tabName, true);
+    } else if (tabName === 'shelf') {
+      store.emit('shelf:toggle');
+    }
+  });
+}
+
+function initModuleSizePopover() {
+  let popEl = document.getElementById('module-size-popover');
+  if (!popEl) {
+    popEl = document.createElement('div');
+    popEl.id = 'module-size-popover';
+    popEl.className = 'module-size-popover';
+    popEl.setAttribute('role', 'menu');
+    popEl.hidden = true;
+    document.body.appendChild(popEl);
+  }
+
+  let activeTrigger = null;
+
+  const closeMenu = () => {
+    if (!popEl) return;
+    popEl.hidden = true;
+    popEl.classList.remove('is-open');
+    popEl.innerHTML = '';
+    activeTrigger = null;
+  };
+
+  const options = [
+    { key: 'auto', label: 'Auto 自适应', desc: '随内容自然撑开' },
+    { key: 's', label: 'S 紧凑', desc: '150px 高度' },
+    { key: 'm', label: 'M 标准', desc: '280px 高度' },
+    { key: 'l', label: 'L 展开', desc: '460px 高度' },
+  ];
+
+  document.addEventListener('click', (e) => {
+    const trigger = e.target.closest('[data-action="open-module-size-menu"]');
+    if (trigger) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (activeTrigger === trigger && !popEl.hidden) {
+        closeMenu();
+        return;
+      }
+      activeTrigger = trigger;
+      const panel = trigger.dataset.panel || 'left';
+      const modId = trigger.dataset.moduleId || '';
+      const curPreset = String(store.state.uiLayout?.moduleSizePresets?.[modId] || 'auto').toLowerCase();
+
+      popEl.innerHTML = options
+        .map((opt) => {
+          const isCur = curPreset === opt.key;
+          return `
+            <button type="button" class="module-size-pop-item ${isCur ? 'is-active' : ''}" data-size-preset="${opt.key}" role="menuitem">
+              <span class="module-size-pop-label">${isCur ? '✓ ' : ''}${opt.label}</span>
+              <span class="module-size-pop-desc">${opt.desc}</span>
+            </button>
+          `;
+        })
+        .join('');
+
+      popEl.hidden = false;
+      popEl.classList.add('is-open');
+      const rect = trigger.getBoundingClientRect();
+      const popW = popEl.offsetWidth || 168;
+      const popH = popEl.offsetHeight || 132;
+      const left = Math.min(window.innerWidth - popW - 10, Math.max(10, Math.round(rect.right - popW)));
+      const top = rect.bottom + popH + 8 <= window.innerHeight
+        ? Math.round(rect.bottom + 6)
+        : Math.max(10, Math.round(rect.top - popH - 6));
+      popEl.style.position = 'fixed';
+      popEl.style.left = `${left}px`;
+      popEl.style.top = `${top}px`;
+      popEl.style.zIndex = '1550';
+
+      popEl.querySelectorAll('[data-size-preset]').forEach((btn) => {
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const preset = btn.dataset.sizePreset || 'auto';
+          store.setModuleSizePreset?.(panel, modId, preset);
+          const shortLabel = preset === 'auto' ? 'Auto' : preset.toUpperCase();
+          if (activeTrigger) {
+            activeTrigger.textContent = `${shortLabel} ▾`;
+          }
+          closeMenu();
+        });
+      });
+      return;
+    }
+
+    if (!popEl.hidden && !popEl.contains(e.target)) {
+      closeMenu();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !popEl.hidden) {
+      closeMenu();
+    }
   });
 }
 
@@ -964,25 +1213,21 @@ function bindPortableTrashDock() {
   if (!dockEl || dockEl.dataset.bound === '1') return;
   dockEl.dataset.bound = '1';
 
-  const syncDockMode = () => {
-    const mode = store.state.trash?.settings?.mode === 'app' ? 'app' : 'system';
-    dockEl.dataset.trashMode = mode;
-    const badgeEl = dockEl.querySelector('[data-trash-role="mode-label"]');
-    if (badgeEl) {
-      badgeEl.textContent = mode === 'system' ? '系统回收站模式' : '内置回收站模式';
-    }
+  const clearZoneHighlights = () => {
+    dockEl.classList.remove('is-drag-over');
+    dockEl.querySelectorAll('.portable-trash-zone.is-drag-over').forEach((z) => z.classList.remove('is-drag-over'));
   };
 
   const showDock = (payload) => {
-    if (payload?.type === 'module-reorder' || payload?.type === 'tool-module') return;
-    syncDockMode();
+    if (store.state.isInternalReorderDrag || payload?.type === 'module-reorder' || payload?.type === 'tool-module') return;
     dockEl.hidden = false;
     dockEl.removeAttribute('hidden');
     window.requestAnimationFrame(() => dockEl.classList.add('is-visible'));
   };
 
   const hideDock = () => {
-    dockEl.classList.remove('is-drag-over', 'is-visible');
+    clearZoneHighlights();
+    dockEl.classList.remove('is-visible');
     window.setTimeout(() => {
       if (!store.state.globalDrag) {
         dockEl.hidden = true;
@@ -990,33 +1235,41 @@ function bindPortableTrashDock() {
     }, 180);
   };
 
-  store.on('trash:updated', syncDockMode);
   store.on('drag:global-start', showDock);
   store.on('drag:global-end', hideDock);
 
-  dockEl.addEventListener('dragenter', (e) => {
-    e.preventDefault();
-    dockEl.classList.add('is-drag-over');
-  });
   dockEl.addEventListener('dragover', (e) => {
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     dockEl.classList.add('is-drag-over');
+    const zone = e.target.closest('.portable-trash-zone[data-drop-zone]');
+    dockEl.querySelectorAll('.portable-trash-zone[data-drop-zone]').forEach((z) => {
+      z.classList.toggle('is-drag-over', z === zone);
+    });
   });
+
   dockEl.addEventListener('dragleave', (e) => {
     if (!dockEl.contains(e.relatedTarget)) {
-      dockEl.classList.remove('is-drag-over');
+      clearZoneHighlights();
     }
   });
+
   dockEl.addEventListener('drop', async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    dockEl.classList.remove('is-drag-over');
+    const zone = e.target.closest('.portable-trash-zone[data-drop-zone]');
+    const dropMode = zone?.dataset.dropZone === 'system-trash' ? 'system' : 'app';
+    clearZoneHighlights();
     const payload = readDragPayload(e) || store.getGlobalDrag() || {};
     clearDragPayload();
     store.endGlobalDrag?.();
 
     const kind = String(payload?.kind || payload?.type || '');
+    const virtualKinds = ['snippet', 'block', 'lp-block', 'sticky', 'ai', 'summary', 'chat', 'mindmap-card', 'workspace', 'app', 'app-portal', 'capsule'];
+    const paths = Array.isArray(payload?.paths) && payload.paths.length > 0
+      ? payload.paths
+      : (payload?.path ? [payload.path] : []);
+
     try {
       if (payload?.sourceShelfId) {
         store.removeFromShelf(payload.sourceShelfId);
@@ -1027,8 +1280,10 @@ function bindPortableTrashDock() {
           source_path: payload.path || payload.sourceDocPath || '',
         });
         showToast('已将暂存片段移入内置回收站', 'info');
-      } else if (payload?.path && !['snippet', 'block', 'lp-block', 'sticky', 'ai', 'summary', 'chat', 'mindmap-card', 'workspace', 'app', 'app-portal', 'capsule'].includes(kind)) {
-        await store.trashFile(payload.path);
+      } else if (paths.length > 0 && !virtualKinds.includes(kind)) {
+        for (const p of paths) {
+          await store.trashFile(p, dropMode);
+        }
       } else if (payload && Object.keys(payload).length > 0) {
         await store.trashVirtualItem({
           kind: kind || 'snippet',
@@ -1044,26 +1299,11 @@ function bindPortableTrashDock() {
     }
   });
 
-  dockEl.addEventListener('click', async (e) => {
-    const btn = e.target.closest('[data-trash-dock-action]');
+  dockEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-trash-dock-action="open-trash"]');
     if (!btn) return;
-    const action = btn.dataset.trashDockAction;
-    if (action === 'toggle-mode') {
-      const cur = store.state.trash?.settings?.mode === 'app' ? 'app' : 'system';
-      const next = cur === 'system' ? 'app' : 'system';
-      try {
-        await store.updateTrashSettings({ mode: next });
-        syncDockMode();
-        showToast(next === 'system' ? '已切换：Windows 系统回收站模式' : '已切换：应用内置回收站模式', 'success');
-      } catch (err) {
-        showToast(`切换模式失败：${err?.message || '未知错误'}`, 'error');
-      }
-    } else if (action === 'open-trash') {
-      store.emit('island:switch-tab', 'trash');
-    }
+    store.emit('island:toggle-float', 'trash');
   });
-
-  syncDockMode();
 }
 
 async function bootstrap() {
@@ -1102,7 +1342,8 @@ async function bootstrap() {
   bindMobileControls();
   initFocusDurationPopover();
   initFloatingModulesHost();
-  bindIslandDrawerTabs();
+  initStandaloneFloatingHubs();
+  initModuleSizePopover();
   bindPortableTrashDock();
   window.addEventListener('dragend', () => {
     clearDragPayload();
@@ -1119,6 +1360,7 @@ async function bootstrap() {
   Promise.allSettled([
     store.refreshTrash?.().catch(() => {}),
     store.refreshAllTodos?.().catch(() => {}),
+    store.refreshLinkGraph?.().catch(() => {}),
     (!store.state.folders?.length ? store.refreshFilesList?.().catch(() => {}) : Promise.resolve()),
   ]);
   connectEventStream((evt) => {

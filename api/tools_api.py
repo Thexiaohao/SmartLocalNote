@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Query
 from pydantic import BaseModel, Field
 
 from api import ok
-from core import app_launcher, scheduler, trash_manager, tree_store
+from core import app_launcher, link_graph, scheduler, trash_manager, tree_store
 
 router = APIRouter(prefix="/api", tags=["tools"])
 
@@ -199,3 +199,8 @@ def empty_trash(body: TrashIdBody = Body(default_factory=TrashIdBody)) -> dict:
 @router.put("/trash/settings")
 def update_trash_settings(body: TrashSettingsBody) -> dict:
     return ok(trash_manager.update_settings(mode=body.mode, auto_purge_days=body.auto_purge_days))
+
+
+@router.get("/links/graph")
+def get_links_graph(path: str = Query(default="")) -> dict:
+    return ok(link_graph.build_link_graph(path))

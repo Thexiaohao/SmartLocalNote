@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api import ok
 from core import doc_engine, safe_io, search_engine, todo_indexer
@@ -90,6 +90,11 @@ class RenameFileBody(BaseModel):
 
 class RemoveFileBody(BaseModel):
     path: str
+
+
+class MoveFilesBody(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+    target_folder_rel: str = ""
 
 
 @files_router.get("/list")
@@ -203,6 +208,11 @@ def rename_file(body: RenameFileBody) -> dict:
 @files_router.post("/remove")
 def remove_file(body: RemoveFileBody) -> dict:
     return ok(doc_engine.remove_from_workspace(body.path))
+
+
+@files_router.post("/move")
+def move_files(body: MoveFilesBody) -> dict:
+    return ok(doc_engine.move_files(body.paths, body.target_folder_rel))
 
 
 @todos_router.get("/all")

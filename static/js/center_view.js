@@ -768,21 +768,23 @@ function injectV4CenterStyles() {
       min-width: 0;
       display: flex;
       overflow: hidden;
+      position: relative;
     }
     .explorer-files-pane {
       flex: 1 1 62%;
-      min-width: 0;
+      min-width: 180px;
       min-height: 0;
       overflow-y: auto;
       padding: 14px 16px 24px;
       display: flex;
       flex-direction: column;
       gap: 14px;
+      position: relative;
     }
     .explorer-todo-pane {
       flex: 0 0 38%;
-      min-width: 280px;
-      max-width: 480px;
+      min-width: 220px;
+      max-width: none;
       min-height: 0;
       border-left: 1px solid var(--border-hairline);
       background: var(--bg-glass);
@@ -790,22 +792,31 @@ function injectV4CenterStyles() {
       flex-direction: column;
       overflow: hidden;
     }
-    .explorer-home.is-todo-full .explorer-files-pane {
-      display: none;
+    .explorer-home.is-todo-full .explorer-files-pane,
+    .explorer-home.is-todo-full .explorer-split-resizer {
+      display: none !important;
     }
     .explorer-home.is-todo-full .explorer-todo-pane {
-      flex: 1 1 100%;
+      flex: 1 1 100% !important;
+      width: 100% !important;
       max-width: none;
       border-left: none;
     }
-    .explorer-home.is-todo-collapsed .explorer-todo-pane {
-      display: none;
+    .explorer-home.is-todo-collapsed .explorer-todo-pane,
+    .explorer-home.is-todo-collapsed .explorer-split-resizer {
+      display: none !important;
+    }
+    .explorer-home.is-todo-collapsed .explorer-files-pane {
+      flex: 1 1 100% !important;
+      width: 100% !important;
     }
     @media (max-width: 920px) {
       .explorer-body { flex-direction: column; }
-      .explorer-files-pane { flex: 1 1 55%; }
+      .explorer-split-resizer { display: none !important; }
+      .explorer-files-pane { flex: 1 1 55% !important; width: 100% !important; min-width: 0; }
       .explorer-todo-pane {
-        flex: 1 1 45%;
+        flex: 1 1 45% !important;
+        width: 100% !important;
         max-width: none;
         min-width: 0;
         border-left: none;
@@ -843,6 +854,13 @@ function injectV4CenterStyles() {
       transform: translateY(-1px);
       border-color: rgba(217, 119, 6, 0.45);
     }
+    .explorer-folder-card.is-drop-target,
+    .explorer-crumb.is-drop-target {
+      border-color: var(--accent) !important;
+      background: var(--accent-soft) !important;
+      box-shadow: 0 0 0 2px var(--accent) inset;
+      transform: scale(1.02);
+    }
     .explorer-file-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
@@ -870,6 +888,38 @@ function injectV4CenterStyles() {
     .explorer-file-row.is-active-doc {
       border-color: var(--accent);
       background: var(--accent-soft);
+    }
+    .explorer-file-card.is-selected,
+    .explorer-file-row.is-selected {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 1.5px var(--accent) inset;
+    }
+    .explorer-select-check {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      flex-shrink: 0;
+      margin: 0;
+    }
+    .explorer-batch-bar {
+      position: sticky;
+      bottom: 0;
+      z-index: 16;
+      margin-top: auto;
+      padding: 10px 14px;
+      border-radius: 14px;
+      background: var(--bg-island);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border: 1px solid var(--accent);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
     }
     .explorer-file-list {
       display: flex;
@@ -1142,6 +1192,14 @@ export function initCenterView(containerEl) {
       annotOpen: false,
       annotColor: 'yellow',
     },
+    archiveTreeWidth: (() => {
+      try {
+        const v = Number.parseInt(localStorage.getItem('sln_archive_tree_w'), 10);
+        return Number.isFinite(v) ? Math.min(460, Math.max(150, v)) : 230;
+      } catch {
+        return 230;
+      }
+    })(),
     archive: {
       entries: [],
       fileCount: 0,
@@ -1172,8 +1230,55 @@ export function initCenterView(containerEl) {
       collapsedTodoFiles: new Set(),
       inlineCreateMode: '', // '' | 'note' | 'folder'
       lastRefreshAt: 0,
+      splitRatio: (() => {
+        try {
+          const v = Number.parseFloat(localStorage.getItem('sln_explorer_split_ratio'));
+          return Number.isFinite(v) ? Math.min(0.78, Math.max(0.28, v)) : 0.62;
+        } catch {
+          return 0.62;
+        }
+      })(),
+      selectedPaths: new Set(),
+      lastClickedPath: '',
+      draggingPaths: null,
     },
   };
+
+  function showPaneResizeTooltip(x, y, text) {
+    let tip = document.getElementById('pane-resize-tooltip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'pane-resize-tooltip';
+      tip.className = 'pane-resize-tooltip';
+      tip.style.cssText = [
+        'position:fixed',
+        'z-index:9999',
+        'pointer-events:none',
+        'padding:3px 8px',
+        'border-radius:999px',
+        'font-size:11px',
+        'font-weight:600',
+        'font-variant-numeric:tabular-nums',
+        'background:var(--surface-elevated, rgba(24,24,28,0.88))',
+        'color:var(--text-primary, #ffffff)',
+        'border:1px solid var(--border-subtle, rgba(128,128,140,0.28))',
+        'box-shadow:0 6px 16px rgba(0,0,0,0.16)',
+        'backdrop-filter:blur(10px)',
+      ].join(';');
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    tip.hidden = false;
+    const left = Math.min(window.innerWidth - 110, Math.max(8, x + 14));
+    const top = Math.min(window.innerHeight - 36, Math.max(8, y - 28));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  function hidePaneResizeTooltip() {
+    const tip = document.getElementById('pane-resize-tooltip');
+    if (tip) tip.hidden = true;
+  }
 
   let typographySaveTimer = null;
   let dragDepth = 0;
@@ -1829,6 +1934,29 @@ export function initCenterView(containerEl) {
     });
   }
 
+  function isExplorerFileSelected(pathStr) {
+    if (!pathStr) return false;
+    const set = state.explorer.selectedPaths;
+    if (set.has(pathStr)) return true;
+    for (const p of set) {
+      if (isSamePath(p, pathStr)) return true;
+    }
+    return false;
+  }
+
+  function setExplorerFileSelected(pathStr, selected) {
+    if (!pathStr) return;
+    const set = state.explorer.selectedPaths;
+    for (const p of Array.from(set)) {
+      if (p === pathStr || isSamePath(p, pathStr)) {
+        set.delete(p);
+      }
+    }
+    if (selected) {
+      set.add(pathStr);
+    }
+  }
+
   function showExplorerItemContextMenu(e, kind, item) {
     e.preventDefault();
     e.stopPropagation();
@@ -1840,8 +1968,14 @@ export function initCenterView(containerEl) {
           <span class="ctx-item-left"><span>📂</span><span>打开文件夹</span></span>
         </button>
         <div class="context-menu-sep" role="separator"></div>
-        <button type="button" class="context-menu-item" data-exp-ctx="trash-folder" role="menuitem" style="color:var(--danger);">
-          <span class="ctx-item-left"><span>🗑</span><span>移入回收站</span></span>
+        <button type="button" class="context-menu-item" data-exp-ctx="trash-folder-app" role="menuitem">
+          <span class="ctx-item-left"><span>📦</span><span>移入内置回收站</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="trash-folder-system" role="menuitem" style="color:var(--danger);">
+          <span class="ctx-item-left"><span>🖥</span><span>扔进系统回收站</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="remove-doc" role="menuitem">
+          <span class="ctx-item-left"><span>✕</span><span>从工作台列表移除</span></span>
         </button>
       `;
     } else {
@@ -1850,14 +1984,17 @@ export function initCenterView(containerEl) {
           <span class="ctx-item-left"><span>📄</span><span>打开文档</span></span>
         </button>
         <button type="button" class="context-menu-item" data-exp-ctx="split-doc" role="menuitem">
-          <span class="ctx-item-left"><span>◫</span><span>分屏打开 (Ctrl+点击)</span></span>
+          <span class="ctx-item-left"><span>◫</span><span>分屏打开</span></span>
         </button>
         <button type="button" class="context-menu-item" data-exp-ctx="rename-doc" role="menuitem">
           <span class="ctx-item-left"><span>✏</span><span>重命名</span></span>
         </button>
         <div class="context-menu-sep" role="separator"></div>
-        <button type="button" class="context-menu-item" data-exp-ctx="trash-doc" role="menuitem" style="color:var(--danger);">
-          <span class="ctx-item-left"><span>🗑</span><span>移入回收站</span></span>
+        <button type="button" class="context-menu-item" data-exp-ctx="trash-doc-app" role="menuitem">
+          <span class="ctx-item-left"><span>📦</span><span>移入内置回收站</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="trash-doc-system" role="menuitem" style="color:var(--danger);">
+          <span class="ctx-item-left"><span>🖥</span><span>扔进系统回收站</span></span>
         </button>
         <button type="button" class="context-menu-item" data-exp-ctx="remove-doc" role="menuitem">
           <span class="ctx-item-left"><span>✕</span><span>从工作台列表移除</span></span>
@@ -1874,9 +2011,10 @@ export function initCenterView(containerEl) {
           state.explorer.scope = 'notes';
           state.explorer.relDir = item.rel_dir || '';
           renderExplorerHome({ refresh: false });
-        } else if (act === 'trash-folder') {
+        } else if (act === 'trash-folder' || act === 'trash-folder-app' || act === 'trash-folder-system') {
+          const trashMode = act === 'trash-folder-system' ? 'system' : 'app';
           try {
-            await store.trashFile?.(item.path);
+            await store.trashFile?.(item.path, trashMode);
             if (state.explorer.relDir && (state.explorer.relDir === item.rel_dir || state.explorer.relDir.startsWith(`${item.rel_dir}/`))) {
               state.explorer.relDir = item.parent_rel || '';
             }
@@ -1893,21 +2031,25 @@ export function initCenterView(containerEl) {
           }
         } else if (act === 'rename-doc') {
           openExplorerRenameSheet(item);
-        } else if (act === 'trash-doc') {
+        } else if (act === 'trash-doc' || act === 'trash-doc-app' || act === 'trash-doc-system') {
+          const trashMode = act === 'trash-doc-system' ? 'system' : 'app';
           try {
-            await store.trashFile?.(item.path);
+            await store.trashFile?.(item.path, trashMode);
+            setExplorerFileSelected(item.path, false);
             if (state.activeDoc && isSamePath(state.activeDoc.path, item.path)) {
               state.activeDoc = null;
               state.dirty = false;
               syncActiveFileStore();
             }
             await store.refreshAllTodos?.().catch(() => {});
+            renderExplorerHome({ refresh: false });
           } catch (err) {
             showToast(getErrorMsg(err, '移入回收站失败'), 'error');
           }
         } else if (act === 'remove-doc') {
           try {
             await api.post('/api/files/remove', { path: item.path });
+            setExplorerFileSelected(item.path, false);
             if (state.activeDoc && isSamePath(state.activeDoc.path, item.path)) {
               state.activeDoc = null;
               state.dirty = false;
@@ -1917,6 +2059,7 @@ export function initCenterView(containerEl) {
               store.refreshFilesList?.(),
               store.refreshAllTodos?.(),
             ]);
+            renderExplorerHome({ refresh: false });
             showToast('已从工作台列表移除（磁盘原文件未删除）', 'info');
           } catch (err) {
             showToast(getErrorMsg(err, '移除失败'), 'error');
@@ -1939,6 +2082,14 @@ export function initCenterView(containerEl) {
     const exp = state.explorer;
     const allItems = getWorkspaceFilesList();
     const allFolders = getWorkspaceFoldersList();
+    if (allItems.length > 0 && exp.selectedPaths instanceof Set && exp.selectedPaths.size > 0) {
+      const validSet = new Set(allItems.map((it) => it.path));
+      for (const p of Array.from(exp.selectedPaths)) {
+        if (!validSet.has(p) && !allItems.some((it) => isSamePath(it.path, p))) {
+          exp.selectedPaths.delete(p);
+        }
+      }
+    }
     const mountedDirs = Array.isArray(store.state.files?.dirs) ? store.state.files.dirs : [];
     const searchLower = String(exp.search || '').trim().toLowerCase();
     const typeFilter = exp.typeFilter || 'all';
@@ -2009,7 +2160,7 @@ export function initCenterView(containerEl) {
 
   function renderExplorerFilesPaneInnerHtml(data) {
     const exp = state.explorer;
-    const { folders, files, pinnedSet } = data;
+    const { folders, files, pinnedSet, allFolders } = data;
 
     const folderSectionHtml =
       folders.length > 0
@@ -2017,6 +2168,7 @@ export function initCenterView(containerEl) {
           <div>
             <div class="explorer-section-label">
               <span>📁 子文件夹 (${folders.length})</span>
+              <span style="font-weight:500;">可将下方文件拖入任意文件夹或顶部面包屑归档</span>
             </div>
             <div class="explorer-folder-grid">
               ${folders
@@ -2050,7 +2202,7 @@ export function initCenterView(containerEl) {
         `
         : '';
 
-    const renderFileBadgesHtml = (file, ft) => {
+    const renderFileBadgesHtml = (file) => {
       const todoStat = findTodoStatsForFile(file.path);
       const todoHtml =
         todoStat && todoStat.total > 0
@@ -2070,7 +2222,7 @@ export function initCenterView(containerEl) {
           <div>
             <div class="explorer-section-label">
               <span>📄 工作区文档 (${files.length})</span>
-              <span style="font-weight:500;">单击打开 · Ctrl+点击分屏 · 拖动至灵动岛或垃圾桶</span>
+              <span style="font-weight:500;">单击打开 · Ctrl+点击多选 · Shift+点击连选 · 拖入文件夹归档</span>
             </div>
             <div class="${exp.viewMode === 'list' ? 'explorer-file-list' : 'explorer-file-grid'}">
               ${files
@@ -2078,17 +2230,26 @@ export function initCenterView(containerEl) {
                   const ft = getFileTypeStyle(file.name || '');
                   const isPinned = pinnedSet.has(normalizePath(file.path));
                   const isCurrent = Boolean(state.activeDoc && isSamePath(state.activeDoc.path, file.path));
-                  const { todoHtml, dirText } = renderFileBadgesHtml(file, ft);
+                  const isSelected = isExplorerFileSelected(file.path);
+                  const { todoHtml, dirText } = renderFileBadgesHtml(file);
                   const mtimeStr = formatExplorerTime(file.mtime);
                   if (exp.viewMode === 'list') {
                     return `
                       <div
-                        class="explorer-file-row ${isCurrent ? 'is-active-doc' : ''}"
+                        class="explorer-file-row ${isCurrent ? 'is-active-doc' : ''} ${isSelected ? 'is-selected' : ''}"
                         draggable="true"
                         data-explorer-file="${escapeHtml(file.path)}"
                         title="${escapeHtml(file.path)}"
                       >
                         <div style="display:flex; align-items:center; gap:8px; min-width:0; flex:1 1 auto; overflow:hidden;">
+                          <input
+                            type="checkbox"
+                            class="explorer-select-check"
+                            data-explorer-select="${escapeHtml(file.path)}"
+                            ${isSelected ? 'checked' : ''}
+                            title="勾选文件（Ctrl+点击多选 / Shift+点击区间连选）"
+                            aria-label="选择 ${escapeHtml(file.name)}"
+                          />
                           <span class="explorer-ft-icon" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border}; width:26px; height:26px;">
                             ${icon(ft.iconName, 14)}
                           </span>
@@ -2115,13 +2276,21 @@ export function initCenterView(containerEl) {
                   }
                   return `
                     <div
-                      class="explorer-file-card ${isCurrent ? 'is-active-doc' : ''}"
+                      class="explorer-file-card ${isCurrent ? 'is-active-doc' : ''} ${isSelected ? 'is-selected' : ''}"
                       draggable="true"
                       data-explorer-file="${escapeHtml(file.path)}"
                       title="${escapeHtml(file.path)}"
                     >
                       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
                         <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+                          <input
+                            type="checkbox"
+                            class="explorer-select-check"
+                            data-explorer-select="${escapeHtml(file.path)}"
+                            ${isSelected ? 'checked' : ''}
+                            title="勾选文件（Ctrl+点击多选 / Shift+点击区间连选）"
+                            aria-label="选择 ${escapeHtml(file.name)}"
+                          />
                           <span class="explorer-ft-icon" style="color:${ft.color}; background:${ft.bg}; border:1px solid ${ft.border};">
                             ${icon(ft.iconName, 16)}
                           </span>
@@ -2160,7 +2329,50 @@ export function initCenterView(containerEl) {
           </div>
         `;
 
-    return `${folderSectionHtml}${filesSectionHtml}`;
+    const selectedCount = exp.selectedPaths instanceof Set ? exp.selectedPaths.size : 0;
+    const batchBarHtml =
+      selectedCount > 0
+        ? `
+          <div class="explorer-batch-bar" data-explorer-role="batch-bar" role="region" aria-label="批量文件操作栏">
+            <div style="display:inline-flex; align-items:center; gap:8px;">
+              <span class="explorer-batch-count" style="font-size:12.5px; font-weight:700; color:var(--accent);">
+                已选 ${selectedCount} 项
+              </span>
+            </div>
+            <div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">
+              <select
+                class="apple-select explorer-batch-folder-select"
+                data-explorer-role="batch-move-select"
+                aria-label="📁 移至文件夹"
+                style="width:auto; min-width:136px; height:26px; padding:2px 8px; font-size:11.5px; border-radius:var(--radius-pill);"
+              >
+                <option value="__placeholder__" selected>📁 移至文件夹…</option>
+                <option value="">📁 默认笔记主目录 (根)</option>
+                ${(allFolders || [])
+                  .map(
+                    (fld) =>
+                      `<option value="${escapeHtml(fld.rel_dir)}">📁 ${escapeHtml(fld.rel_dir || fld.name)}</option>`
+                  )
+                  .join('')}
+              </select>
+              <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="batch-pin" title="批量置顶或取消置顶">
+                ★ 批量置顶
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="batch-trash-app" title="将已选文件移入软件内置回收站（可随时还原）">
+                📦 批量入内置回收站
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm pill-btn-danger" data-explorer-act="batch-trash-system" title="将已选文件扔进 Windows 系统回收站">
+                🖥 批量入系统回收站
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="batch-clear-select" title="取消选择">
+                ✕ 取消选择
+              </button>
+            </div>
+          </div>
+        `
+        : '';
+
+    return `${folderSectionHtml}${filesSectionHtml}${batchBarHtml}`;
   }
 
   function renderExplorerTodoPaneHtml() {
@@ -2356,6 +2568,12 @@ export function initCenterView(containerEl) {
         ? 'is-todo-collapsed'
         : '';
 
+    const splitRatio = Math.min(0.78, Math.max(0.28, Number(exp.splitRatio) || 0.62));
+    const filesPct = (splitRatio * 100).toFixed(1);
+    const todoPct = ((1 - splitRatio) * 100).toFixed(1);
+    const allVisibleSelected =
+      filesData.files.length > 0 && filesData.files.every((f) => isExplorerFileSelected(f.path));
+
     mainPane.innerHTML = `
       <div class="explorer-home ${todoPaneModeClass}">
         <div class="explorer-topbar">
@@ -2364,7 +2582,7 @@ export function initCenterView(containerEl) {
               <button type="button" class="explorer-crumb ${exp.scope === 'all' ? 'is-active' : ''}" data-explorer-scope="all">
                 🏠 全部工作区
               </button>
-              <button type="button" class="explorer-crumb ${exp.scope === 'notes' && !exp.relDir ? 'is-active' : ''}" data-explorer-scope="notes" data-rel-dir="">
+              <button type="button" class="explorer-crumb ${exp.scope === 'notes' && !exp.relDir ? 'is-active' : ''}" data-explorer-scope="notes" data-rel-dir="" data-crumb-rel="">
                 📁 默认笔记主目录
               </button>
               ${currentRelSegments
@@ -2373,7 +2591,7 @@ export function initCenterView(containerEl) {
                   const isLast = idx === currentRelSegments.length - 1;
                   return `
                     <span class="explorer-crumb-sep">/</span>
-                    <button type="button" class="explorer-crumb ${isLast ? 'is-active' : ''}" data-explorer-scope="notes" data-rel-dir="${escapeHtml(pathSoFar)}">
+                    <button type="button" class="explorer-crumb ${isLast ? 'is-active' : ''}" data-explorer-scope="notes" data-rel-dir="${escapeHtml(pathSoFar)}" data-crumb-rel="${escapeHtml(pathSoFar)}">
                       ${escapeHtml(seg)}
                     </button>
                   `;
@@ -2410,6 +2628,9 @@ export function initCenterView(containerEl) {
               </button>
               <button type="button" class="pill-btn pill-btn-sm" data-explorer-act="toggle-new-folder">
                 ${icon('folder-open', 13)} 新建文件夹
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm ${exp.selectedPaths.size > 0 ? 'pill-btn-primary' : ''}" data-explorer-act="toggle-select-all" title="全选当前筛选文件或取消选择">
+                ${allVisibleSelected ? '☑ 取消全选' : '☑ 全选 / 取消'}
               </button>
               <div class="segmented-pill" role="group" aria-label="视图切换" style="height:26px; padding:2px;">
                 <button type="button" class="segmented-btn ${exp.viewMode === 'grid' ? 'is-active' : ''}" data-explorer-view="grid" style="height:22px; font-size:11px; padding:0 8px;">⊞ 网格</button>
@@ -2471,10 +2692,11 @@ export function initCenterView(containerEl) {
         </div>
 
         <div class="explorer-body">
-          <div class="explorer-files-pane" data-explorer-role="files-pane">
+          <div class="explorer-files-pane" data-explorer-role="files-pane" style="flex:0 0 calc(${filesPct}% - 4px); width:calc(${filesPct}% - 4px);">
             ${renderExplorerFilesPaneInnerHtml(filesData)}
           </div>
-          <aside class="explorer-todo-pane" data-explorer-role="todo-pane">
+          <div class="center-split-resizer explorer-split-resizer" data-role="explorer-split-resizer" title="左右拖动调整文件区与全局待办区宽度，双击恢复默认"></div>
+          <aside class="explorer-todo-pane" data-explorer-role="todo-pane" style="flex:1 1 calc(${todoPct}% - 4px); width:calc(${todoPct}% - 4px);">
             ${renderExplorerTodoPaneHtml()}
           </aside>
         </div>
@@ -2509,6 +2731,49 @@ export function initCenterView(containerEl) {
   }
 
   function bindExplorerHomeEvents(homeEl) {
+    const selectExplorerRange = (targetPath) => {
+      const visibleFiles = buildExplorerFilesSectionData().files;
+      const anchorPath = state.explorer.lastClickedPath || targetPath;
+      const i1 = visibleFiles.findIndex((f) => isSamePath(f.path, anchorPath));
+      const i2 = visibleFiles.findIndex((f) => isSamePath(f.path, targetPath));
+      if (i1 >= 0 && i2 >= 0) {
+        const start = Math.min(i1, i2);
+        const end = Math.max(i1, i2);
+        for (let i = start; i <= end; i += 1) {
+          setExplorerFileSelected(visibleFiles[i].path, true);
+        }
+      } else {
+        setExplorerFileSelected(targetPath, !isExplorerFileSelected(targetPath));
+      }
+      state.explorer.lastClickedPath = targetPath;
+    };
+
+    const moveBatchPathsToFolder = async (paths, targetRelDir) => {
+      const cleanPaths = (Array.isArray(paths) ? paths : [paths])
+        .map((p) => String(p || '').trim())
+        .filter(Boolean);
+      if (cleanPaths.length === 0) return;
+      try {
+        const res = await store.moveFilesToFolder(cleanPaths, targetRelDir);
+        if (state.activeDoc && Array.isArray(res?.moved)) {
+          const hit = res.moved.find((m) => isSamePath(m?.from, state.activeDoc.path));
+          if (hit?.to) {
+            state.activeDoc.path = hit.to;
+            state.activeDoc.name = getBaseName(hit.to);
+            syncActiveFileStore();
+          }
+        }
+        state.explorer.selectedPaths.clear();
+        renderExplorerHome({ refresh: false });
+        showToast(
+          `已将 ${res?.count ?? cleanPaths.length} 项文件移至「${targetRelDir || '默认笔记主目录'}」`,
+          'success'
+        );
+      } catch (err) {
+        showToast(getErrorMsg(err, '移动文件失败'), 'error');
+      }
+    };
+
     const submitInlineCreate = async () => {
       const inp = homeEl.querySelector('[data-explorer-inline-input]');
       const mode = state.explorer.inlineCreateMode;
@@ -2599,6 +2864,15 @@ export function initCenterView(containerEl) {
     });
 
     homeEl.addEventListener('change', async (e) => {
+      const moveSelect = e.target.closest('[data-explorer-role="batch-move-select"]');
+      if (moveSelect) {
+        const targetRel = moveSelect.value;
+        if (targetRel === '__placeholder__') return;
+        moveSelect.disabled = true;
+        await moveBatchPathsToFolder(Array.from(state.explorer.selectedPaths), targetRel);
+        return;
+      }
+
       const cb = e.target.closest('[data-explorer-todo-check]');
       if (!cb) return;
       const filePath = cb.dataset.filePath;
@@ -2622,6 +2896,21 @@ export function initCenterView(containerEl) {
     });
 
     homeEl.addEventListener('click', async (e) => {
+      const selectCb = e.target.closest('[data-explorer-select]');
+      if (selectCb) {
+        e.stopPropagation();
+        const p = selectCb.dataset.explorerSelect;
+        if (!p) return;
+        if (e.shiftKey && state.explorer.lastClickedPath) {
+          selectExplorerRange(p);
+        } else {
+          setExplorerFileSelected(p, Boolean(selectCb.checked));
+          state.explorer.lastClickedPath = p;
+        }
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
       const scopeBtn = e.target.closest('[data-explorer-scope]');
       if (scopeBtn) {
         state.explorer.scope = scopeBtn.dataset.explorerScope || 'all';
@@ -2707,6 +2996,69 @@ export function initCenterView(containerEl) {
           renderExplorerHome({ refresh: false });
           return;
         }
+        if (act === 'toggle-select-all') {
+          const visibleFiles = buildExplorerFilesSectionData().files;
+          const allSelected = visibleFiles.length > 0 && visibleFiles.every((f) => isExplorerFileSelected(f.path));
+          if (allSelected || (visibleFiles.length === 0 && state.explorer.selectedPaths.size > 0)) {
+            state.explorer.selectedPaths.clear();
+          } else {
+            visibleFiles.forEach((f) => setExplorerFileSelected(f.path, true));
+          }
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'batch-clear-select') {
+          state.explorer.selectedPaths.clear();
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        if (act === 'batch-pin') {
+          const paths = Array.from(state.explorer.selectedPaths);
+          if (paths.length === 0) return;
+          const pinnedSet = new Set((store.state.pinnedFiles || []).map((p) => normalizePath(p)));
+          const allPinned = paths.every((p) => pinnedSet.has(normalizePath(p)));
+          for (const p of paths) {
+            const isP = pinnedSet.has(normalizePath(p));
+            if (allPinned ? isP : !isP) {
+              togglePinFile?.(p);
+            }
+          }
+          renderExplorerHome({ refresh: false });
+          showToast(allPinned ? `已取消置顶 ${paths.length} 项文件` : `已批量置顶 ${paths.length} 项文件`, 'success');
+          return;
+        }
+        if (act === 'batch-trash-app' || act === 'batch-trash-system') {
+          const mode = act === 'batch-trash-system' ? 'system' : 'app';
+          const paths = Array.from(state.explorer.selectedPaths);
+          if (paths.length === 0) return;
+          actBtn.disabled = true;
+          let okCount = 0;
+          for (const p of paths) {
+            try {
+              await store.trashFile?.(p, mode);
+              setExplorerFileSelected(p, false);
+              if (state.activeDoc && isSamePath(state.activeDoc.path, p)) {
+                state.activeDoc = null;
+                state.dirty = false;
+                syncActiveFileStore();
+              }
+              okCount += 1;
+            } catch (err) {
+              showToast(getErrorMsg(err, '移入回收站失败'), 'error');
+            }
+          }
+          await store.refreshAllTodos?.().catch(() => {});
+          renderExplorerHome({ refresh: false });
+          if (okCount > 0) {
+            showToast(
+              mode === 'app'
+                ? `已将 ${okCount} 项文件批量移入内置回收站`
+                : `已将 ${okCount} 项文件批量移至系统回收站`,
+              'success'
+            );
+          }
+          return;
+        }
         if (act === 'confirm-inline-create') {
           await submitInlineCreate();
           return;
@@ -2765,16 +3117,21 @@ export function initCenterView(containerEl) {
         const p = fileCard.dataset.explorerFile;
         if (!p) return;
         const item = getWorkspaceFilesList().find((f) => isSamePath(f.path, p)) || { path: p, name: getBaseName(p), ext: getExtLower(p) };
-        if (e.ctrlKey || e.metaKey) {
-          openSplitDoc({ path: item.path, name: item.name, ext: item.ext });
-          if (state.activeDoc && typeof setCenterView === 'function') {
-            setCenterView('doc');
-          } else if (!state.activeDoc) {
-            openFile(item.path);
-          }
-        } else {
-          openFile(item.path);
+        if (e.shiftKey) {
+          e.preventDefault();
+          selectExplorerRange(item.path);
+          renderExplorerHome({ refresh: false });
+          return;
         }
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          setExplorerFileSelected(item.path, !isExplorerFileSelected(item.path));
+          state.explorer.lastClickedPath = item.path;
+          renderExplorerHome({ refresh: false });
+          return;
+        }
+        state.explorer.lastClickedPath = item.path;
+        openFile(item.path);
       }
     });
 
@@ -2814,13 +3171,20 @@ export function initCenterView(containerEl) {
           name: getBaseName(p),
           ext: getExtLower(p),
         };
+        const isSel = isExplorerFileSelected(item.path);
+        const batchPaths =
+          isSel && state.explorer.selectedPaths.size > 0
+            ? Array.from(state.explorer.selectedPaths)
+            : [item.path];
+        state.explorer.draggingPaths = batchPaths;
         setDragPayload(e, {
           type: 'file',
           kind: 'file',
           path: item.path,
+          paths: batchPaths,
           name: item.name,
           ext: item.ext,
-          label: item.name,
+          label: batchPaths.length > 1 ? `${item.name} 等 ${batchPaths.length} 项` : item.name,
         });
         return;
       }
@@ -2840,7 +3204,69 @@ export function initCenterView(containerEl) {
       }
     });
 
+    homeEl.addEventListener('dragover', (e) => {
+      const dropTarget = e.target.closest(
+        '.explorer-folder-card[data-explorer-folder], .explorer-crumb[data-crumb-rel]'
+      );
+      if (!dropTarget) return;
+      const activePayload = store.state.activeDragPayload;
+      const hasFiles =
+        (Array.isArray(state.explorer.draggingPaths) && state.explorer.draggingPaths.length > 0) ||
+        activePayload?.type === 'file' ||
+        activePayload?.kind === 'file';
+      if (!hasFiles && !Array.from(e.dataTransfer?.types || []).includes(DRAG_MIME)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'move';
+      }
+      homeEl.querySelectorAll('.is-drop-target').forEach((el) => {
+        if (el !== dropTarget) el.classList.remove('is-drop-target');
+      });
+      dropTarget.classList.add('is-drop-target');
+    });
+
+    homeEl.addEventListener('dragleave', (e) => {
+      const dropTarget = e.target.closest(
+        '.explorer-folder-card[data-explorer-folder], .explorer-crumb[data-crumb-rel]'
+      );
+      if (!dropTarget) return;
+      if (!e.relatedTarget || !dropTarget.contains(e.relatedTarget)) {
+        dropTarget.classList.remove('is-drop-target');
+      }
+    });
+
+    homeEl.addEventListener('drop', async (e) => {
+      const dropTarget = e.target.closest(
+        '.explorer-folder-card[data-explorer-folder], .explorer-crumb[data-crumb-rel]'
+      );
+      homeEl.querySelectorAll('.is-drop-target').forEach((el) => el.classList.remove('is-drop-target'));
+      if (!dropTarget) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const payload = readDragPayload(e);
+      const paths =
+        Array.isArray(payload?.paths) && payload.paths.length > 0
+          ? payload.paths
+          : Array.isArray(state.explorer.draggingPaths) && state.explorer.draggingPaths.length > 0
+          ? state.explorer.draggingPaths
+          : payload?.path
+          ? [payload.path]
+          : [];
+      state.explorer.draggingPaths = null;
+      clearDragPayload();
+      store.endGlobalDrag?.();
+      if (paths.length === 0) return;
+      const targetRelDir =
+        dropTarget.dataset.explorerFolder !== undefined
+          ? dropTarget.dataset.explorerFolder
+          : dropTarget.dataset.crumbRel || '';
+      await moveBatchPathsToFolder(paths, targetRelDir);
+    });
+
     homeEl.addEventListener('dragend', () => {
+      state.explorer.draggingPaths = null;
+      homeEl.querySelectorAll('.is-drop-target').forEach((el) => el.classList.remove('is-drop-target'));
       clearDragPayload();
       store.endGlobalDrag?.();
     });
@@ -5483,6 +5909,7 @@ export function initCenterView(containerEl) {
     removeDropInsertLine();
     const doc = state.activeDoc;
     const ar = state.archive;
+    const treeW = Math.min(460, Math.max(150, Number(state.archiveTreeWidth) || 230));
 
     ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
@@ -5514,8 +5941,8 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:row; overflow:hidden; position:relative;">
-        <div class="archive-tree" style="width:230px; flex:0 0 230px; border-right:1px solid var(--border-hairline); overflow-y:auto; padding:8px;">
+      <div class="archive-workspace" style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:row; overflow:hidden; position:relative;">
+        <div class="archive-tree" style="width:${treeW}px; flex:0 0 ${treeW}px; border-right:1px solid var(--border-hairline); overflow-y:auto; padding:8px;">
           ${
             ar.entries.length === 0
               ? `<div class="empty-state"><p class="empty-desc">压缩包为空</p></div>`
@@ -5541,6 +5968,7 @@ export function initCenterView(containerEl) {
                   .join('')
           }
         </div>
+        <div class="center-split-resizer archive-split-resizer" data-role="archive-split-resizer" title="拖动调整目录树宽度，双击恢复默认"></div>
         <div data-role="archive-preview-pane" style="flex:1 1 auto; display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;"></div>
         ${
           state.companionOpen && hasCompanionNote(doc)
@@ -5981,6 +6409,7 @@ export function initCenterView(containerEl) {
       ext: doc.ext,
       type: doc.type,
     });
+    Promise.resolve(store.refreshLinkGraph?.(doc.path)).catch(() => {});
     persistLastSessionNow();
   }
 
@@ -6074,6 +6503,7 @@ export function initCenterView(containerEl) {
           syncNavButtonsUi();
         }
       }
+      Promise.resolve(store.refreshLinkGraph?.(state.activeDoc.path)).catch(() => {});
       ensureDocTabOnMobile();
       return state.activeDoc;
     }
@@ -6320,6 +6750,7 @@ export function initCenterView(containerEl) {
       state.saving = false;
       updateMdDirtyIndicators();
       store.emit('file:saved', { path: doc.path, snapshot_id: res?.snapshot_id || null });
+      Promise.resolve(store.refreshLinkGraph?.(doc.path)).catch(() => {});
       if (toastMessage) {
         showToast(toastMessage, 'success');
       } else if (!silent) {
@@ -6352,6 +6783,7 @@ export function initCenterView(containerEl) {
       state.saving = false;
       updatePdfCompanionDirtyIndicators();
       store.emit('file:saved', { path: doc.companionPath, snapshot_id: res?.snapshot_id || null });
+      Promise.resolve(store.refreshLinkGraph?.(doc.path)).catch(() => {});
       if (toastMessage) {
         showToast(toastMessage, 'success');
       } else if (!silent) {
@@ -7494,7 +7926,7 @@ export function initCenterView(containerEl) {
   }
 
   containerEl.addEventListener('dragenter', (e) => {
-    if (e.target.closest('.center-split-pane')) return;
+    if (e.target.closest('.center-split-pane, .explorer-home')) return;
     if (!isAcceptableBlockDrag(e)) return;
     e.preventDefault();
     dragDepth += 1;
@@ -7504,7 +7936,7 @@ export function initCenterView(containerEl) {
   });
 
   containerEl.addEventListener('dragover', (e) => {
-    if (e.target.closest('.center-split-pane')) return;
+    if (e.target.closest('.center-split-pane, .explorer-home')) return;
     if (!isAcceptableBlockDrag(e)) return;
     e.preventDefault();
     if (e.dataTransfer) {
@@ -7518,6 +7950,7 @@ export function initCenterView(containerEl) {
   });
 
   containerEl.addEventListener('dragleave', (e) => {
+    if (e.target.closest('.explorer-home')) return;
     if (!isAcceptableBlockDrag(e)) return;
     dragDepth = Math.max(0, dragDepth - 1);
     const mainRect = ensureMainPaneEl().getBoundingClientRect();
@@ -7535,7 +7968,7 @@ export function initCenterView(containerEl) {
   });
 
   containerEl.addEventListener('drop', (e) => {
-    if (e.target.closest('.center-split-pane')) return;
+    if (e.target.closest('.center-split-pane, .explorer-home')) return;
     const acceptable = isAcceptableBlockDrag(e);
     const savedLineIdx = dropTargetLineIdx;
     dragDepth = 0;
@@ -8334,6 +8767,100 @@ export function initCenterView(containerEl) {
         document.body.classList.remove('is-pane-resizing');
         try {
           localStorage.setItem('sln_split_ratio', String(state.splitRatio));
+        } catch {
+          // ignore
+        }
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
+
+    // 1b. Explorer Home Split Resizer ([data-role="explorer-split-resizer"])
+    const explorerSplitResizer = e.target.closest('[data-role="explorer-split-resizer"]');
+    if (explorerSplitResizer) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const bodyEl = explorerSplitResizer.closest('.explorer-body');
+      const filesPane = bodyEl?.querySelector(':scope > .explorer-files-pane');
+      const todoPane = bodyEl?.querySelector(':scope > .explorer-todo-pane');
+      if (!bodyEl || !filesPane || !todoPane) return;
+
+      explorerSplitResizer.classList.add('is-resizing');
+      document.body.classList.add('is-pane-resizing');
+
+      const onMove = (ev) => {
+        const rect = bodyEl.getBoundingClientRect();
+        if (!rect.width) return;
+        const relX = ev.clientX - rect.left;
+        const nextRatio = Math.min(0.78, Math.max(0.28, relX / rect.width));
+        state.explorer.splitRatio = Number(nextRatio.toFixed(3));
+        const filesPct = (state.explorer.splitRatio * 100).toFixed(1);
+        const todoPct = ((1 - state.explorer.splitRatio) * 100).toFixed(1);
+        filesPane.style.flex = `0 0 calc(${filesPct}% - 4px)`;
+        filesPane.style.width = `calc(${filesPct}% - 4px)`;
+        todoPane.style.flex = `1 1 calc(${todoPct}% - 4px)`;
+        todoPane.style.width = `calc(${todoPct}% - 4px)`;
+        const filesPx = Math.round(rect.width * state.explorer.splitRatio);
+        showPaneResizeTooltip(ev.clientX, ev.clientY, `${Math.round(state.explorer.splitRatio * 100)}% (${filesPx}px)`);
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        explorerSplitResizer.classList.remove('is-resizing');
+        document.body.classList.remove('is-pane-resizing');
+        hidePaneResizeTooltip();
+        try {
+          localStorage.setItem('sln_explorer_split_ratio', String(state.explorer.splitRatio));
+        } catch {
+          // ignore
+        }
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
+
+    // 1c. Archive Virtual Tree Split Resizer ([data-role="archive-split-resizer"])
+    const archiveSplitResizer = e.target.closest('[data-role="archive-split-resizer"]');
+    if (archiveSplitResizer) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const ws = archiveSplitResizer.parentElement;
+      const treeEl = ws?.querySelector(':scope > .archive-tree');
+      if (!ws || !treeEl) return;
+
+      archiveSplitResizer.classList.add('is-resizing');
+      document.body.classList.add('is-pane-resizing');
+
+      const onMove = (ev) => {
+        const rect = ws.getBoundingClientRect();
+        if (!rect.width) return;
+        const relX = ev.clientX - rect.left;
+        const nextW = Math.round(Math.min(460, Math.max(150, relX)));
+        state.archiveTreeWidth = nextW;
+        treeEl.style.width = `${nextW}px`;
+        treeEl.style.flex = `0 0 ${nextW}px`;
+        showPaneResizeTooltip(ev.clientX, ev.clientY, `${nextW}px`);
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        archiveSplitResizer.classList.remove('is-resizing');
+        document.body.classList.remove('is-pane-resizing');
+        hidePaneResizeTooltip();
+        try {
+          localStorage.setItem('sln_archive_tree_w', String(state.archiveTreeWidth));
         } catch {
           // ignore
         }
@@ -11393,6 +11920,41 @@ export function initCenterView(containerEl) {
         splitPane.style.flex = '1 1 calc(50% - 4px)';
       }
       showToast('已重置分屏比例为 50:50', 'info', { duration: 1400 });
+      return;
+    }
+
+    if (e.target.closest('[data-role="explorer-split-resizer"]')) {
+      state.explorer.splitRatio = 0.62;
+      try {
+        localStorage.setItem('sln_explorer_split_ratio', '0.62');
+      } catch {
+        // ignore
+      }
+      const filesPane = containerEl.querySelector('.explorer-files-pane');
+      const todoPane = containerEl.querySelector('.explorer-todo-pane');
+      if (filesPane && todoPane) {
+        filesPane.style.flex = '0 0 calc(62.0% - 4px)';
+        filesPane.style.width = 'calc(62.0% - 4px)';
+        todoPane.style.flex = '1 1 calc(38.0% - 4px)';
+        todoPane.style.width = 'calc(38.0% - 4px)';
+      }
+      showToast('已重置主面板分栏比例为 62:38', 'info', { duration: 1400 });
+      return;
+    }
+
+    if (e.target.closest('[data-role="archive-split-resizer"]')) {
+      state.archiveTreeWidth = 230;
+      try {
+        localStorage.setItem('sln_archive_tree_w', '230');
+      } catch {
+        // ignore
+      }
+      const treeEl = containerEl.querySelector('.archive-tree');
+      if (treeEl) {
+        treeEl.style.width = '230px';
+        treeEl.style.flex = '0 0 230px';
+      }
+      showToast('已重置压缩包目录树宽度为 230px', 'info', { duration: 1400 });
       return;
     }
 

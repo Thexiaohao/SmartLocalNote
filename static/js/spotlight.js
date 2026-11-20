@@ -21,6 +21,7 @@ const {
 } = storeMod;
 
 let initialized = false;
+let isIslandDragDropMode = false;
 
 // Sniff auto-hide state
 let sniffTimer = null;
@@ -316,6 +317,13 @@ function completeFocusSession(naturalFinish = true) {
     sendBrowserNotification('专注倒计时完成', `「${taskTitle}」已完成，快来记入进度表！`);
   }
 
+  const recordedMinutes = Math.max(1, Math.round(durationSec / 60));
+  if (typeof store.recordFocusSession === 'function') {
+    store.recordFocusSession({ title: taskTitle, minutes: recordedMinutes });
+  } else if (typeof storeMod.recordFocusSession === 'function') {
+    storeMod.recordFocusSession({ title: taskTitle, minutes: recordedMinutes });
+  }
+
   store.emit('focus:done', { title: taskTitle, durationSec });
   setIsland('focus-done', { title: taskTitle, taskTitle, durationSec });
 }
@@ -525,34 +533,73 @@ function ensureV72IslandFallbackStyles() {
   const style = document.createElement('style');
   style.id = 'sln-v72-island-styles';
   style.textContent = `
-    .dynamic-island { max-width: min(740px, 84vw); }
-    .dynamic-island .island-idle-view { cursor: pointer; }
-    .island-hub-actions { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; margin-left: 4px; }
+    .dynamic-island { max-width: min(620px, 84vw); }
+    .dynamic-island .island-idle-view { cursor: pointer; gap: 7px; }
+    .island-todo-ring-btn {
+      width: 20px; height: 20px; padding: 0; border-radius: 9999px; border: none; background: transparent;
+      display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
+      transition: transform 0.16s ease, opacity 0.16s ease;
+    }
+    .island-todo-ring-btn:hover { transform: scale(1.14); }
+    .island-todo-ring-btn:active { transform: scale(0.94); }
+    .island-todo-ring { display: block; width: 16px; height: 16px; }
+    .island-hub-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 4px; }
     .island-hub-stickies-group { display: inline-flex; align-items: center; gap: 2px; }
     .island-hub-btn {
-      display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
-      border-radius: 9999px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.14);
+      display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+      height: 24px; min-width: 26px; padding: 0 6px;
+      border-radius: 9999px; background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.14);
       color: #F5F5F7; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
       transition: transform 0.16s ease, opacity 0.16s ease, background-color 0.16s ease;
     }
     .island-hub-btn:hover { background: rgba(255,255,255,0.22); }
-    .island-hub-btn:active { transform: scale(0.95); }
-    .island-hub-btn.is-open, .island-hub-btn.is-active { background: #0A84FF; border-color: rgba(10,132,255,0.7); color: #FFFFFF; }
+    .island-hub-btn:active { transform: scale(0.94); }
+    .island-hub-btn.is-open, .island-hub-btn.is-active { background: #0A84FF; border-color: rgba(10,132,255,0.72); color: #FFFFFF; }
     .island-hub-badge {
-      min-width: 16px; height: 16px; padding: 0 4px; border-radius: 9999px;
-      background: rgba(255,255,255,0.16); color: #FFFFFF; font-size: 10px; font-weight: 700;
+      min-width: 14px; height: 14px; padding: 0 3.5px; border-radius: 9999px;
+      background: rgba(10,132,255,0.88); color: #FFFFFF; font-size: 9.5px; font-weight: 700;
       display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums;
+      line-height: 1;
     }
-    .island-hub-btn.has-items .island-hub-badge { background: rgba(10,132,255,0.88); }
-    .island-hub-btn.is-open .island-hub-badge { background: rgba(255,255,255,0.26); }
+    .island-hub-btn.is-open .island-hub-badge { background: rgba(255,255,255,0.28); }
     .island-hub-quick-btn {
-      width: 20px; height: 20px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center;
-      background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.14); color: #F5F5F7;
-      font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer;
+      width: 18px; height: 18px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.14); color: #F5F5F7;
+      font-size: 12px; font-weight: 700; line-height: 1; cursor: pointer;
       transition: transform 0.16s ease, opacity 0.16s ease, background-color 0.16s ease;
     }
-    .island-hub-quick-btn:hover { background: #0A84FF; border-color: rgba(10,132,255,0.7); color: #FFFFFF; }
+    .island-hub-quick-btn:hover { background: #0A84FF; border-color: rgba(10,132,255,0.72); color: #FFFFFF; }
     .island-hub-quick-btn:active { transform: scale(0.92); }
+    .dynamic-island.is-drag-drop-mode {
+      padding: 3px 5px;
+      min-height: 40px;
+      width: min(360px, 88vw);
+      max-width: min(360px, 88vw);
+      justify-content: stretch;
+    }
+    .island-compact-drop-pill {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+      width: 100%; height: 34px; align-items: center;
+    }
+    .island-compact-drop-half {
+      height: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+      border-radius: 9999px; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+      border: 1px dashed rgba(255,255,255,0.28); color: #F5F5F7;
+      background: rgba(255,255,255,0.08);
+      transition: transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+    }
+    .island-compact-drop-half.is-shelf {
+      border-color: rgba(10,132,255,0.65); background: rgba(10,132,255,0.18); color: #D6EBFF;
+    }
+    .island-compact-drop-half.is-shelf.is-drag-over {
+      transform: scale(1.03); border-style: solid; border-color: #0A84FF; background: rgba(10,132,255,0.42); color: #FFFFFF;
+    }
+    .island-compact-drop-half.is-trash {
+      border-color: rgba(255,159,10,0.65); background: rgba(255,159,10,0.16); color: #FFE5BA;
+    }
+    .island-compact-drop-half.is-trash.is-drag-over {
+      transform: scale(1.03); border-style: solid; border-color: #FF9F0A; background: rgba(255,159,10,0.38); color: #FFFFFF;
+    }
   `;
   if (document.head.firstChild) {
     document.head.insertBefore(style, document.head.firstChild);
@@ -584,51 +631,78 @@ function getTrashCount() {
   return Array.isArray(store.state.trash?.items) ? store.state.trash.items.length : 0;
 }
 
+function isFloatingWinOpen(id) {
+  const el = document.getElementById(id);
+  return Boolean(el && !el.hidden && !el.classList.contains('hidden'));
+}
+
+function renderIslandTodoRing() {
+  const stats = store.state.todos?.stats || { total: 0, done: 0, open: 0 };
+  const total = Math.max(0, Number(stats.total) || 0);
+  const done = Math.max(0, Math.min(total, Number(stats.done) || 0));
+  const ratio = total > 0 ? done / total : 0;
+  const circ = 2 * Math.PI * 6;
+  const offset = (circ * (1 - ratio)).toFixed(2);
+  const strokeColor = total > 0 && done === total ? '#30D158' : (total > 0 ? '#0A84FF' : 'rgba(255,255,255,0.45)');
+  const titleText = `今日待办 已完成 ${done} / 总计 ${total}（点击直达中心主面板待办）`;
+
+  return `
+    <button type="button"
+      class="island-todo-ring-btn"
+      data-island-action="open-todos"
+      title="${escapeHtml(titleText)}"
+      aria-label="${escapeHtml(titleText)}">
+      <svg class="island-todo-ring" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="6" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="2" />
+        <circle cx="8" cy="8" r="6" fill="none" stroke="${strokeColor}" stroke-width="2" stroke-linecap="round"
+          stroke-dasharray="${circ.toFixed(2)}" stroke-dashoffset="${offset}" transform="rotate(-90 8 8)" />
+      </svg>
+    </button>
+  `;
+}
+
 function renderIslandHubActions() {
   const stickiesCount = getStickiesCount();
   const shelfCount = getShelfCount();
   const trashCount = getTrashCount();
   const drawerEl = document.getElementById('island-shelf-drawer');
-  const drawerOpen = Boolean(drawerEl?.classList.contains('is-open'));
-  const activeTab = drawerEl?.dataset?.islandTab || 'shelf';
-
-  const isStickiesOpen = drawerOpen && activeTab === 'stickies';
-  const isShelfOpen = drawerOpen && activeTab === 'shelf';
-  const isTrashOpen = drawerOpen && activeTab === 'trash';
+  const isShelfOpen = Boolean(drawerEl?.classList.contains('is-open'));
+  const isStickiesOpen = isFloatingWinOpen('floating-stickies-win');
+  const isTrashOpen = isFloatingWinOpen('floating-trash-win');
 
   return `
-    <div class="island-hub-actions" role="group" aria-label="灵动岛中枢控制">
-      <div class="island-hub-stickies-group">
-        <button type="button"
-          class="island-hub-btn ${stickiesCount > 0 ? 'has-items' : ''} ${isStickiesOpen ? 'is-open is-active' : ''}"
-          data-island-trigger="stickies"
-          title="闪念控制中心（共 ${stickiesCount} 张）"
-          aria-expanded="${isStickiesOpen ? 'true' : 'false'}">
-          <span class="island-hub-icon" aria-hidden="true">📌</span>
-          <span class="island-hub-badge" data-island-badge="stickies">${stickiesCount}</span>
-        </button>
-        <button type="button"
-          class="island-hub-quick-btn"
-          data-island-quick="new-sticky"
-          title="一键新建闪念卡 (Alt+N)"
-          aria-label="一键新建闪念卡">+</button>
-      </div>
+    <div class="island-hub-actions" role="group" aria-label="灵动岛快捷触发">
       <button type="button"
         class="island-hub-btn island-shelf-trigger ${shelfCount > 0 ? 'has-items' : ''} ${isShelfOpen ? 'is-open is-active' : ''}"
         data-island-trigger="shelf"
         data-island-action="toggle-shelf"
-        title="灵动岛暂存舱（共 ${shelfCount} 项，拖拽任意内容至此暂存）"
+        title="暂存舱（共 ${shelfCount} 项）"
         aria-expanded="${isShelfOpen ? 'true' : 'false'}">
         <span class="island-hub-icon" aria-hidden="true">📥</span>
-        <span class="island-hub-badge island-shelf-count" data-island-badge="shelf">${shelfCount}</span>
+        ${shelfCount > 0 ? `<span class="island-hub-badge island-shelf-count" data-island-badge="shelf">${shelfCount}</span>` : ''}
       </button>
+      <div class="island-hub-stickies-group">
+        <button type="button"
+          class="island-hub-btn ${stickiesCount > 0 ? 'has-items' : ''} ${isStickiesOpen ? 'is-open is-active' : ''}"
+          data-island-trigger="stickies"
+          title="闪念控制浮窗（共 ${stickiesCount} 张，右键秒建闪念）"
+          aria-expanded="${isStickiesOpen ? 'true' : 'false'}">
+          <span class="island-hub-icon" aria-hidden="true">📌</span>
+          ${stickiesCount > 0 ? `<span class="island-hub-badge" data-island-badge="stickies">${stickiesCount}</span>` : ''}
+        </button>
+        <button type="button"
+          class="island-hub-quick-btn"
+          data-island-quick="new-sticky"
+          title="秒建闪念卡 (Alt+N)"
+          aria-label="秒建闪念卡">+</button>
+      </div>
       <button type="button"
         class="island-hub-btn ${trashCount > 0 ? 'has-items' : ''} ${isTrashOpen ? 'is-open is-active' : ''}"
         data-island-trigger="trash"
-        title="回收站（内置 ${trashCount} 项）"
+        title="内置回收站浮窗（共 ${trashCount} 项）"
         aria-expanded="${isTrashOpen ? 'true' : 'false'}">
-        <span class="island-hub-icon" aria-hidden="true">🗑</span>
-        <span class="island-hub-badge" data-island-badge="trash">${trashCount}</span>
+        <span class="island-hub-icon" aria-hidden="true">📦</span>
+        ${trashCount > 0 ? `<span class="island-hub-badge" data-island-badge="trash">${trashCount}</span>` : ''}
       </button>
     </div>
   `;
@@ -655,6 +729,18 @@ function renderDynamicIsland(islandEl, islandState) {
 
   islandEl.className = 'dynamic-island';
   islandEl.dataset.mode = mode;
+
+  if (isIslandDragDropMode) {
+    islandEl.classList.add('is-drag-drop-mode');
+    islandEl.innerHTML = `
+      <div class="island-compact-drop-pill" role="region" aria-label="灵动岛快捷落区">
+        <div class="island-compact-drop-half is-shelf" data-drop-zone="drag-shelf">📥 松手暂存</div>
+        <div class="island-compact-drop-half is-trash" data-drop-zone="app-trash">📦 移入内置回收站</div>
+      </div>
+    `;
+    return;
+  }
+
   if (mode === 'idle' && bgTask?.status) {
     islandEl.dataset.bgAi = bgTask.status;
     islandEl.classList.toggle('is-bg-ai-done', bgTask.status === 'done');
@@ -781,6 +867,7 @@ function renderDynamicIsland(islandEl, islandState) {
     if (bgTask.status === 'running') {
       islandEl.innerHTML = `
         <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
+          ${renderIslandTodoRing()}
           <div class="island-bg-ai-pill is-running">
             <span class="ai-spin-icon" aria-hidden="true">${icon('sparkles', 13)}</span>
             <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
@@ -794,6 +881,7 @@ function renderDynamicIsland(islandEl, islandState) {
     if (bgTask.status === 'done') {
       islandEl.innerHTML = `
         <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
+          ${renderIslandTodoRing()}
           <div class="island-bg-ai-pill is-done">
             <span aria-hidden="true">${icon('sparkles', 13)}</span>
             <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
@@ -808,6 +896,7 @@ function renderDynamicIsland(islandEl, islandState) {
 
     islandEl.innerHTML = `
       <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
+        ${renderIslandTodoRing()}
         <div class="island-bg-ai-pill is-error">
           <span aria-hidden="true">${icon('sparkles', 13)}</span>
           <span class="island-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
@@ -822,7 +911,7 @@ function renderDynamicIsland(islandEl, islandState) {
   const activeName = store.state.activeFile?.name || '本地工作台就绪';
   islandEl.innerHTML = `
     <div class="island-idle-view" title="点击打开 Spotlight 全局搜索 (Ctrl+K)">
-      <span class="island-status-dot" aria-hidden="true"></span>
+      ${renderIslandTodoRing()}
       <span class="island-label">${escapeHtml(activeName)}</span>
     </div>
     ${renderIslandHubActions()}
@@ -830,6 +919,20 @@ function renderDynamicIsland(islandEl, islandState) {
 }
 
 async function handleIslandAction(islandEl, action, event) {
+  if (action === 'open-todos') {
+    event?.stopPropagation?.();
+    if (typeof window !== 'undefined' && window.innerWidth <= 767) {
+      store.setState({ mobileTab: 'doc' });
+      store.emit('layout:changed');
+    }
+    store.setCenterView?.('explorer');
+    store.emit('explorer:focus-todos');
+    window.requestAnimationFrame(() => {
+      document.querySelector('[data-explorer-role="todo-pane"]')?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    });
+    return;
+  }
+
   if (action === 'toggle-shelf') {
     event?.stopPropagation?.();
     store.emit('shelf:toggle');
@@ -2512,6 +2615,10 @@ export function initSpotlight() {
     store.on('shelf:changed', refreshBadges);
     store.on('shelf:updated', refreshBadges);
     store.on('trash:updated', refreshBadges);
+    store.on('todos:updated', () => {
+      if (isIslandDragDropMode) return;
+      renderDynamicIsland(islandEl, store.state.island);
+    });
     store.on('stickies:count-change', (payload) => {
       const nextCount = typeof payload === 'number'
         ? payload
@@ -2523,6 +2630,19 @@ export function initSpotlight() {
     });
     store.on('island:tab-change', refreshBadges);
     store.on('island:drawer-state', refreshBadges);
+    store.on('island:float-state', refreshBadges);
+
+    store.on('drag:global-start', (payload) => {
+      if (!payload || payload.type === 'module-reorder' || payload.type === 'tool-module') return;
+      isIslandDragDropMode = true;
+      renderDynamicIsland(islandEl, store.state.island);
+    });
+
+    store.on('drag:global-end', () => {
+      if (!isIslandDragDropMode) return;
+      isIslandDragDropMode = false;
+      renderDynamicIsland(islandEl, store.state.island);
+    });
 
     store.on('ai:bg-task', () => {
       if (store.state.island?.mode === 'focus-done' && document.activeElement?.id === 'island-done-input') {
@@ -2549,6 +2669,15 @@ export function initSpotlight() {
       }
     });
 
+    islandEl.addEventListener('contextmenu', (e) => {
+      const stickiesTrigger = e.target.closest('[data-island-trigger="stickies"]');
+      if (stickiesTrigger) {
+        e.preventDefault();
+        e.stopPropagation();
+        store.emit('sticky:spawn', {});
+      }
+    });
+
     islandEl.addEventListener('click', (e) => {
       const quickBtn = e.target.closest('[data-island-quick]');
       if (quickBtn) {
@@ -2563,14 +2692,17 @@ export function initSpotlight() {
       if (triggerBtn) {
         e.stopPropagation();
         const tab = triggerBtn.dataset.islandTrigger;
-        const drawerEl = document.getElementById('island-shelf-drawer');
-        const isOpen = Boolean(drawerEl?.classList.contains('is-open'));
-        const curTab = drawerEl?.dataset?.islandTab || 'shelf';
-        if (isOpen && curTab === tab) {
-          store.emit('island:close-drawer');
-        } else {
-          store.emit('island:switch-tab', tab);
+        if (tab === 'shelf') {
+          store.emit('shelf:toggle');
+        } else if (tab === 'stickies' || tab === 'trash') {
+          store.emit('island:toggle-float', tab);
         }
+        return;
+      }
+
+      const todoRingBtn = e.target.closest('[data-island-action="open-todos"]');
+      if (todoRingBtn) {
+        handleIslandAction(islandEl, 'open-todos', e);
         return;
       }
 
@@ -2580,7 +2712,7 @@ export function initSpotlight() {
 
       const actionBtn = e.target.closest('[data-island-action]');
       if (!actionBtn) {
-        if (store.state.island?.mode === 'idle') {
+        if (store.state.island?.mode === 'idle' && !isIslandDragDropMode) {
           openSpotlight();
         }
         return;

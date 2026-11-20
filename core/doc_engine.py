@@ -16,6 +16,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -282,7 +283,8 @@ def _sanitize_note_filename(title: str) -> str:
 
 def _resolve_notes_subdir(notes_dir: Path, folder_rel: str) -> tuple[Path, str]:
     clean_rel = str(folder_rel or "").replace("\\", "/").strip().strip("/")
-    if not clean_rel:
+    if not clean_rel or clean_rel == ".":
+        notes_dir.mkdir(parents=True, exist_ok=True)
         return notes_dir, ""
     if "\x00" in clean_rel or ".." in Path(clean_rel).parts:
         raise PermissionError("安全拦截：目录路径包含非法字符")
@@ -291,7 +293,11 @@ def _resolve_notes_subdir(notes_dir: Path, folder_rel: str) -> tuple[Path, str]:
         rel_out = target_dir.relative_to(notes_dir.resolve()).as_posix()
     except ValueError as exc:
         raise PermissionError("安全拦截：禁止越出默认笔记目录") from exc
+    if rel_out == ".":
+        rel_out = ""
     safe_io.resolve_safe_path(str(target_dir))
+    if target_dir.exists() and not target_dir.is_dir():
+        raise ValueError("目标路径不是文件夹")
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir, rel_out
 
@@ -393,6 +399,103 @@ def create_folder(parent_dir: str = "", name: str = "") -> dict[str, Any]:
         "path": str(target),
         "rel_dir": rel_dir,
         "name": target.name,
+    }
+
+
+def _update_files_index_after_dir_move(old_dir: Path, new_dir: Path) -> None:
+    """Update any paths in `files.json` that match or live inside a moved directory."""
+    idx = safe_io.load_files_index()
+    changed = False
+
+    def _remap(raw: str) -> str:
+        nonlocal changed
+        norm = _norm_path_for_compare(raw)
+        if not norm:
+            return raw
+        norm_p = Path(norm)
+        if norm_p == old_dir:
+            changed = True
+            return str(new_dir)
+        try:
+            rel = norm_p.relative_to(old_dir)
+            changed = True
+            return str((new_dir / rel).resolve())
+        except ValueError:
+            return raw
+
+    new_files = [_remap(f) for f in idx.get("files", [])]
+    new_dirs = [_remap(d) for d in idx.get("dirs", [])]
+    if changed:
+        safe_io.save_files_index({"files": new_files, "dirs": new_dirs})
+
+
+def move_files(paths: list[str], target_folder_rel: str = "") -> dict[str, Any]:
+    """Safely move one or more workspace files/subfolders into `DEFAULT_NOTES_DIR / target_folder_rel`."""
+    notes_dir = get_default_notes_dir().resolve()
+    target_dir, clean_rel = _resolve_notes_subdir(notes_dir, target_folder_rel)
+    protected_roots = {
+        DATA_DIR.resolve(),
+        notes_dir,
+        (DATA_DIR / "trash").resolve(),
+    }
+
+    moved: list[dict[str, str]] = []
+    seen_sources: set[str] = set()
+
+    for raw_path in paths or []:
+        raw_s = str(raw_path or "").strip()
+        if not raw_s:
+            continue
+
+        src_path = safe_io.resolve_safe_path(raw_s, must_exist=True)
+        old_str = str(src_path)
+        if old_str in seen_sources:
+            continue
+        seen_sources.add(old_str)
+
+        if src_path in protected_roots:
+            raise PermissionError("安全拦截：禁止移动系统核心根目录")
+
+        if src_path == target_dir or src_path.parent == target_dir:
+            continue
+
+        if src_path.is_dir():
+            try:
+                target_dir.relative_to(src_path)
+                continue
+            except ValueError:
+                pass
+            dest_path = target_dir / src_path.name
+            counter = 2
+            while dest_path.exists():
+                dest_path = target_dir / f"{src_path.name}_{counter}"
+                counter += 1
+        else:
+            stem = src_path.stem
+            suffix = src_path.suffix
+            dest_path = target_dir / src_path.name
+            counter = 2
+            while dest_path.exists():
+                dest_path = target_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        shutil.move(old_str, str(dest_path))
+        new_resolved = dest_path.resolve()
+        new_str = str(new_resolved)
+        if new_resolved.is_dir():
+            _update_files_index_after_dir_move(src_path, new_resolved)
+        _update_renamed_references(old_str, new_str)
+        moved.append({
+            "from": old_str,
+            "to": new_str,
+            "name": new_resolved.name,
+        })
+
+    return {
+        "ok": True,
+        "moved": moved,
+        "moved_count": len(moved),
+        "target_folder_rel": clean_rel,
     }
 
 

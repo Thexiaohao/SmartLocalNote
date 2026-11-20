@@ -20,6 +20,8 @@ const PINNED_FILES_KEY = 'sln_pinned_files_v1';
 const CUSTOM_SORT_ENABLED_KEY = 'sln_custom_sort_enabled_v1';
 const CUSTOM_FILE_ORDER_KEY = 'sln_custom_file_order_v1';
 const LAYOUT_PRESETS_KEY = 'sln_layout_presets_v1';
+const FOCUS_PULSE_KEY = 'sln_focus_pulse_v1';
+const MAX_CLIPBOARD_HISTORY = 12;
 const MAX_CONTEXT_FILES = 20;
 const MAX_TOASTS = 3;
 const MAX_RECENT_FILES = 8;
@@ -384,6 +386,7 @@ export const store = {
     splitDoc: null,
     shelfItems: loadInitialShelfItems(),
     activeDragPayload: null,
+    isInternalReorderDrag: false,
     systemInfo: null,
     config: {},
     files: { items: [], dirs: [], folders: [], private_files: [] },
@@ -406,6 +409,14 @@ export const store = {
       by_file: {},
       stats: { total: 0, done: 0, open: 0 },
     },
+    linkGraph: {
+      tags: [],
+      active: { backlinks: [], outlinks: [], tags: [] },
+      local_graph: { nodes: [], edges: [] },
+      stats: {},
+    },
+    clipboardHistory: [],
+    focusPulse: loadInitialFocusPulse(),
     globalDrag: null,
     leftCollapsed: false,
     rightCollapsed: false,
@@ -652,6 +663,30 @@ export const store = {
 
   createFolder(parentDir = '', name = '') {
     return createFolder(parentDir, name);
+  },
+
+  moveFilesToFolder(paths = [], targetFolderRel = '') {
+    return moveFilesToFolder(paths, targetFolderRel);
+  },
+
+  refreshLinkGraph(activePath = '') {
+    return refreshLinkGraph(activePath);
+  },
+
+  pushClipboardHistory(text, source = '复制') {
+    return pushClipboardHistory(text, source);
+  },
+
+  removeClipboardItem(id) {
+    return removeClipboardItem(id);
+  },
+
+  clearClipboardHistory() {
+    return clearClipboardHistory();
+  },
+
+  recordFocusSession(opts) {
+    return recordFocusSession(opts);
   },
 
   refreshAllTodos() {
@@ -908,6 +943,9 @@ export function setIsland(mode, data = {}) {
 export async function copyInternal(text, toastOpt = false) {
   const value = String(text ?? '');
   store.state.internalCopyText = value;
+  if (value.trim()) {
+    pushClipboardHistory(value, '应用内复制');
+  }
 
   let ok = false;
   try {
@@ -1363,7 +1401,10 @@ export function setDragPayload(event, payload) {
       // ignore
     }
   }
-  if (normalized.type !== 'module-reorder' && normalized.type !== 'tool-module') {
+  if (normalized.type === 'module-reorder' || normalized.type === 'tool-module') {
+    store.state.isInternalReorderDrag = true;
+  } else {
+    store.state.isInternalReorderDrag = false;
     beginGlobalDrag(normalized);
   }
   return normalized;
@@ -1409,6 +1450,7 @@ export function readDragPayload(event) {
  */
 export function clearDragPayload() {
   store.state.activeDragPayload = null;
+  store.state.isInternalReorderDrag = false;
 }
 
 function simpleMarkdownFallback(mdText) {
@@ -3448,6 +3490,284 @@ function inferDragPayloadFromEvent(e) {
   };
 }
 
+function getTodayDateKey() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function normalizeFocusPulse(raw) {
+  const today = getTodayDateKey();
+  const historyRaw = Array.isArray(raw?.history) ? raw.history : [];
+  const historyMap = new Map();
+  for (const h of historyRaw) {
+    if (!h || typeof h !== 'object' || !h.date) continue;
+    const dateKey = String(h.date).slice(0, 10);
+    if (!dateKey) continue;
+    historyMap.set(dateKey, {
+      date: dateKey,
+      totalMinutes: Math.max(0, Math.round(Number(h.totalMinutes) || 0)),
+      count: Math.max(0, Math.round(Number(h.count) || 0)),
+    });
+  }
+
+  const savedDate = typeof raw?.date === 'string' ? raw.date.slice(0, 10) : '';
+  let sessions = [];
+  if (savedDate === today && Array.isArray(raw?.sessions)) {
+    sessions = raw.sessions
+      .filter((s) => s && typeof s === 'object')
+      .map((s) => ({
+        id: String(s.id || `fp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`),
+        title: String(s.title || '专注任务').trim() || '专注任务',
+        minutes: Math.max(1, Math.round(Number(s.minutes) || 25)),
+        finishedAt: String(s.finishedAt || new Date().toISOString()),
+      }));
+  } else if (savedDate && savedDate !== today) {
+    const prevCount = Math.max(
+      0,
+      Math.round(Number(raw?.count) || (Array.isArray(raw?.sessions) ? raw.sessions.length : 0))
+    );
+    const prevMinutes = Math.max(
+      0,
+      Math.round(
+        Number(raw?.totalMinutes) ||
+          (Array.isArray(raw?.sessions)
+            ? raw.sessions.reduce((acc, s) => acc + (Number(s?.minutes) || 0), 0)
+            : 0)
+      )
+    );
+    if (prevCount > 0 || prevMinutes > 0) {
+      historyMap.set(savedDate, {
+        date: savedDate,
+        totalMinutes: prevMinutes,
+        count: prevCount,
+      });
+    }
+  }
+
+  const totalMinutes = sessions.reduce((sum, s) => sum + s.minutes, 0);
+  const count = sessions.length;
+  if (count > 0) {
+    historyMap.set(today, { date: today, totalMinutes, count });
+  }
+
+  const history = Array.from(historyMap.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-7);
+
+  return {
+    date: today,
+    sessions,
+    totalMinutes,
+    count,
+    history,
+  };
+}
+
+function loadInitialFocusPulse() {
+  try {
+    const raw = localStorage.getItem(FOCUS_PULSE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    const normalized = normalizeFocusPulse(parsed);
+    if (parsed && parsed.date && parsed.date !== normalized.date) {
+      localStorage.setItem(FOCUS_PULSE_KEY, JSON.stringify(normalized));
+    }
+    return normalized;
+  } catch {
+    return normalizeFocusPulse(null);
+  }
+}
+
+/**
+ * Record a completed focus session into today's Focus Pulse log (persisted in localStorage, 7-day history).
+ * @param {{ title?: string, minutes?: number }} [opts={}]
+ */
+export function recordFocusSession({ title = '专注任务', minutes = 25 } = {}) {
+  const current = normalizeFocusPulse(store.state.focusPulse);
+  const cleanMinutes = Math.max(1, Math.round(Number(minutes) || 25));
+  const cleanTitle = String(title || '专注任务').trim() || '专注任务';
+  const entry = {
+    id: `fp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    title: cleanTitle,
+    minutes: cleanMinutes,
+    finishedAt: new Date().toISOString(),
+  };
+
+  const sessions = [...current.sessions, entry];
+  const next = normalizeFocusPulse({
+    ...current,
+    sessions,
+    totalMinutes: sessions.reduce((sum, s) => sum + s.minutes, 0),
+    count: sessions.length,
+  });
+
+  store.state.focusPulse = next;
+  persistStorageJson(FOCUS_PULSE_KEY, next);
+  store.emit('state:changed', { keys: ['focusPulse'], state: store.state });
+  store.emit('focus:pulse-updated', next);
+  return next;
+}
+
+/**
+ * Batch move files into a target workspace folder via POST /api/files/move,
+ * then refresh files list & global todos concurrently.
+ * @param {string[]} [paths=[]]
+ * @param {string} [targetFolderRel='']
+ */
+export async function moveFilesToFolder(paths = [], targetFolderRel = '') {
+  const pathList = (Array.isArray(paths) ? paths : [paths])
+    .map((p) => String(p || '').trim())
+    .filter(Boolean);
+  if (pathList.length === 0) {
+    throw new Error('请选择要移动的文件');
+  }
+  const res = await api.post('/api/files/move', {
+    paths: pathList,
+    target_folder_rel: String(targetFolderRel || ''),
+  });
+  await Promise.allSettled([refreshFilesList(), refreshAllTodos()]);
+  return res;
+}
+
+/**
+ * Fetch bidirectional link & #tag graph for the workspace / active file via GET /api/links/graph.
+ * @param {string} [activePath='']
+ */
+export async function refreshLinkGraph(activePath = '') {
+  const targetPath = String(activePath || store.state.activeFile?.path || '').trim();
+  const qs = targetPath ? `?path=${encodeURIComponent(targetPath)}` : '';
+  const data = await api.get(`/api/links/graph${qs}`);
+  const nextGraph = {
+    tags: Array.isArray(data?.tags) ? data.tags : [],
+    active: {
+      backlinks: Array.isArray(data?.active?.backlinks) ? data.active.backlinks : [],
+      outlinks: Array.isArray(data?.active?.outlinks) ? data.active.outlinks : [],
+      tags: Array.isArray(data?.active?.tags) ? data.active.tags : [],
+    },
+    local_graph: {
+      nodes: Array.isArray(data?.local_graph?.nodes) ? data.local_graph.nodes : [],
+      edges: Array.isArray(data?.local_graph?.edges) ? data.local_graph.edges : [],
+    },
+    stats: data?.stats && typeof data.stats === 'object' ? data.stats : {},
+  };
+  store.state.linkGraph = nextGraph;
+  store.emit('state:changed', { keys: ['linkGraph'], state: store.state });
+  store.emit('links:updated', nextGraph);
+  return nextGraph;
+}
+
+function formatClipboardTime(date = new Date()) {
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+/**
+ * Push text onto the in-memory clipboard history stack (max 12 items, zero disk persistence).
+ * @param {string} text
+ * @param {string} [source='复制']
+ */
+export function pushClipboardHistory(text, source = '复制') {
+  const raw = String(text ?? '');
+  if (!raw.trim()) return store.state.clipboardHistory;
+
+  const entry = {
+    id: `clip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    text: raw,
+    preview: raw.replace(/\s+/g, ' ').trim().slice(0, 96),
+    time: formatClipboardTime(new Date()),
+    source: String(source || '复制').trim() || '复制',
+  };
+
+  const prev = Array.isArray(store.state.clipboardHistory) ? store.state.clipboardHistory : [];
+  const next = [entry, ...prev.filter((item) => item && item.text !== raw)].slice(0, MAX_CLIPBOARD_HISTORY);
+  store.state.clipboardHistory = next;
+  store.emit('state:changed', { keys: ['clipboardHistory'], state: store.state });
+  store.emit('clipboard:updated', next);
+  return next;
+}
+
+/**
+ * Remove a single item from the in-memory clipboard history stack.
+ * @param {string} id
+ */
+export function removeClipboardItem(id) {
+  const targetId = String(id || '').trim();
+  const prev = Array.isArray(store.state.clipboardHistory) ? store.state.clipboardHistory : [];
+  const next = prev.filter((item) => item?.id !== targetId);
+  store.state.clipboardHistory = next;
+  store.emit('state:changed', { keys: ['clipboardHistory'], state: store.state });
+  store.emit('clipboard:updated', next);
+  return next;
+}
+
+/**
+ * Clear all items from the in-memory clipboard history stack.
+ */
+export function clearClipboardHistory() {
+  store.state.clipboardHistory = [];
+  store.emit('state:changed', { keys: ['clipboardHistory'], state: store.state });
+  store.emit('clipboard:updated', []);
+  return [];
+}
+
+function getSelectionTextForClipboard(target) {
+  try {
+    if (
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLInputElement && typeof target.selectionStart === 'number')
+    ) {
+      const start = target.selectionStart ?? 0;
+      const end = target.selectionEnd ?? 0;
+      if (end > start) {
+        return target.value.slice(start, end);
+      }
+    }
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (
+      active instanceof HTMLTextAreaElement ||
+      (active instanceof HTMLInputElement && typeof active.selectionStart === 'number')
+    ) {
+      const start = active.selectionStart ?? 0;
+      const end = active.selectionEnd ?? 0;
+      if (end > start) {
+        return active.value.slice(start, end);
+      }
+    }
+    return window.getSelection?.()?.toString() || '';
+  } catch {
+    return '';
+  }
+}
+
+let clipboardCaptureBound = false;
+
+function bindGlobalClipboardCapture() {
+  if (clipboardCaptureBound || typeof document === 'undefined') return;
+  clipboardCaptureBound = true;
+
+  const handleCopyOrCut = (e) => {
+    let text = '';
+    try {
+      text = e?.clipboardData?.getData?.('text/plain') || '';
+    } catch {
+      text = '';
+    }
+    if (!text) {
+      text = getSelectionTextForClipboard(e?.target);
+    }
+    if (text && text.trim()) {
+      pushClipboardHistory(text, e.type === 'cut' ? '剪切' : '复制');
+    }
+  };
+
+  document.addEventListener('copy', handleCopyOrCut);
+  document.addEventListener('cut', handleCopyOrCut);
+}
+
 let globalDragBridgeBound = false;
 
 function bindGlobalDragBridge() {
@@ -3461,16 +3781,22 @@ function bindGlobalDragBridge() {
       window.clearTimeout(dropCleanupTimer);
       dropCleanupTimer = 0;
     }
+    if (store.state.isInternalReorderDrag) {
+      return;
+    }
     const target = e?.target && typeof e.target.closest === 'function' ? e.target : null;
-    if (target?.closest('.module-drag-handle, [data-drag-module]')) {
+    if (target?.closest('[data-drag-module], .module-drag-handle, .tool-card-summary')) {
+      store.state.isInternalReorderDrag = true;
       return;
     }
     const dtTypes = Array.from(e?.dataTransfer?.types || []);
     if (dtTypes.includes('application/x-sln-tool-module')) {
+      store.state.isInternalReorderDrag = true;
       return;
     }
     const active = store.state.activeDragPayload;
     if (active && (active.type === 'module-reorder' || active.type === 'tool-module')) {
+      store.state.isInternalReorderDrag = true;
       return;
     }
     if (!store.state.globalDrag) {
@@ -3483,15 +3809,18 @@ function bindGlobalDragBridge() {
       window.clearTimeout(dropCleanupTimer);
       dropCleanupTimer = 0;
     }
+    store.state.isInternalReorderDrag = false;
     endGlobalDrag();
   });
 
   document.addEventListener('drop', () => {
+    store.state.isInternalReorderDrag = false;
     if (dropCleanupTimer) {
       window.clearTimeout(dropCleanupTimer);
     }
     dropCleanupTimer = window.setTimeout(() => {
       dropCleanupTimer = 0;
+      store.state.isInternalReorderDrag = false;
       if (store.state.globalDrag) {
         endGlobalDrag();
       }
@@ -3500,3 +3829,4 @@ function bindGlobalDragBridge() {
 }
 
 bindGlobalDragBridge();
+bindGlobalClipboardCapture();

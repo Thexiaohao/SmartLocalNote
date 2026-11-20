@@ -15,15 +15,34 @@
  */
 
 import { store, escapeHtml, renderMarkdownSafe, showToast } from './store.js';
+import { api } from './api_client.js';
 import { icon } from './icons.js';
 
 const TEMPLATE_STORAGE_KEY = 'sln_mindmap_template_v1';
 const CARDS_STACK_STORAGE_KEY = 'sln_mindmap_cards_stack_v1';
 const CARD_POSITIONS_STORAGE_KEY = 'sln_mindmap_card_pos_v1';
+const OUTLINE_OPEN_STORAGE_KEY = 'sln_mindmap_outline_open_v1';
+const OUTLINE_WIDTH_STORAGE_KEY = 'sln_mindmap_outline_w_v1';
+const CUSTOM_COLORS_STORAGE_KEY = 'sln_mindmap_custom_colors_v1';
+const GROUPS_STORAGE_KEY = 'sln_mindmap_groups_v1';
+const OUTLINE_DEFAULT_WIDTH = 228;
+const OUTLINE_MIN_WIDTH = 160;
+const OUTLINE_MAX_WIDTH = 420;
 const CARD_W = 312;
 const CARD_COL_GAP = 26;
 const CARD_ROW_GAP = 24;
 const CARD_ACCENTS = ['#007AFF', '#34C759', '#FF9500', '#AF52DE', '#FF2D55', '#5856D6', '#00C7BE'];
+
+const CUSTOM_COLOR_PALETTE = [
+  { id: 'default', label: '默认跟随', hex: '' },
+  { id: 'indigo', label: '靛蓝', hex: '#4F46E5' },
+  { id: 'emerald', label: '翡翠绿', hex: '#16A34A' },
+  { id: 'amber', label: '琥珀橙', hex: '#D97706' },
+  { id: 'ruby', label: '宝石红', hex: '#DC2626' },
+  { id: 'purple', label: '星云紫', hex: '#9333EA' },
+  { id: 'teal', label: '青碧', hex: '#0D9488' },
+];
+const GROUP_COLOR_PALETTE = CUSTOM_COLOR_PALETTE.filter((c) => Boolean(c.hex));
 
 const TEMPLATE_LIST = [
   { id: 'logic', label: '逻辑图', title: '向右逻辑树（经典层层拆解）' },
@@ -1127,6 +1146,518 @@ function saveDocCardPositions(docKey, docMap) {
   }
 }
 
+function clampOutlineWidth(val) {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return OUTLINE_DEFAULT_WIDTH;
+  return Math.max(OUTLINE_MIN_WIDTH, Math.min(OUTLINE_MAX_WIDTH, Math.round(num)));
+}
+
+function hexToRgba(hex, alpha = 1) {
+  const clean = String(hex || '').trim().replace(/^#/, '');
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return `rgba(0, 122, 255, ${alpha})`;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function buildNodeColorKey(nodeData) {
+  if (!nodeData) return '';
+  const lineKey = Number.isInteger(nodeData.lineIdx) && nodeData.lineIdx >= 0 ? String(nodeData.lineIdx) : 'root';
+  return `${lineKey}:${String(nodeData.text || '').trim()}`;
+}
+
+function loadJsonStorageMap(storageKey) {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadDocCustomColors(docKey) {
+  if (!docKey) return {};
+  const all = loadJsonStorageMap(CUSTOM_COLORS_STORAGE_KEY);
+  const docMap = all[docKey];
+  return docMap && typeof docMap === 'object' ? { ...docMap } : {};
+}
+
+function saveDocCustomColors(docKey, docMap) {
+  if (!docKey) return;
+  try {
+    const all = loadJsonStorageMap(CUSTOM_COLORS_STORAGE_KEY);
+    if (!docMap || Object.keys(docMap).length === 0) {
+      delete all[docKey];
+    } else {
+      all[docKey] = docMap;
+    }
+    localStorage.setItem(CUSTOM_COLORS_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function loadDocGroups(docKey) {
+  if (!docKey) return [];
+  const all = loadJsonStorageMap(GROUPS_STORAGE_KEY);
+  const arr = all[docKey];
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((g) => g && typeof g === 'object' && g.id)
+    .map((g) => ({
+      id: String(g.id),
+      title: String(g.title || '新建分组1'),
+      x: Number.isFinite(Number(g.x)) ? Number(g.x) : 80,
+      y: Number.isFinite(Number(g.y)) ? Number(g.y) : 80,
+      w: Math.max(220, Number.isFinite(Number(g.w)) ? Number(g.w) : 440),
+      h: Math.max(150, Number.isFinite(Number(g.h)) ? Number(g.h) : 290),
+      color: String(g.color || '#4F46E5'),
+    }));
+}
+
+function saveDocGroups(docKey, groups) {
+  if (!docKey) return;
+  try {
+    const all = loadJsonStorageMap(GROUPS_STORAGE_KEY);
+    if (!Array.isArray(groups) || groups.length === 0) {
+      delete all[docKey];
+    } else {
+      all[docKey] = groups;
+    }
+    localStorage.setItem(GROUPS_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function serializeSubtreeToMarkdown(nodeData, levelOffset = 0) {
+  if (!nodeData) return '';
+  const lines = [];
+  const badge = STATUS_BADGE_MAP[nodeData.status] ? ` ${STATUS_BADGE_MAP[nodeData.status]}` : '';
+  const title = `${nodeData.text || '未命名节点'}${badge}`.trim();
+  if (nodeData.kind === 'heading' && levelOffset === 0) {
+    const hashes = '#'.repeat(Math.min(4, Math.max(2, nodeData.headingLevel || 2)));
+    lines.push(`${hashes} ${title}`);
+  } else {
+    const indent = '  '.repeat(Math.max(0, levelOffset));
+    lines.push(`${indent}- ${title}`);
+  }
+  for (const ch of nodeData.children || []) {
+    const nextOffset = nodeData.kind === 'heading' && levelOffset === 0 ? 0 : levelOffset + 1;
+    lines.push(serializeSubtreeToMarkdown(ch, nextOffset));
+  }
+  return lines.filter(Boolean).join('\n');
+}
+
+function ensureMindmapV73Styles() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById('mindmap-v73-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'mindmap-v73-styles';
+  style.textContent = `
+    .mindmap-workspace {
+      display: flex;
+      flex: 1 1 auto;
+      min-height: 0;
+      min-width: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .mindmap-outline-pane {
+      flex: 0 0 auto;
+      min-width: ${OUTLINE_MIN_WIDTH}px;
+      max-width: ${OUTLINE_MAX_WIDTH}px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--bg-glass);
+      border-right: 1px solid var(--border-hairline);
+      z-index: 4;
+      overflow: hidden;
+      user-select: none;
+    }
+    .mindmap-outline-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 9px 12px 6px;
+      flex-shrink: 0;
+    }
+    .mindmap-outline-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: 0.01em;
+    }
+    .mindmap-outline-count {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+    }
+    .mindmap-outline-search-wrap {
+      padding: 0 10px 8px;
+      border-bottom: 1px solid var(--border-hairline);
+      flex-shrink: 0;
+    }
+    .mindmap-outline-search {
+      width: 100%;
+      box-sizing: border-box;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-subtle);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 12px;
+      outline: none;
+    }
+    .mindmap-outline-search:focus {
+      border-color: var(--accent);
+      background: var(--bg-island);
+    }
+    .mindmap-outline-list {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .mindmap-outline-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      box-sizing: border-box;
+      text-align: left;
+      padding: 5px 8px;
+      border-radius: 9px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.35;
+      cursor: pointer;
+      transition: transform 140ms var(--ease-spring), opacity 140ms var(--ease-apple);
+    }
+    .mindmap-outline-item:hover {
+      background: var(--bg-subtle);
+      color: var(--text-primary);
+    }
+    .mindmap-outline-item.is-active {
+      background: var(--accent-soft);
+      border-color: rgba(0, 122, 255, 0.28);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .mindmap-outline-item.is-root-item {
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .mm-outline-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .mm-outline-label {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .mm-outline-child-badge {
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-tertiary);
+      padding: 0 4px;
+    }
+    .mindmap-outline-empty {
+      padding: 18px 10px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+    .mindmap-outline-resizer {
+      flex: 0 0 6px;
+      width: 6px;
+      margin-left: -3px;
+      margin-right: -3px;
+      position: relative;
+      z-index: 14;
+      cursor: col-resize;
+      touch-action: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+    }
+    .mindmap-outline-resizer::after {
+      content: '';
+      width: 2px;
+      height: 36px;
+      border-radius: 999px;
+      background: var(--border-hairline);
+      opacity: 0.72;
+      transition: transform 140ms var(--ease-spring), opacity 140ms var(--ease-apple);
+    }
+    .mindmap-outline-resizer:hover::after,
+    .mindmap-outline-resizer.is-dragging::after {
+      background: var(--accent);
+      opacity: 1;
+      transform: scaleX(1.6) scaleY(1.35);
+    }
+    .mindmap-workspace .mindmap-stage {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 0;
+    }
+    .mindmap-groups-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+      pointer-events: none;
+    }
+    .mindmap-svg {
+      position: relative;
+      z-index: 2;
+    }
+    .mindmap-nodes-layer {
+      z-index: 3;
+      pointer-events: none;
+    }
+    .mindmap-node,
+    .mindmap-card-box {
+      pointer-events: auto;
+    }
+    .mindmap-group-frame {
+      position: absolute;
+      pointer-events: auto;
+      box-sizing: border-box;
+      border-radius: 18px;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 8px 26px rgba(0, 0, 0, 0.05);
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      transition: opacity 150ms var(--ease-apple), transform 150ms var(--ease-spring);
+    }
+    .mindmap-group-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px 6px;
+      cursor: grab;
+      flex-wrap: nowrap;
+      border-bottom: 1px dashed rgba(128, 128, 140, 0.22);
+    }
+    .mindmap-group-frame.is-dragging .mindmap-group-header {
+      cursor: grabbing;
+    }
+    .mindmap-group-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--text-primary);
+      padding: 2px 6px;
+      border-radius: 6px;
+      cursor: text;
+      min-width: 40px;
+      max-width: 170px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .mindmap-group-title:hover {
+      background: rgba(128, 128, 140, 0.12);
+    }
+    .mindmap-group-title-input {
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--text-primary);
+      background: var(--bg-island);
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      padding: 2px 6px;
+      width: 132px;
+      outline: none;
+    }
+    .mindmap-group-badge {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: var(--bg-island);
+      border: 1px solid var(--border-hairline);
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+    .mindmap-group-colors {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .mindmap-group-color-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(255, 255, 255, 0.85);
+      cursor: pointer;
+      padding: 0;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+      transition: transform 130ms var(--ease-spring);
+    }
+    .mindmap-group-color-dot:hover {
+      transform: scale(1.22);
+    }
+    .mindmap-group-color-dot.is-active {
+      transform: scale(1.22);
+      outline: 2px solid var(--text-primary);
+      outline-offset: 1px;
+    }
+    .mindmap-group-btn {
+      height: 22px;
+      padding: 0 7px;
+      border-radius: 999px;
+      border: 1px solid var(--border-hairline);
+      background: var(--bg-island);
+      color: var(--text-primary);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+      transition: transform 130ms var(--ease-spring), opacity 130ms ease;
+    }
+    .mindmap-group-btn:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .mindmap-group-delete {
+      width: 22px;
+      padding: 0;
+      justify-content: center;
+      color: var(--text-tertiary);
+    }
+    .mindmap-group-delete:hover {
+      color: var(--danger);
+      border-color: var(--danger);
+    }
+    .mindmap-group-resize {
+      position: absolute;
+      z-index: 2;
+    }
+    .mindmap-group-resize[data-resize-dir="se"] {
+      right: 2px;
+      bottom: 2px;
+      width: 16px;
+      height: 16px;
+      cursor: nwse-resize;
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      padding: 3px;
+      box-sizing: border-box;
+      opacity: 0.65;
+    }
+    .mindmap-group-resize[data-resize-dir="se"]::after {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-right: 2px solid var(--text-tertiary);
+      border-bottom: 2px solid var(--text-tertiary);
+      border-bottom-right-radius: 3px;
+    }
+    .mindmap-group-resize[data-resize-dir="e"] {
+      top: 14px; bottom: 16px; right: -4px; width: 8px; cursor: ew-resize;
+    }
+    .mindmap-group-resize[data-resize-dir="w"] {
+      top: 14px; bottom: 16px; left: -4px; width: 8px; cursor: ew-resize;
+    }
+    .mindmap-group-resize[data-resize-dir="s"] {
+      left: 14px; right: 16px; bottom: -4px; height: 8px; cursor: ns-resize;
+    }
+    .mindmap-group-resize[data-resize-dir="n"] {
+      left: 14px; right: 16px; top: -4px; height: 8px; cursor: ns-resize;
+    }
+    .mindmap-group-resize[data-resize-dir="ne"] {
+      top: -4px; right: -4px; width: 12px; height: 12px; cursor: nesw-resize;
+    }
+    .mindmap-group-resize[data-resize-dir="nw"] {
+      top: -4px; left: -4px; width: 12px; height: 12px; cursor: nwse-resize;
+    }
+    .mindmap-group-resize[data-resize-dir="sw"] {
+      bottom: -4px; left: -4px; width: 12px; height: 12px; cursor: nesw-resize;
+    }
+    .mindmap-color-strip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px 8px;
+    }
+    .mindmap-color-swatch {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 1.5px solid var(--border-hairline);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      color: #FFFFFF;
+      padding: 0;
+      transition: transform 140ms var(--ease-spring);
+    }
+    .mindmap-color-swatch:hover {
+      transform: scale(1.18);
+    }
+    .mindmap-color-swatch.is-active {
+      transform: scale(1.15);
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .mindmap-color-swatch.is-default {
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+    }
+    @keyframes mmNodePulse {
+      0% { transform: scale(1); opacity: 1; }
+      35% { transform: scale(1.045); opacity: 0.82; }
+      70% { transform: scale(0.99); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .mindmap-node.is-pulse-highlight,
+    .mindmap-card-box.is-pulse-highlight,
+    .mindmap-card-item.is-pulse-highlight {
+      animation: mmNodePulse 680ms var(--ease-spring) 1;
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 function applyLineTextUpdate(markdown, lineIdx, nextCleanText, nextStatus) {
   const lines = String(markdown ?? '').replace(/\r\n/g, '\n').split('\n');
   if (lineIdx < 0 || lineIdx >= lines.length) return markdown;
@@ -1280,6 +1811,7 @@ function triggerFileDownload(blob, filename) {
  */
 export function renderMindMap(containerEl, opts = {}) {
   if (!containerEl) return null;
+  ensureMindmapV73Styles();
 
   const docName = String(opts.docName || '笔记脑图');
   const currentDocPath = String(opts.docPath || store.state.activeFile?.path || docName || '');
@@ -1305,7 +1837,29 @@ export function renderMindMap(containerEl, opts = {}) {
     // ignore storage errors
   }
 
+  let isOutlineOpen = true;
+  try {
+    const savedOutlineOpen = localStorage.getItem(OUTLINE_OPEN_STORAGE_KEY);
+    if (savedOutlineOpen !== null) {
+      isOutlineOpen = savedOutlineOpen === '1' || savedOutlineOpen === 'true';
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  let outlineWidth = OUTLINE_DEFAULT_WIDTH;
+  try {
+    const savedOutlineW = localStorage.getItem(OUTLINE_WIDTH_STORAGE_KEY);
+    if (savedOutlineW !== null) {
+      outlineWidth = clampOutlineWidth(Number(savedOutlineW));
+    }
+  } catch {
+    // ignore storage errors
+  }
+
   let docCardPositions = loadDocCardPositions(docPosKey);
+  let docCustomColors = loadDocCustomColors(docPosKey);
+  let docGroups = loadDocGroups(docPosKey);
 
   let zoom = 1;
   let panX = 0;
@@ -1314,12 +1868,19 @@ export function renderMindMap(containerEl, opts = {}) {
   let currentLayout = null;
   let currentTreeRoot = null;
   let currentNodeMap = new Map();
+  let currentParentMap = new Map();
   let nodeMenuEl = null;
   let tempEditorState = null;
   let selectedNodeId = null;
+  let hoveredNodeId = null;
+  let outlineSearchQuery = '';
   let topCardZIndex = 30;
   let topNodeZIndex = 20;
+  let topGroupZIndex = 10;
   let activeCardDrag = null;
+  let activeGroupInteraction = null;
+  let panAnimFrame = null;
+  let resizeTooltipEl = null;
 
   const baseTitle = docName.replace(/\.[^.]+$/, '') || 'mindmap';
 
@@ -1332,7 +1893,8 @@ export function renderMindMap(containerEl, opts = {}) {
     <div class="mindmap-shell">
       <div class="mindmap-toolbar">
         <div class="mindmap-toolbar-group" data-mm-role="tpl-group" style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;">
-          <span style="font-size:11.5px;font-weight:600;color:var(--text-tertiary);margin-right:2px;">知识视图:</span>
+          <button type="button" class="pill-btn pill-btn-sm ${isOutlineOpen ? 'pill-btn-primary' : ''}" data-mm-action="toggle-outline" title="展开/收起大纲侧边联动栏">📑 大纲联动</button>
+          <span style="font-size:11.5px;font-weight:600;color:var(--text-tertiary);margin:0 2px 0 4px;">知识视图:</span>
           ${templateBtnsHtml}
           <span class="mindmap-cards-controls" data-mm-role="cards-controls" style="display:${currentTemplate === 'cards' ? 'inline-flex' : 'none'};align-items:center;gap:4px;margin-left:6px;padding-left:8px;border-left:1px solid var(--border-hairline);">
             <button type="button" class="pill-btn pill-btn-sm ${!isCardsStack ? 'pill-btn-primary' : ''}" data-mm-cards-mode="tile" title="最短列瀑布流平铺，零重叠">⊞ 平铺</button>
@@ -1342,6 +1904,7 @@ export function renderMindMap(containerEl, opts = {}) {
           </span>
         </div>
         <div class="mindmap-toolbar-group">
+          <button type="button" class="pill-btn pill-btn-sm" data-mm-action="add-group-frame" title="在画布可视中心创建分组框（可圈选卡片一键导出为新笔记）">🔲 新建分组框</button>
           <button type="button" class="pill-btn pill-btn-sm" data-mm-act="zoom-out" title="以指针为中心缩小">－</button>
           <span class="mindmap-zoom-label" data-mm-role="zoom-label">100%</span>
           <button type="button" class="pill-btn pill-btn-sm" data-mm-act="zoom-in" title="以指针为中心放大">＋</button>
@@ -1353,18 +1916,39 @@ export function renderMindMap(containerEl, opts = {}) {
           <button type="button" class="pill-btn pill-btn-sm" data-mm-act="export-png">导出 PNG</button>
         </div>
       </div>
-      <div class="mindmap-stage" id="mindmap-canvas" tabindex="-1" style="outline:none;">
-        <div class="mindmap-viewport" data-mm-role="viewport" style="transform-origin:0 0;">
-          <svg class="mindmap-svg" data-mm-role="svg"></svg>
-          <div class="mindmap-nodes-layer" data-mm-role="nodes"></div>
+      <div class="mindmap-workspace" data-mm-role="workspace">
+        <aside class="mindmap-outline-pane" data-mm-role="outline-pane" style="width:${outlineWidth}px;${isOutlineOpen ? '' : 'display:none;'}">
+          <div class="mindmap-outline-header">
+            <span class="mindmap-outline-title">📑 大纲联动</span>
+            <span class="mindmap-outline-count" data-mm-role="outline-count">0</span>
+          </div>
+          <div class="mindmap-outline-search-wrap">
+            <input type="search" class="mindmap-outline-search" data-mm-role="outline-search" placeholder="筛选大纲节点..." />
+          </div>
+          <div class="mindmap-outline-list" data-mm-role="outline-list"></div>
+        </aside>
+        <div class="mindmap-outline-resizer" data-mm-role="outline-resizer" role="separator" aria-orientation="vertical" title="左右拖动调节大纲栏宽度 · 双击复位 228px" style="${isOutlineOpen ? '' : 'display:none;'}"></div>
+        <div class="mindmap-stage" id="mindmap-canvas" tabindex="-1" style="outline:none;">
+          <div class="mindmap-viewport" data-mm-role="viewport" style="transform-origin:0 0;">
+            <div class="mindmap-groups-layer" data-mm-role="groups"></div>
+            <svg class="mindmap-svg" data-mm-role="svg"></svg>
+            <div class="mindmap-nodes-layer" data-mm-role="nodes"></div>
+          </div>
+          <div class="mindmap-hint-pill" data-mm-role="hint-pill"></div>
         </div>
-        <div class="mindmap-hint-pill" data-mm-role="hint-pill"></div>
       </div>
     </div>
   `;
 
+  const outlineToggleBtn = containerEl.querySelector('[data-mm-action="toggle-outline"]');
+  const outlinePaneEl = containerEl.querySelector('[data-mm-role="outline-pane"]');
+  const outlineResizerEl = containerEl.querySelector('[data-mm-role="outline-resizer"]');
+  const outlineCountEl = containerEl.querySelector('[data-mm-role="outline-count"]');
+  const outlineSearchEl = containerEl.querySelector('[data-mm-role="outline-search"]');
+  const outlineListEl = containerEl.querySelector('[data-mm-role="outline-list"]');
   const stageEl = containerEl.querySelector('.mindmap-stage');
   const viewportEl = containerEl.querySelector('[data-mm-role="viewport"]');
+  const groupsLayer = containerEl.querySelector('[data-mm-role="groups"]');
   const svgEl = containerEl.querySelector('[data-mm-role="svg"]');
   const nodesLayer = containerEl.querySelector('[data-mm-role="nodes"]');
   const zoomLabelEl = containerEl.querySelector('[data-mm-role="zoom-label"]');
@@ -1491,6 +2075,448 @@ export function renderMindMap(containerEl, opts = {}) {
     renderTree(false);
   }
 
+  function getNodeCustomColor(nodeData) {
+    if (!nodeData) return '';
+    const key = buildNodeColorKey(nodeData);
+    return key && docCustomColors[key] ? String(docCustomColors[key]) : '';
+  }
+
+  function setNodeCustomColor(nodeData, hex) {
+    if (!nodeData) return;
+    const key = buildNodeColorKey(nodeData);
+    if (!key) return;
+    if (!hex) {
+      delete docCustomColors[key];
+    } else {
+      docCustomColors[key] = hex;
+    }
+    saveDocCustomColors(docPosKey, docCustomColors);
+    renderTree(false);
+  }
+
+  function ensureResizeTooltip() {
+    if (resizeTooltipEl && document.body.contains(resizeTooltipEl)) return resizeTooltipEl;
+    resizeTooltipEl = document.getElementById('pane-resize-tooltip');
+    if (!resizeTooltipEl) {
+      resizeTooltipEl = document.createElement('div');
+      resizeTooltipEl.id = 'pane-resize-tooltip';
+      resizeTooltipEl.className = 'pane-resize-tooltip';
+      resizeTooltipEl.hidden = true;
+      document.body.appendChild(resizeTooltipEl);
+    }
+    return resizeTooltipEl;
+  }
+
+  function showResizeTooltip(clientX, clientY, px) {
+    const tip = ensureResizeTooltip();
+    tip.textContent = `${Math.round(px)}px`;
+    tip.hidden = false;
+    const left = Math.min(window.innerWidth - 76, Math.max(8, clientX + 14));
+    const top = Math.min(window.innerHeight - 36, Math.max(8, clientY - 28));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  function hideResizeTooltip() {
+    if (resizeTooltipEl) {
+      resizeTooltipEl.hidden = true;
+    }
+  }
+
+  function syncOutlineVisibility() {
+    if (outlinePaneEl) {
+      outlinePaneEl.style.display = isOutlineOpen ? 'flex' : 'none';
+      outlinePaneEl.style.width = `${outlineWidth}px`;
+    }
+    if (outlineResizerEl) {
+      outlineResizerEl.style.display = isOutlineOpen ? 'flex' : 'none';
+    }
+    if (outlineToggleBtn) {
+      outlineToggleBtn.classList.toggle('pill-btn-primary', isOutlineOpen);
+    }
+  }
+
+  function syncOutlineActive(targetNodeId = null, shouldScroll = false) {
+    if (!outlineListEl) return;
+    const activeId = targetNodeId || selectedNodeId || hoveredNodeId;
+    outlineListEl.querySelectorAll('.mindmap-outline-item.is-active').forEach((el) => {
+      el.classList.remove('is-active');
+    });
+    if (!activeId) return;
+    const rowEl = outlineListEl.querySelector(`[data-outline-node-id="${CSS.escape(activeId)}"]`);
+    if (rowEl) {
+      rowEl.classList.add('is-active');
+      if (shouldScroll) {
+        rowEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+  }
+
+  function renderOutlineTree() {
+    if (!outlineListEl || !currentTreeRoot) return;
+    const flatItems = [];
+    const walk = (node, depth, branchAccent) => {
+      if (!node) return;
+      const customColor = getNodeCustomColor(node);
+      const dotColor =
+        depth === 0
+          ? customColor || 'var(--accent)'
+          : customColor || branchAccent || 'var(--text-tertiary)';
+      flatItems.push({ node, depth, dotColor });
+      const children = node.children || [];
+      children.forEach((ch, idx) => {
+        const nextAccent = depth === 0 ? CARD_ACCENTS[idx % CARD_ACCENTS.length] : branchAccent;
+        walk(ch, depth + 1, nextAccent);
+      });
+    };
+    walk(currentTreeRoot, 0, 'var(--accent)');
+
+    if (outlineCountEl) {
+      outlineCountEl.textContent = String(flatItems.length);
+    }
+
+    const q = outlineSearchQuery.trim().toLowerCase();
+    const filtered = q
+      ? flatItems.filter((it) => String(it.node.text || '').toLowerCase().includes(q))
+      : flatItems;
+
+    if (filtered.length === 0) {
+      outlineListEl.innerHTML = '<div class="mindmap-outline-empty">暂无匹配的节点</div>';
+      return;
+    }
+
+    const activeId = hoveredNodeId || selectedNodeId;
+    outlineListEl.innerHTML = filtered
+      .map((it) => {
+        const indentPx = 8 + Math.min(5, it.depth) * 13;
+        const isActive = activeId && it.node.id === activeId;
+        const isRoot = it.depth === 0;
+        const childCount = (it.node.children || []).length;
+        const cleanLabel = String(it.node.text || '节点').replace(/\[\[(?:app:|url:)?([^[\]|]+?)(?:\|[^[\]]+)?\]\]/g, '$1');
+        return `
+          <button type="button"
+            class="mindmap-outline-item ${isRoot ? 'is-root-item' : ''} ${isActive ? 'is-active' : ''}"
+            data-outline-node-id="${escapeHtml(it.node.id)}"
+            style="padding-left:${indentPx}px;"
+            title="${escapeHtml(cleanLabel)}">
+            <span class="mm-outline-dot" style="background:${escapeHtml(it.dotColor)};"></span>
+            <span class="mm-outline-label">${escapeHtml(cleanLabel)}</span>
+            ${childCount > 0 ? `<span class="mm-outline-child-badge">${childCount}</span>` : ''}
+          </button>
+        `;
+      })
+      .join('');
+  }
+
+  function animatePanTo(targetPanX, targetPanY, duration = 240) {
+    if (panAnimFrame) {
+      window.cancelAnimationFrame(panAnimFrame);
+      panAnimFrame = null;
+    }
+    const startX = panX;
+    const startY = panY;
+    const deltaX = targetPanX - startX;
+    const deltaY = targetPanY - startY;
+    if (Math.hypot(deltaX, deltaY) < 1) {
+      panX = targetPanX;
+      panY = targetPanY;
+      applyTransform();
+      return;
+    }
+    const startTs = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - startTs) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      panX = Number((startX + deltaX * eased).toFixed(2));
+      panY = Number((startY + deltaY * eased).toFixed(2));
+      applyTransform();
+      if (t < 1) {
+        panAnimFrame = window.requestAnimationFrame(step);
+      } else {
+        panAnimFrame = null;
+      }
+    };
+    panAnimFrame = window.requestAnimationFrame(step);
+  }
+
+  function focusNodeInCanvas(nodeId) {
+    if (!nodeId || !nodesLayer || !stageEl) return;
+
+    // Expand any collapsed ancestors so the target node is rendered on canvas
+    let needRerender = false;
+    let cursor = currentParentMap.get(nodeId);
+    while (cursor) {
+      if (collapsedIds.has(cursor)) {
+        collapsedIds.delete(cursor);
+        needRerender = true;
+      }
+      cursor = currentParentMap.get(cursor);
+    }
+    if (needRerender) {
+      renderTree(false);
+    }
+
+    const targetEl = nodesLayer.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+    if (!targetEl) return;
+
+    selectedNodeId = nodeId;
+    nodesLayer.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
+    targetEl.classList.add('is-selected');
+    syncOutlineActive(nodeId, false);
+
+    // Elevate z-index to highest
+    const cardBox = targetEl.closest('.mindmap-card-box');
+    if (cardBox) {
+      topCardZIndex += 1;
+      cardBox.style.zIndex = String(topCardZIndex);
+    } else if (targetEl.classList.contains('mindmap-node')) {
+      topNodeZIndex += 1;
+      targetEl.style.zIndex = String(topNodeZIndex);
+    }
+
+    // Trigger pulse highlight
+    targetEl.classList.remove('is-pulse-highlight');
+    void targetEl.offsetWidth;
+    targetEl.classList.add('is-pulse-highlight');
+    window.setTimeout(() => {
+      targetEl.classList.remove('is-pulse-highlight');
+    }, 850);
+
+    // Compute world center of target element
+    let worldX = parseFloat(targetEl.style.left);
+    let worldY = parseFloat(targetEl.style.top);
+    if (!Number.isFinite(worldX)) worldX = targetEl.offsetLeft;
+    if (!Number.isFinite(worldY)) worldY = targetEl.offsetTop;
+    if (cardBox && targetEl !== cardBox) {
+      const boxX = parseFloat(cardBox.style.left) || cardBox.offsetLeft || 0;
+      const boxY = parseFloat(cardBox.style.top) || cardBox.offsetTop || 0;
+      worldX = boxX + targetEl.offsetLeft;
+      worldY = boxY + targetEl.offsetTop;
+    }
+    const worldW = targetEl.offsetWidth || 120;
+    const worldH = targetEl.offsetHeight || 36;
+    const cx = worldX + worldW / 2;
+    const cy = worldY + worldH / 2;
+
+    const stageRect = stageEl.getBoundingClientRect();
+    const targetPanX = Math.round(stageRect.width / 2 - cx * zoom);
+    const targetPanY = Math.round(stageRect.height / 2 - cy * zoom);
+    animatePanTo(targetPanX, targetPanY, 260);
+  }
+
+  function computeGroupContainedItems(group) {
+    if (!nodesLayer || !group) return [];
+    const candidates = nodesLayer.querySelectorAll('.mindmap-card-box, .mindmap-node:not(.is-root)');
+    const matches = [];
+    candidates.forEach((el) => {
+      const nodeId = el.dataset.nodeId;
+      const nodeData = findNodeById(nodeId);
+      if (!nodeData) return;
+      const x = Number.isFinite(parseFloat(el.style.left)) ? parseFloat(el.style.left) : el.offsetLeft;
+      const y = Number.isFinite(parseFloat(el.style.top)) ? parseFloat(el.style.top) : el.offsetTop;
+      const w = el.offsetWidth || 100;
+      const h = el.offsetHeight || 36;
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      if (cx >= group.x && cx <= group.x + group.w && cy >= group.y && cy <= group.y + group.h) {
+        matches.push({ el, nodeData, x, y, w, h });
+      }
+    });
+    matches.sort((a, b) => (Math.abs(a.y - b.y) > 20 ? a.y - b.y : a.x - b.x));
+    return matches;
+  }
+
+  function updateAllGroupCounts() {
+    if (!groupsLayer) return;
+    for (const g of docGroups) {
+      const badgeEl = groupsLayer.querySelector(`[data-mm-group-badge="${CSS.escape(g.id)}"]`);
+      if (badgeEl) {
+        const count = computeGroupContainedItems(g).length;
+        badgeEl.textContent = `${count} 项`;
+      }
+    }
+  }
+
+  async function exportGroupToNewNote(group, triggerBtn = null) {
+    if (!group) return;
+    const contained = computeGroupContainedItems(group);
+    if (contained.length === 0) {
+      showToast('当前分组框内暂无卡片或节点，请先拖入卡片或调整框选范围', 'warning');
+      return;
+    }
+
+    // Deduplicate ancestor/descendant nodes if both are inside the frame
+    const selectedIds = new Set(contained.map((it) => it.nodeData.id));
+    const topItems = contained.filter((it) => {
+      let parentId = currentParentMap.get(it.nodeData.id);
+      while (parentId) {
+        if (selectedIds.has(parentId)) return false;
+        parentId = currentParentMap.get(parentId);
+      }
+      return true;
+    });
+
+    const sections = topItems
+      .map((it) => {
+        const range = getNodeLineRange(currentMarkdown, it.nodeData);
+        if (range?.subtreeMarkdown) return range.subtreeMarkdown.trim();
+        return serializeSubtreeToMarkdown(it.nodeData).trim();
+      })
+      .filter(Boolean);
+
+    const noteTitle = String(group.title || '新建分组').trim() || '新建分组';
+    const content = `# ${noteTitle}\n\n${sections.join('\n\n')}\n`;
+
+    const origText = triggerBtn?.textContent;
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = '导出中...';
+    }
+
+    try {
+      const created = await api.post('/api/files/create-note', {
+        title: noteTitle,
+        content,
+      });
+      try {
+        const filesData = await api.get('/api/files/list');
+        store.setState({ files: filesData });
+        store.emit('files:updated', filesData);
+      } catch {
+        store.emit('files:updated', created);
+      }
+      showToast(`已导出分组「${noteTitle}」为新笔记：${created?.name || `${noteTitle}.md`}`, 'success', {
+        duration: 6000,
+        actionLabel: '打开新笔记',
+        onAction: () => {
+          if (created?.path) {
+            store.emit('file:open', created);
+          }
+        },
+      });
+    } catch (err) {
+      showToast(`导出新笔记失败：${err?.message || '未知错误'}`, 'error');
+    } finally {
+      if (triggerBtn && triggerBtn.isConnected) {
+        triggerBtn.disabled = false;
+        triggerBtn.textContent = origText || '📤 导出为笔记';
+      }
+    }
+  }
+
+  function startGroupRename(group, titleEl) {
+    if (!group || !titleEl) return;
+    if (titleEl.dataset.editing === '1') return;
+    titleEl.dataset.editing = '1';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'mindmap-group-title-input';
+    input.value = group.title || '';
+    titleEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      const nextTitle = save ? input.value.trim() || group.title : group.title;
+      if (save && nextTitle !== group.title) {
+        group.title = nextTitle;
+        saveDocGroups(docPosKey, docGroups);
+      }
+      renderGroupFrames();
+    };
+
+    input.addEventListener('pointerdown', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.isComposing) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        commit(false);
+      }
+    });
+    input.addEventListener('blur', () => commit(true));
+  }
+
+  function renderGroupFrames() {
+    if (!groupsLayer) return;
+    groupsLayer.innerHTML = '';
+    for (const group of docGroups) {
+      const frameEl = document.createElement('div');
+      frameEl.className = 'mindmap-group-frame';
+      frameEl.dataset.groupId = group.id;
+      const gColor = group.color || '#4F46E5';
+      frameEl.style.left = `${group.x}px`;
+      frameEl.style.top = `${group.y}px`;
+      frameEl.style.width = `${group.w}px`;
+      frameEl.style.height = `${group.h}px`;
+      frameEl.style.background = hexToRgba(gColor, 0.075);
+      frameEl.style.border = `1.5px solid ${hexToRgba(gColor, 0.48)}`;
+
+      const colorDotsHtml = GROUP_COLOR_PALETTE.map(
+        (c) =>
+          `<button type="button" class="mindmap-group-color-dot ${c.hex === gColor ? 'is-active' : ''}" data-mm-group-color="${c.hex}" style="background:${c.hex};" title="${escapeHtml(c.label)}"></button>`
+      ).join('');
+
+      frameEl.innerHTML = `
+        <div class="mindmap-group-header" data-mm-group-drag="${escapeHtml(group.id)}">
+          <span class="mindmap-group-title" data-mm-group-rename="${escapeHtml(group.id)}" title="点击或双击重命名">${escapeHtml(group.title)}</span>
+          <span class="mindmap-group-badge" data-mm-group-badge="${escapeHtml(group.id)}">0 项</span>
+          <div class="mindmap-group-colors">${colorDotsHtml}</div>
+          <button type="button" class="mindmap-group-btn mindmap-group-export" data-mm-group-export="${escapeHtml(group.id)}" title="收集框内卡片导出为新笔记">📤 导出为笔记</button>
+          <button type="button" class="mindmap-group-btn mindmap-group-delete" data-mm-group-delete="${escapeHtml(group.id)}" title="删除分组框（保留框内卡片）">✕</button>
+        </div>
+        <div class="mindmap-group-resize" data-resize-dir="n"></div>
+        <div class="mindmap-group-resize" data-resize-dir="s"></div>
+        <div class="mindmap-group-resize" data-resize-dir="e"></div>
+        <div class="mindmap-group-resize" data-resize-dir="w"></div>
+        <div class="mindmap-group-resize" data-resize-dir="ne"></div>
+        <div class="mindmap-group-resize" data-resize-dir="nw"></div>
+        <div class="mindmap-group-resize" data-resize-dir="sw"></div>
+        <div class="mindmap-group-resize" data-resize-dir="se" title="拖拽缩放分组框"></div>
+      `;
+      groupsLayer.appendChild(frameEl);
+    }
+    updateAllGroupCounts();
+  }
+
+  function createNewGroupFrame() {
+    const rect = stageEl?.getBoundingClientRect();
+    const sw = rect?.width || 680;
+    const sh = rect?.height || 420;
+    const w = 460;
+    const h = 300;
+    const centerWorldX = (sw / 2 - panX) / zoom;
+    const centerWorldY = (sh / 2 - panY) / zoom;
+    const x = Math.round(centerWorldX - w / 2);
+    const y = Math.round(centerWorldY - h / 2);
+
+    const nextTitle = getNextSequentialCardName(
+      '新建分组',
+      docGroups.map((g) => g.title)
+    );
+    const colorObj = GROUP_COLOR_PALETTE[docGroups.length % GROUP_COLOR_PALETTE.length];
+    const newGroup = {
+      id: `grp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      title: nextTitle,
+      x,
+      y,
+      w,
+      h,
+      color: colorObj ? colorObj.hex : '#4F46E5',
+    };
+    docGroups.push(newGroup);
+    saveDocGroups(docPosKey, docGroups);
+    renderGroupFrames();
+    showToast(`已创建分组框「${nextTitle}」，可拖动四边缩放或点击标题改名`, 'info', { duration: 2400 });
+  }
+
   function openNodeContextMenu(nodeData, clientX, clientY) {
     closeNodeMenu();
     const menu = document.createElement('div');
@@ -1504,8 +2530,22 @@ export function renderMindMap(containerEl, opts = {}) {
       </button>
     `;
 
+    const currentCustomColor = getNodeCustomColor(nodeData);
+    const colorSwatchesHtml = CUSTOM_COLOR_PALETTE.map((c) => {
+      const isDefault = !c.hex;
+      const isActive = currentCustomColor === c.hex;
+      return `<button type="button"
+        class="mindmap-color-swatch ${isDefault ? 'is-default' : ''} ${isActive ? 'is-active' : ''}"
+        data-mm-menu="color:${escapeHtml(c.hex)}"
+        style="${c.hex ? `background:${c.hex};` : ''}"
+        title="${escapeHtml(c.label)}">${isDefault ? '↺' : isActive ? '✓' : ''}</button>`;
+    }).join('');
+
     menu.innerHTML = `
       <div class="context-menu-label">${escapeHtml(nodeData.text.slice(0, 26))}</div>
+      <div class="context-menu-label" style="font-size:11px;padding-bottom:2px;">🎨 卡片配色</div>
+      <div class="mindmap-color-strip">${colorSwatchesHtml}</div>
+      <div class="context-menu-sep"></div>
       ${statusItem('mastered', STATUS_LABEL_MAP.mastered)}
       ${statusItem('review', STATUS_LABEL_MAP.review)}
       ${statusItem('weak', STATUS_LABEL_MAP.weak)}
@@ -1531,6 +2571,12 @@ export function renderMindMap(containerEl, opts = {}) {
       if (!btn) return;
       const act = btn.dataset.mmMenu;
       closeNodeMenu();
+
+      if (act.startsWith('color:')) {
+        const nextHex = act.slice(6);
+        setNodeCustomColor(nodeData, nextHex);
+        return;
+      }
 
       if (act.startsWith('status:')) {
         const nextStatus = act.slice(7);
@@ -1685,6 +2731,16 @@ export function renderMindMap(containerEl, opts = {}) {
         saveDocCardPositions(docPosKey, docCardPositions);
       }
 
+      // Preserve custom color if renaming this node
+      const oldColorKey = buildNodeColorKey(nodeData);
+      if (oldColorKey && docCustomColors[oldColorKey]) {
+        const savedColor = docCustomColors[oldColorKey];
+        const newColorKey = `${nodeData.lineIdx >= 0 ? nodeData.lineIdx : 'root'}:${normalized}`;
+        delete docCustomColors[oldColorKey];
+        docCustomColors[newColorKey] = savedColor;
+        saveDocCustomColors(docPosKey, docCustomColors);
+      }
+
       currentMarkdown = applyLineTextUpdate(currentMarkdown, nodeData.lineIdx, normalized, nodeData.status);
       opts.onUpdateMarkdown?.(currentMarkdown);
       renderTree(false);
@@ -1733,6 +2789,21 @@ export function renderMindMap(containerEl, opts = {}) {
     el.style.top = `${layoutNode.y}px`;
     el.style.width = `${layoutNode.w}px`;
     el.style.minHeight = `${layoutNode.h}px`;
+
+    const customColor = getNodeCustomColor(nodeData);
+    if (customColor) {
+      el.dataset.customColor = customColor;
+      if (isRoot) {
+        el.style.background = customColor;
+        el.style.borderColor = customColor;
+        el.style.boxShadow = `0 8px 22px ${hexToRgba(customColor, 0.34)}`;
+      } else {
+        el.style.borderColor = hexToRgba(customColor, 0.65);
+        el.style.borderTop = `3px solid ${customColor}`;
+        el.style.background = `linear-gradient(180deg, ${hexToRgba(customColor, 0.14)} 0%, ${hexToRgba(customColor, 0.04)} 100%), var(--bg-island)`;
+        el.style.boxShadow = `0 4px 16px ${hexToRgba(customColor, 0.16)}`;
+      }
+    }
 
     const milestonePrefix = layoutNode.milestoneBadge
       ? `<span style="font-size:10px;font-weight:700;font-family:var(--font-mono);padding:1px 5px;border-radius:999px;background:var(--accent-soft);color:var(--accent);flex-shrink:0;">${layoutNode.milestoneBadge}</span>`
@@ -2301,9 +3372,10 @@ export function renderMindMap(containerEl, opts = {}) {
     let origPanX = 0;
     let origPanY = 0;
 
+    const TRASH_ZONE_SEL = '#portable-trash-dock, [data-drop-zone="trash"], [data-drop-zone="app-trash"], [data-drop-zone="system-trash"]';
     const clearDropZoneHighlights = () => {
       document
-        .querySelectorAll('#portable-trash-dock.is-drag-over, [data-drop-zone="trash"].is-drag-over, #dynamic-island.is-drag-over, #island-shelf-drawer.is-drag-over')
+        .querySelectorAll('#portable-trash-dock.is-drag-over, [data-drop-zone].is-drag-over, #dynamic-island.is-drag-over, #island-shelf-drawer.is-drag-over')
         .forEach((el) => el.classList.remove('is-drag-over'));
     };
 
@@ -2426,11 +3498,11 @@ export function renderMindMap(containerEl, opts = {}) {
           // Drop zone hover feedback
           clearDropZoneHighlights();
           const hitEls = document.elementsFromPoint(e.clientX, e.clientY);
-          const trashTarget = hitEls.find((el) => el.matches?.('#portable-trash-dock, [data-drop-zone="trash"]'))
-            || hitEls.map((el) => el.closest?.('#portable-trash-dock, [data-drop-zone="trash"]')).find(Boolean);
+          const trashTarget = hitEls.find((el) => el.matches?.(TRASH_ZONE_SEL))
+            || hitEls.map((el) => el.closest?.(TRASH_ZONE_SEL)).find(Boolean);
           const shelfTarget = !trashTarget
-            ? hitEls.find((el) => el.matches?.('#dynamic-island, #island-shelf-drawer'))
-              || hitEls.map((el) => el.closest?.('#dynamic-island, #island-shelf-drawer')).find(Boolean)
+            ? hitEls.find((el) => el.matches?.('[data-drop-zone="drag-shelf"], #dynamic-island, #island-shelf-drawer'))
+              || hitEls.map((el) => el.closest?.('[data-drop-zone="drag-shelf"], #dynamic-island, #island-shelf-drawer')).find(Boolean)
             : null;
 
           if (trashTarget) {
@@ -2488,12 +3560,12 @@ export function renderMindMap(containerEl, opts = {}) {
 
         const hitEls = document.elementsFromPoint(e.clientX, e.clientY);
         const overTrash = hitEls.some(
-          (el) => el.matches?.('#portable-trash-dock, [data-drop-zone="trash"]') || el.closest?.('#portable-trash-dock, [data-drop-zone="trash"]')
+          (el) => el.matches?.(TRASH_ZONE_SEL) || el.closest?.(TRASH_ZONE_SEL)
         );
         const overShelf =
           !overTrash &&
           hitEls.some(
-            (el) => el.matches?.('#dynamic-island, #island-shelf-drawer') || el.closest?.('#dynamic-island, #island-shelf-drawer')
+            (el) => el.matches?.('[data-drop-zone="drag-shelf"], #dynamic-island, #island-shelf-drawer') || el.closest?.('[data-drop-zone="drag-shelf"], #dynamic-island, #island-shelf-drawer')
           );
 
         const info = drag.lineInfo;

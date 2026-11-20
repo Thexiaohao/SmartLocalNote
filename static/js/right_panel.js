@@ -36,6 +36,8 @@ const {
 } = storeMod;
 
 const UI_LAYOUT_STORAGE_KEY = 'sln_ui_layout';
+const RIGHT_TOOLS_V73_STORAGE_KEY = 'sln_right_tool_modules_v73';
+const MD_SNIPPETS_STORAGE_KEY = 'sln_md_snippets_v1';
 
 const TAB_META = {
   summary: { id: 'summary', label: 'AI总结' },
@@ -52,9 +54,20 @@ const SUMMARY_MODULE_META = {
 
 const TOOL_MODULE_META = {
   quick_excel: { id: 'quick_excel', label: '快捷表单填表与表格操作' },
+  clipboard_snippets: { id: 'clipboard_snippets', label: '剪贴板历史与常用模板片段' },
+  doc_outline: { id: 'doc_outline', label: '文档大纲与高亮速览' },
+  text_studio: { id: 'text_studio', label: '极简文本排版工坊' },
+  focus_pulse: { id: 'focus_pulse', label: '今日专注脉搏与关系微图谱' },
+  // Legacy compatibility entries
   knowledge_tree: { id: 'knowledge_tree', label: '虚拟知识树分类与总览' },
   apps_workspaces: { id: 'apps_workspaces', label: '本地软件库与一键场景包' },
   ai_templates: { id: 'ai_templates', label: 'AI 常用指令模板' },
+};
+
+const LEGACY_TOOL_ID_MAP = {
+  knowledge_tree: 'doc_outline',
+  apps_workspaces: 'clipboard_snippets',
+  ai_templates: 'text_studio',
 };
 
 const DEFAULT_TABS_ORDER = ['summary', 'chat', 'tools'];
@@ -66,10 +79,82 @@ const DEFAULT_SUMMARY_MODULES = [
 ];
 const DEFAULT_TOOL_MODULES = [
   { id: 'quick_excel', visible: true },
-  { id: 'knowledge_tree', visible: true },
-  { id: 'apps_workspaces', visible: true },
-  { id: 'ai_templates', visible: false },
+  { id: 'clipboard_snippets', visible: true },
+  { id: 'doc_outline', visible: true },
+  { id: 'text_studio', visible: true },
+  { id: 'focus_pulse', visible: true },
 ];
+
+const BUILTIN_MD_SNIPPETS = [
+  {
+    id: 'builtin_meeting',
+    icon: '📅',
+    title: '会议纪要',
+    content: '## 📅 会议纪要 ({{DATE}})\n- **参会人**：\n- **核心结论**：\n  1. \n- **行动待办**：\n  - [ ] ',
+    custom: false,
+  },
+  {
+    id: 'builtin_review',
+    icon: '🌙',
+    title: '每日复盘',
+    content: '## 🌙 每日复盘 ({{DATE}})\n- **今日完成**：\n  - [x] \n- **核心收获**：\n  - \n- **明日计划**：\n  - [ ] ',
+    custom: false,
+  },
+  {
+    id: 'builtin_table',
+    icon: '📊',
+    title: '标准表格',
+    content: '| 项目 | 状态 | 关键说明 |\n| :--- | :---: | :--- |\n| 示例项 A | 进行中 | 补充详情 |\n| 示例项 B | 待开始 | 补充详情 |',
+    custom: false,
+  },
+  {
+    id: 'builtin_paper',
+    icon: '📄',
+    title: '论文摘录卡',
+    content: '> [!NOTE] 📄 论文/资料摘录卡\n> - **来源**：[[讲义.pdf#page=1]]\n> - **核心观点**：\n> - **个人批注**：#阅读笔记',
+    custom: false,
+  },
+];
+
+function loadCustomMdSnippets() {
+  try {
+    const raw = localStorage.getItem(MD_SNIPPETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((s) => s && typeof s === 'object' && s.title && s.content)
+      .map((s) => ({
+        id: String(s.id || `snip_${Date.now().toString(36)}`),
+        icon: String(s.icon || '📌'),
+        title: String(s.title).trim(),
+        content: String(s.content),
+        custom: true,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomMdSnippets(list) {
+  const clean = Array.isArray(list) ? list : [];
+  try {
+    localStorage.setItem(MD_SNIPPETS_STORAGE_KEY, JSON.stringify(clean));
+  } catch {
+    // ignore storage errors
+  }
+  return clean;
+}
+
+function getAllMdSnippets() {
+  return [...BUILTIN_MD_SNIPPETS, ...loadCustomMdSnippets()];
+}
+
+function resolveSnippetMarkdown(rawContent) {
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return String(rawContent || '').replace(/\{\{DATE\}\}/g, today);
+}
 
 const AI_PROMPT_TEMPLATES = [
   {
@@ -162,23 +247,43 @@ function normalizeTabsOrder(rawOrder) {
   return result;
 }
 
-function normalizeModuleList(rawList, defaults) {
+function normalizeModuleList(rawList, defaults, { isTools = false } = {}) {
   const allowed = defaults.map((d) => d.id);
   const seen = new Set();
   const result = [];
 
+  const hasV73ToolId =
+    isTools &&
+    Array.isArray(rawList) &&
+    rawList.some((entry) => {
+      const rawId = typeof entry === 'string' ? entry : entry?.id;
+      return ['clipboard_snippets', 'doc_outline', 'text_studio', 'focus_pulse'].includes(rawId);
+    });
+
   if (Array.isArray(rawList)) {
     for (const entry of rawList) {
-      const id = typeof entry === 'string' ? entry : entry?.id;
+      let id = typeof entry === 'string' ? entry : entry?.id;
+      const wasLegacyAiTpl = isTools && id === 'ai_templates';
+      if (isTools && id && LEGACY_TOOL_ID_MAP[id]) {
+        id = LEGACY_TOOL_ID_MAP[id];
+      }
       if (!id || !allowed.includes(id) || seen.has(id)) continue;
       seen.add(id);
-      const visible = typeof entry === 'object' && entry !== null ? entry.visible !== false : true;
+      const visible =
+        wasLegacyAiTpl && !hasV73ToolId
+          ? true
+          : typeof entry === 'object' && entry !== null
+            ? entry.visible !== false
+            : true;
       const collapsed = typeof entry === 'object' && entry !== null ? Boolean(entry.collapsed) : false;
       result.push({ id, visible, collapsed });
     }
   } else if (rawList && typeof rawList === 'object' && Array.isArray(rawList.order)) {
     const hiddenSet = new Set(Array.isArray(rawList.hidden) ? rawList.hidden : []);
-    for (const id of rawList.order) {
+    for (let id of rawList.order) {
+      if (isTools && id && LEGACY_TOOL_ID_MAP[id]) {
+        id = LEGACY_TOOL_ID_MAP[id];
+      }
       if (!allowed.includes(id) || seen.has(id)) continue;
       seen.add(id);
       result.push({ id, visible: !hiddenSet.has(id), collapsed: false });
@@ -283,24 +388,130 @@ function isRightModuleFloating(modId) {
 function renderRightModuleControlsHtml(modId, title) {
   const curPreset = getRightModuleSizePreset(modId);
   const floated = isRightModuleFloating(modId);
-  const presets = [
-    { key: 's', label: 'S', title: '小尺寸 (150px)' },
-    { key: 'm', label: 'M', title: '中尺寸 (280px)' },
-    { key: 'l', label: 'L', title: '大尺寸 (460px)' },
-    { key: 'auto', label: 'Auto', title: '自适应高度' },
-  ];
+  const labelMap = { s: 'S', m: 'M', l: 'L', auto: 'Auto' };
+  const activeLabel = labelMap[curPreset] || 'Auto';
   return `
-    <span class="module-hover-controls" style="display:inline-flex;align-items:center;gap:3px;flex-shrink:0;">
-      <span class="module-size-controls" role="group" aria-label="模块高度">
-        ${presets
-          .map(
-            (p) => `<button type="button" class="module-size-pill ${curPreset === p.key ? 'is-active' : ''}" data-action="set-module-size" data-panel="right" data-mod-id="${escapeHtml(modId)}" data-preset="${p.key}" title="${p.title}">${p.label}</button>`
-          )
-          .join('')}
-      </span>
-      <button type="button" class="left-icon-btn is-xs module-float-btn ${floated ? 'is-active' : ''}" data-action="toggle-module-float" data-panel="right" data-mod-id="${escapeHtml(modId)}" data-mod-title="${escapeHtml(title)}" title="${floated ? '吸回侧栏' : '弹出为独立浮窗'}" aria-label="${floated ? '吸回侧栏' : '弹出为独立浮窗'}">⧉</button>
+    <span class="module-hover-controls">
+      <button
+        type="button"
+        class="module-size-pill is-dropdown-trigger"
+        data-action="open-module-size-menu"
+        data-panel="right"
+        data-module-id="${escapeHtml(modId)}"
+        data-mod-id="${escapeHtml(modId)}"
+        title="调整模块高度档位 (S/M/L/Auto)"
+      >${activeLabel} ▾</button>
+      <button
+        type="button"
+        class="left-icon-btn is-xs module-float-btn ${floated ? 'is-active' : ''}"
+        data-action="toggle-module-float"
+        data-panel="right"
+        data-module-id="${escapeHtml(modId)}"
+        data-mod-id="${escapeHtml(modId)}"
+        data-mod-title="${escapeHtml(title)}"
+        title="${floated ? '吸回侧栏' : '弹出为独立浮窗'}"
+        aria-label="${floated ? '吸回侧栏' : '弹出为独立浮窗'}"
+      >⧉</button>
     </span>
   `;
+}
+
+function toggleRightModuleSizePopover(triggerEl, panel, modId) {
+  if (typeof document === 'undefined' || !triggerEl || !modId) return;
+  let popEl = document.getElementById('module-size-popover');
+  if (!popEl) {
+    popEl = document.createElement('div');
+    popEl.id = 'module-size-popover';
+    popEl.className = 'module-size-popover';
+    popEl.setAttribute('role', 'menu');
+    popEl.hidden = true;
+    document.body.appendChild(popEl);
+  }
+
+  const triggerKey = `${panel}:${modId}`;
+  if (!popEl.hidden && popEl.dataset.triggerKey === triggerKey) {
+    popEl.hidden = true;
+    popEl.dataset.triggerKey = '';
+    triggerEl.setAttribute('aria-expanded', 'false');
+    return;
+  }
+
+  document.querySelectorAll('.module-size-pill.is-dropdown-trigger[aria-expanded="true"]').forEach((btn) => {
+    btn.setAttribute('aria-expanded', 'false');
+  });
+
+  const curPreset = getRightModuleSizePreset(modId);
+  const options = [
+    { key: 's', label: 'S · 紧凑 (150px)' },
+    { key: 'm', label: 'M · 标准 (280px)' },
+    { key: 'l', label: 'L · 展开 (460px)' },
+    { key: 'auto', label: 'Auto · 自适应' },
+  ];
+
+  popEl.dataset.triggerKey = triggerKey;
+  popEl.innerHTML = options
+    .map(
+      (opt) => `
+        <button
+          type="button"
+          class="module-size-option module-size-popover-item ${curPreset === opt.key ? 'is-active' : ''}"
+          data-size-preset="${opt.key}"
+          role="menuitemradio"
+          aria-checked="${curPreset === opt.key ? 'true' : 'false'}"
+        >
+          <span>${escapeHtml(opt.label)}</span>
+          <span class="module-size-option-check">✓</span>
+        </button>
+      `
+    )
+    .join('');
+
+  popEl.hidden = false;
+  triggerEl.setAttribute('aria-expanded', 'true');
+
+  const rect = triggerEl.getBoundingClientRect();
+  const popW = popEl.offsetWidth || 148;
+  const popH = popEl.offsetHeight || 132;
+  const left = Math.max(8, Math.min(window.innerWidth - popW - 8, Math.round(rect.right - popW)));
+  const belowTop = Math.round(rect.bottom + 6);
+  const aboveTop = Math.round(rect.top - popH - 6);
+  const top = belowTop + popH <= window.innerHeight - 8 ? belowTop : Math.max(8, aboveTop);
+  popEl.style.left = `${left}px`;
+  popEl.style.top = `${top}px`;
+
+  popEl.onclick = (ev) => {
+    const optBtn = ev.target.closest('[data-size-preset]');
+    if (!optBtn) return;
+    ev.stopPropagation();
+    const nextPreset = optBtn.dataset.sizePreset || 'auto';
+    popEl.hidden = true;
+    popEl.dataset.triggerKey = '';
+    triggerEl.setAttribute('aria-expanded', 'false');
+    setModuleSizePreset?.(panel, modId, nextPreset);
+  };
+
+  if (!popEl.dataset.dismissBound) {
+    popEl.dataset.dismissBound = '1';
+    document.addEventListener('pointerdown', (ev) => {
+      if (popEl.hidden) return;
+      if (popEl.contains(ev.target)) return;
+      if (ev.target.closest?.('[data-action="open-module-size-menu"]')) return;
+      popEl.hidden = true;
+      popEl.dataset.triggerKey = '';
+      document.querySelectorAll('.module-size-pill.is-dropdown-trigger[aria-expanded="true"]').forEach((btn) => {
+        btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !popEl.hidden) {
+        popEl.hidden = true;
+        popEl.dataset.triggerKey = '';
+        document.querySelectorAll('.module-size-pill.is-dropdown-trigger[aria-expanded="true"]').forEach((btn) => {
+          btn.setAttribute('aria-expanded', 'false');
+        });
+      }
+    });
+  }
 }
 
 function renderFileTypeIconHtml(nameOrExt, size = 14) {
@@ -313,12 +524,32 @@ function renderFileTypeBadgeHtml(nameOrExt) {
   return `<span class="file-ext-badge ft-badge ${escapeHtml(ft.cssClass)}" style="--ft-color:${ft.color};--ft-bg:${ft.bg};--ft-border:${ft.border}">${escapeHtml(ft.label)}</span>`;
 }
 
+function loadSavedV73ToolModules() {
+  try {
+    const raw = localStorage.getItem(RIGHT_TOOLS_V73_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function getUiLayout() {
   const raw = store.state.uiLayout || {};
+  const rawTools = Array.isArray(raw.rightToolModules) ? raw.rightToolModules : [];
+  const hasV73InStore = rawTools.some((m) =>
+    ['clipboard_snippets', 'doc_outline', 'text_studio', 'focus_pulse'].includes(m?.id || m)
+  );
+  const sourceTools = hasV73InStore ? rawTools : (loadSavedV73ToolModules() || rawTools);
+  const normalizedTools = normalizeModuleList(sourceTools, DEFAULT_TOOL_MODULES, { isTools: true });
+  if (store.state.uiLayout && typeof store.state.uiLayout === 'object') {
+    store.state.uiLayout.rightToolModules = normalizedTools;
+  }
   return {
     rightTabsOrder: normalizeTabsOrder(raw.rightTabsOrder || DEFAULT_TABS_ORDER),
     rightSummaryModules: normalizeModuleList(raw.rightSummaryModules, DEFAULT_SUMMARY_MODULES),
-    rightToolModules: normalizeModuleList(raw.rightToolModules, DEFAULT_TOOL_MODULES),
+    rightToolModules: normalizedTools,
     moduleHeights:
       raw.moduleHeights && typeof raw.moduleHeights === 'object' ? { ...raw.moduleHeights } : {},
   };
@@ -329,10 +560,25 @@ function commitUiLayout(patch) {
     store.state.uiLayout?.moduleHeights && typeof store.state.uiLayout.moduleHeights === 'object'
       ? { ...store.state.uiLayout.moduleHeights }
       : null;
+  const nextToolMods = patch?.rightToolModules
+    ? normalizeModuleList(patch.rightToolModules, DEFAULT_TOOL_MODULES, { isTools: true })
+    : getUiLayout().rightToolModules;
+
+  if (patch?.rightToolModules) {
+    try {
+      localStorage.setItem(RIGHT_TOOLS_V73_STORAGE_KEY, JSON.stringify(nextToolMods));
+    } catch {
+      // ignore storage errors
+    }
+  }
+
   if (typeof storeMod.updateUiLayout === 'function') {
     const res = storeMod.updateUiLayout(patch);
-    if (prevHeights && !res?.moduleHeights) {
-      res.moduleHeights = prevHeights;
+    if (res && typeof res === 'object') {
+      res.rightToolModules = nextToolMods;
+      if (prevHeights && !res.moduleHeights) {
+        res.moduleHeights = prevHeights;
+      }
       store.state.uiLayout = res;
       try {
         localStorage.setItem(UI_LAYOUT_STORAGE_KEY, JSON.stringify(res));
@@ -348,9 +594,7 @@ function commitUiLayout(patch) {
     rightSummaryModules: patch.rightSummaryModules
       ? normalizeModuleList(patch.rightSummaryModules, DEFAULT_SUMMARY_MODULES)
       : current.rightSummaryModules,
-    rightToolModules: patch.rightToolModules
-      ? normalizeModuleList(patch.rightToolModules, DEFAULT_TOOL_MODULES)
-      : current.rightToolModules,
+    rightToolModules: nextToolMods,
     moduleHeights: patch.moduleHeights || current.moduleHeights || {},
   };
   store.state.uiLayout = next;
@@ -364,8 +608,18 @@ function commitUiLayout(patch) {
 }
 
 function resetUiLayoutState() {
+  try {
+    localStorage.removeItem(RIGHT_TOOLS_V73_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
   if (typeof resetUiLayout === 'function') {
-    return resetUiLayout();
+    const res = resetUiLayout();
+    if (res && typeof res === 'object') {
+      res.rightToolModules = DEFAULT_TOOL_MODULES.map((m) => ({ ...m }));
+      store.state.uiLayout = res;
+    }
+    return res;
   }
   if (typeof storeMod.applyPaneWidths === 'function') {
     storeMod.applyPaneWidths(260, 360);
@@ -540,6 +794,11 @@ export function initRightPanel(containerEl) {
     classifyResult: null,
     classifyLoading: false,
     classifyTargetPath: '',
+
+    inlineSnippetCreateOpen: false,
+    inlineSnippetTitleDraft: '',
+    inlineSnippetContentDraft: '',
+    studioText: '',
   };
 
   function setBgAiTaskSafe(task) {
@@ -557,6 +816,10 @@ export function initRightPanel(containerEl) {
   let isResizingRightModule = false;
   const toolOpenStateById = new Map([
     ['quick_excel', true],
+    ['clipboard_snippets', true],
+    ['doc_outline', true],
+    ['text_studio', false],
+    ['focus_pulse', true],
     ['knowledge_tree', false],
     ['apps_workspaces', false],
     ['ai_templates', false],
@@ -2933,8 +3196,458 @@ export function initRightPanel(containerEl) {
       </details>
     `;
 
+    // --- V7.3 Tool 2: clipboard_snippets (📋 T1 剪贴板历史与常用模板片段) ---
+    const clipHistory = Array.isArray(store.state.clipboardHistory) ? store.state.clipboardHistory : [];
+    const mdSnippets = getAllMdSnippets();
+    const defaultNewSnippetTitle = nextSequentialName('新建片段', mdSnippets.map((s) => s.title));
+    const clipScrollCls = buildScrollBodyClasses('clipboard_snippets', false, 'tool-card-body module-scroll-body');
+    const clipScrollStyle = buildScrollBodyStyle('clipboard_snippets', false);
+    const inlineSnippetFormHtml = state.inlineSnippetCreateOpen
+      ? `
+        <div class="glass-card" style="margin-top:8px;padding:8px 10px;display:flex;flex-direction:column;gap:6px;">
+          <input
+            type="text"
+            class="apple-input"
+            data-role="inline-snippet-title"
+            value="${escapeHtml(state.inlineSnippetTitleDraft)}"
+            placeholder="片段名称（留空默认：${escapeHtml(defaultNewSnippetTitle)}）"
+            style="height:28px;padding:4px 8px;font-size:12px;"
+          />
+          <textarea
+            class="apple-textarea"
+            data-role="inline-snippet-content"
+            rows="3"
+            placeholder="输入常用 Markdown 模板内容（支持 {{DATE}} 与 [[锚点]]）…"
+            style="min-height:60px;padding:6px 8px;font-size:12px;"
+          >${escapeHtml(state.inlineSnippetContentDraft)}</textarea>
+          <div style="display:flex;justify-content:flex-end;gap:6px;">
+            <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="snippet-create-cancel" style="height:24px;font-size:11px;">取消</button>
+            <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="snippet-create-submit" style="height:24px;font-size:11px;">${icon('check', 11)} 保存片段</button>
+          </div>
+        </div>
+      `
+      : '';
+
+    const clipboardSnippetsCardHtml = `
+      <details class="tool-card module-block" data-module-id="clipboard_snippets" draggable="true" ${isToolOpen('clipboard_snippets') ? 'open' : ''}>
+        <summary class="tool-card-summary">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('clipboard', 14)} <span class="module-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">剪贴板历史与常用模板片段</span>
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${clipHistory.length}·${mdSnippets.length}</span>
+            ${renderRightModuleControlsHtml('clipboard_snippets', '剪贴板历史与常用模板片段')}
+          </span>
+        </summary>
+        <div class="${clipScrollCls}" data-scroll-module="right_clipboard_snippets" ${clipScrollStyle ? `style="${clipScrollStyle}"` : ''}>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+            <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">📋 剪贴板历史 (${clipHistory.length}/12)</span>
+            <div style="display:inline-flex;align-items:center;gap:4px;">
+              <button type="button" class="pill-btn pill-btn-sm" data-action="clip-read-system" style="height:22px;padding:0 8px;font-size:11px;" title="读取系统当前剪贴板">
+                📥 读取剪贴板
+              </button>
+              ${
+                clipHistory.length > 0
+                  ? `<button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="clip-clear-all" style="height:22px;padding:0 7px;font-size:11px;">清空</button>`
+                  : ''
+              }
+            </div>
+          </div>
+          <div class="tool-clipboard-list">
+            ${
+              clipHistory.length > 0
+                ? clipHistory
+                    .map(
+                      (clip) => `
+                        <div
+                          class="tool-clipboard-item draggable-card"
+                          draggable="true"
+                          data-drag-type="clipboard-item"
+                          data-clip-id="${escapeHtml(clip.id)}"
+                          title="点击直接插入当前笔记，或按住拖入中间笔记"
+                        >
+                          <div style="min-width:0;flex:1 1 auto;" data-action="clip-insert-note" data-clip-id="${escapeHtml(clip.id)}">
+                            <div style="font-size:11.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(clip.preview || clip.text)}</div>
+                            <div style="font-size:10px;color:var(--text-tertiary);margin-top:1px;">${escapeHtml(clip.time || '')} · ${escapeHtml(clip.source || '复制')}</div>
+                          </div>
+                          <div style="display:inline-flex;align-items:center;gap:3px;flex-shrink:0;">
+                            <button type="button" class="left-icon-btn is-xs" data-action="clip-insert-note" data-clip-id="${escapeHtml(clip.id)}" title="一键插入当前笔记">${icon('plus', 11)}</button>
+                            <button type="button" class="left-icon-btn is-xs" data-action="clip-copy-item" data-clip-id="${escapeHtml(clip.id)}" title="复制">${icon('copy', 11)}</button>
+                            <button type="button" class="left-icon-btn is-xs" data-action="clip-delete-item" data-clip-id="${escapeHtml(clip.id)}" title="删除此条">${icon('x', 11)}</button>
+                          </div>
+                        </div>
+                      `
+                    )
+                    .join('')
+                : `<div style="font-size:11.5px;color:var(--text-tertiary);padding:4px 2px;">复制或剪切任意文本后自动收录（仅驻留内存，关闭即焚）</div>`
+            }
+          </div>
+
+          <div style="border-top:1px solid var(--border-hairline);margin-top:10px;padding-top:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">
+              <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">📌 常用 Markdown 模板片段</span>
+              <button type="button" class="pill-btn pill-btn-sm" data-action="snippet-toggle-create" style="height:22px;padding:0 8px;font-size:11px;">
+                + 新建片段
+              </button>
+            </div>
+            <div class="tool-snippet-pills">
+              ${mdSnippets
+                .map(
+                  (snip) => `
+                    <span
+                      class="tool-snippet-pill draggable-card"
+                      draggable="true"
+                      data-drag-type="md-snippet"
+                      data-snippet-id="${escapeHtml(snip.id)}"
+                      title="点击一键插入当前笔记，或按住拖入笔记"
+                    >
+                      <button
+                        type="button"
+                        data-action="snippet-insert"
+                        data-snippet-id="${escapeHtml(snip.id)}"
+                        style="display:inline-flex;align-items:center;gap:4px;color:inherit;"
+                      >
+                        <span>${escapeHtml(snip.icon || '📌')}</span>
+                        <span>${escapeHtml(snip.title)}</span>
+                      </button>
+                      ${
+                        snip.custom
+                          ? `<button type="button" data-action="snippet-delete" data-snippet-id="${escapeHtml(snip.id)}" title="删除自定义片段" style="display:inline-flex;align-items:center;color:var(--text-tertiary);margin-left:2px;">×</button>`
+                          : ''
+                      }
+                    </span>
+                  `
+                )
+                .join('')}
+            </div>
+            ${inlineSnippetFormHtml}
+          </div>
+        </div>
+        ${renderModuleResizerHtml('clipboard_snippets')}
+      </details>
+    `;
+
+    // --- V7.3 Tool 3: doc_outline (📑 T2 文档大纲与高亮速览) ---
+    const outlineData = extractDocOutlineData(store.state.activeDocumentText || '');
+    const outlineScrollCls = buildScrollBodyClasses('doc_outline', false, 'tool-card-body module-scroll-body');
+    const outlineScrollStyle = buildScrollBodyStyle('doc_outline', false);
+    const docOutlineCardHtml = `
+      <details class="tool-card module-block" data-module-id="doc_outline" draggable="true" ${isToolOpen('doc_outline') ? 'open' : ''}>
+        <summary class="tool-card-summary">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('book-open', 14)} <span class="module-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">文档大纲与高亮速览</span>
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${outlineData.headings.length}节·${outlineData.highlights.length}亮</span>
+            ${renderRightModuleControlsHtml('doc_outline', '文档大纲与高亮速览')}
+          </span>
+        </summary>
+        <div class="${outlineScrollCls}" data-scroll-module="right_doc_outline" ${outlineScrollStyle ? `style="${outlineScrollStyle}"` : ''}>
+          <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;">
+            <span>📑 章节标题树 (${outlineData.headings.length})</span>
+            <span style="font-size:10.5px;color:var(--text-tertiary);font-weight:400;">点击跳转 · 拖拽生成锚点</span>
+          </div>
+          <div class="tool-outline-tree">
+            ${
+              outlineData.headings.length > 0
+                ? outlineData.headings
+                    .map(
+                      (h) => `
+                        <div
+                          class="tool-outline-item draggable-card"
+                          style="--level:${Math.max(0, h.level - 1)};"
+                          draggable="true"
+                          data-drag-type="outline-heading"
+                          data-action="outline-jump-heading"
+                          data-heading="${escapeHtml(h.text)}"
+                          data-line-no="${h.lineNo}"
+                          title="点击跳转到 #${escapeHtml(h.text)} (第 ${h.lineNo} 行)，或拖入笔记生成章节锚点"
+                        >
+                          <span style="font-size:10px;color:var(--text-tertiary);font-family:var(--font-mono);flex-shrink:0;">H${h.level}</span>
+                          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(h.text)}</span>
+                          <span style="font-size:10px;color:var(--text-tertiary);font-family:var(--font-mono);flex-shrink:0;">L${h.lineNo}</span>
+                        </div>
+                      `
+                    )
+                    .join('')
+                : `<div style="font-size:11.5px;color:var(--text-tertiary);padding:4px 2px;">当前文档暂无 # ~ #### 标题</div>`
+            }
+          </div>
+
+          <div style="border-top:1px solid var(--border-hairline);margin-top:8px;padding-top:8px;">
+            <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">
+              🖍 ==高亮标记== (${outlineData.highlights.length})
+            </div>
+            ${
+              outlineData.highlights.length > 0
+                ? `<div style="display:flex;flex-wrap:wrap;gap:5px;">
+                    ${outlineData.highlights
+                      .map(
+                        (hl) => `
+                          <button
+                            type="button"
+                            class="tool-highlight-chip draggable-card"
+                            draggable="true"
+                            data-drag-type="outline-highlight"
+                            data-action="outline-jump-highlight"
+                            data-highlight-text="${escapeHtml(hl.text)}"
+                            data-line-no="${hl.lineNo}"
+                            title="点击定位第 ${hl.lineNo} 行，或拖入笔记"
+                          >
+                            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px;">${escapeHtml(hl.text)}</span>
+                            <span style="font-size:10px;opacity:0.65;font-family:var(--font-mono);">L${hl.lineNo}</span>
+                          </button>
+                        `
+                      )
+                      .join('')}
+                  </div>`
+                : `<div style="font-size:11.5px;color:var(--text-tertiary);padding:2px;">使用 ==重点文字== 语法即可在此聚合速览</div>`
+            }
+          </div>
+
+          <div style="border-top:1px solid var(--border-hairline);margin-top:8px;padding-top:8px;">
+            <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;">
+              ☑ 本篇待办 (${outlineData.todos.length})
+            </div>
+            ${
+              outlineData.todos.length > 0
+                ? `<div style="display:flex;flex-direction:column;gap:4px;max-height:140px;overflow-y:auto;">
+                    ${outlineData.todos
+                      .map(
+                        (td) => `
+                          <div
+                            class="tool-outline-item draggable-card"
+                            draggable="true"
+                            data-drag-type="outline-todo"
+                            data-action="outline-jump-todo"
+                            data-todo-text="${escapeHtml(td.text)}"
+                            data-line-no="${td.lineNo}"
+                            title="点击定位第 ${td.lineNo} 行，或拖入其他笔记"
+                          >
+                            <span style="color:${td.checked ? 'var(--success)' : 'var(--accent)'};flex-shrink:0;">${td.checked ? '☑' : '☐'}</span>
+                            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${td.checked ? 'text-decoration:line-through;color:var(--text-tertiary);' : ''}">${escapeHtml(td.text)}</span>
+                            <span style="font-size:10px;color:var(--text-tertiary);font-family:var(--font-mono);flex-shrink:0;">L${td.lineNo}</span>
+                          </div>
+                        `
+                      )
+                      .join('')}
+                  </div>`
+                : `<div style="font-size:11.5px;color:var(--text-tertiary);padding:2px;">本篇暂无 - [ ] 待办事项</div>`
+            }
+          </div>
+        </div>
+        ${renderModuleResizerHtml('doc_outline')}
+      </details>
+    `;
+
+    // --- V7.3 Tool 4: text_studio (⚡ T3 极简文本排版工坊) ---
+    const studioSourceText = state.studioText.trim()
+      ? state.studioText
+      : (store.state.activeDocumentText || '');
+    const studioStats = computeTextStudioStats(studioSourceText);
+    const studioScrollCls = buildScrollBodyClasses('text_studio', false, 'tool-card-body module-scroll-body');
+    const studioScrollStyle = buildScrollBodyStyle('text_studio', false);
+    const textStudioCardHtml = `
+      <details class="tool-card module-block" data-module-id="text_studio" draggable="true" ${isToolOpen('text_studio') ? 'open' : ''}>
+        <summary class="tool-card-summary">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('zap', 14)} <span class="module-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">极简文本排版工坊</span>
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span data-role="studio-header-words" style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${studioStats.words} 字</span>
+            ${renderRightModuleControlsHtml('text_studio', '极简文本排版工坊')}
+          </span>
+        </summary>
+        <div class="${studioScrollCls}" data-scroll-module="right_text_studio" ${studioScrollStyle ? `style="${studioScrollStyle}"` : ''}>
+          <div class="tool-text-studio">
+            <div class="studio-stat-grid">
+              <div class="studio-stat-card">
+                <span class="studio-stat-val" data-role="studio-stat-words">${studioStats.words}</span>
+                <span class="studio-stat-label" data-role="studio-stat-chars">字数 (${studioStats.chars}字符)</span>
+              </div>
+              <div class="studio-stat-card">
+                <span class="studio-stat-val" data-role="studio-stat-lines">${studioStats.lines}</span>
+                <span class="studio-stat-label">总行数</span>
+              </div>
+              <div class="studio-stat-card">
+                <span class="studio-stat-val" data-role="studio-stat-read">${studioStats.readMins}m</span>
+                <span class="studio-stat-label">预计阅读</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+              <span style="font-size:11px;color:var(--text-tertiary);">${state.studioText.trim() ? '当前统计：工坊输入框' : '当前统计：活动文档（点击转换自动载入）'}</span>
+              <div style="display:inline-flex;gap:4px;">
+                <button type="button" class="pill-btn pill-btn-sm" data-action="studio-load-doc" style="height:22px;padding:0 8px;font-size:11px;">
+                  📥 载入当前文档
+                </button>
+                <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="studio-clear" style="height:22px;padding:0 7px;font-size:11px;">
+                  清空
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              class="apple-textarea"
+              data-role="text-studio-input"
+              rows="4"
+              placeholder="粘贴或输入待排版文本，或点击上方「载入当前文档」进行纯本地转换…"
+              style="min-height:76px;font-size:12px;font-family:var(--font-mono);padding:7px 9px;"
+            >${escapeHtml(state.studioText)}</textarea>
+
+            <div class="studio-action-grid">
+              <button type="button" class="pill-btn pill-btn-sm" data-action="studio-transform" data-op="pangu" style="height:26px;font-size:11.5px;justify-content:center;">
+                中英自动加空格
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-action="studio-transform" data-op="clean" style="height:26px;font-size:11.5px;justify-content:center;">
+                清理空行与乱码
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-action="studio-transform" data-op="csv-to-table" style="height:26px;font-size:11.5px;justify-content:center;">
+                CSV/Tab 转 Markdown 表格
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-action="studio-transform" data-op="to-todos" style="height:26px;font-size:11.5px;justify-content:center;">
+                转为待办清单
+              </button>
+              <button type="button" class="pill-btn pill-btn-sm" data-action="studio-transform" data-op="json-format" style="grid-column:1 / -1;height:26px;font-size:11.5px;justify-content:center;">
+                { } JSON 格式化
+              </button>
+            </div>
+
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding-top:2px;">
+              <span
+                class="drag-pill-hint draggable-card"
+                draggable="true"
+                data-drag-type="studio-text"
+                title="按住将工坊文本拖入中间笔记"
+                style="padding:3px 9px;font-size:11px;color:var(--accent);background:var(--accent-soft);cursor:grab;"
+              >
+                ⠿ 拖入笔记
+              </span>
+              <div style="display:inline-flex;gap:5px;">
+                <button type="button" class="pill-btn pill-btn-sm" data-action="studio-copy" style="height:24px;padding:0 9px;font-size:11px;">
+                  ${icon('copy', 11)} 复制
+                </button>
+                <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="studio-insert-doc" style="height:24px;padding:0 9px;font-size:11px;">
+                  ${icon('plus', 11)} 插入当前笔记
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        ${renderModuleResizerHtml('text_studio')}
+      </details>
+    `;
+
+    // --- V7.3 Tool 5: focus_pulse (⏱ T4 今日专注脉搏与 K1 关系微图谱) ---
+    const pulse = store.state.focusPulse || { count: 0, totalMinutes: 0, sessions: [], history: [] };
+    const pulseCount = Number(pulse.count) || 0;
+    const pulseMins = Number(pulse.totalMinutes) || 0;
+    const pulseSessions = Array.isArray(pulse.sessions) ? pulse.sessions : [];
+    const ringPct = Math.min(100, Math.round((pulseMins / 120) * 100));
+    const ringCircumference = 94.25;
+    const ringOffset = Number((ringCircumference * (1 - ringPct / 100)).toFixed(2));
+    const linkGraph = store.state.linkGraph || {};
+    const graphNodesCount = Array.isArray(linkGraph.local_graph?.nodes) ? linkGraph.local_graph.nodes.length : 0;
+    const focusPulseScrollCls = buildScrollBodyClasses('focus_pulse', false, 'tool-card-body module-scroll-body');
+    const focusPulseScrollStyle = buildScrollBodyStyle('focus_pulse', false);
+
+    const focusPulseCardHtml = `
+      <details class="tool-card module-block" data-module-id="focus_pulse" draggable="true" ${isToolOpen('focus_pulse') ? 'open' : ''}>
+        <summary class="tool-card-summary">
+          <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;">
+            <span class="module-drag-handle" title="拖拽调整卡片顺序" style="color:var(--text-tertiary);cursor:grab;">⠿</span>
+            ${icon('clock', 14)} <span class="module-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">今日专注脉搏与关系微图谱</span>
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;flex-shrink:0;">
+            <span style="font-size:11px;color:var(--text-tertiary);font-weight:500;">${pulseMins}m·${graphNodesCount}节点</span>
+            ${renderRightModuleControlsHtml('focus_pulse', '今日专注脉搏与关系微图谱')}
+          </span>
+        </summary>
+        <div class="${focusPulseScrollCls}" data-scroll-module="right_focus_pulse" ${focusPulseScrollStyle ? `style="${focusPulseScrollStyle}"` : ''}>
+          <div class="tool-focus-pulse">
+            <div class="pulse-ring-card">
+              <svg width="38" height="38" viewBox="0 0 38 38" style="flex-shrink:0;transform:rotate(-90deg);">
+                <circle cx="19" cy="19" r="15" fill="none" stroke="var(--border-hairline)" stroke-width="3.5" />
+                <circle
+                  cx="19"
+                  cy="19"
+                  r="15"
+                  fill="none"
+                  stroke="${pulseMins >= 120 ? 'var(--success)' : 'var(--accent)'}"
+                  stroke-width="3.5"
+                  stroke-linecap="round"
+                  stroke-dasharray="${ringCircumference}"
+                  stroke-dashoffset="${ringOffset}"
+                />
+              </svg>
+              <div class="pulse-ring-meta">
+                <div class="pulse-ring-value">今日 ${pulseCount} 次 · ${pulseMins} 分钟</div>
+                <div class="pulse-ring-label">
+                  ${
+                    pulseSessions.length > 0
+                      ? `最近完成：${escapeHtml(pulseSessions[pulseSessions.length - 1].title)} (${pulseSessions[pulseSessions.length - 1].minutes}m)`
+                      : '暂未记录今日专注，点击右侧开启番茄钟'
+                  }
+                </div>
+              </div>
+              <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="pulse-start-focus" style="height:26px;padding:0 10px;font-size:11.5px;flex-shrink:0;">
+                ${icon('play', 11)} 专注
+              </button>
+            </div>
+
+            ${
+              pulseSessions.length > 0
+                ? `<div style="display:flex;flex-direction:column;gap:4px;max-height:110px;overflow-y:auto;">
+                    ${pulseSessions
+                      .slice(-4)
+                      .reverse()
+                      .map((s) => {
+                        const hm = s.finishedAt ? formatTriggerTime(s.finishedAt).slice(-8, -3) : '';
+                        return `
+                          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 8px;border-radius:8px;background:var(--bg-subtle);font-size:11.5px;">
+                            <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);">🍅 ${escapeHtml(s.title)}</span>
+                            <span style="font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);flex-shrink:0;">${s.minutes}m ${escapeHtml(hm)}</span>
+                          </div>
+                        `;
+                      })
+                      .join('')}
+                  </div>`
+                : ''
+            }
+
+            <button
+              type="button"
+              class="pill-btn pill-btn-sm"
+              data-action="pulse-write-review"
+              style="height:28px;justify-content:center;font-size:11.5px;width:100%;"
+            >
+              📝 将今日专注复盘写入当前笔记
+            </button>
+
+            <div style="border-top:1px solid var(--border-hairline);margin-top:4px;padding-top:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;">
+                <span style="font-size:11.5px;font-weight:600;color:var(--text-secondary);">🕸 K1 局部关系微图谱 (${graphNodesCount} 节点)</span>
+                <button type="button" class="pill-btn pill-btn-sm pill-btn-ghost" data-action="pulse-refresh-graph" style="height:20px;padding:0 6px;font-size:10.5px;">
+                  ${icon('rotate-ccw', 10)} 刷新
+                </button>
+              </div>
+              ${renderMiniLinkGraphSvgHtml(linkGraph)}
+            </div>
+          </div>
+        </div>
+        ${renderModuleResizerHtml('focus_pulse')}
+      </details>
+    `;
+
     const cardMap = {
       quick_excel: card1Html,
+      clipboard_snippets: clipboardSnippetsCardHtml,
+      doc_outline: docOutlineCardHtml,
+      text_studio: textStudioCardHtml,
+      focus_pulse: focusPulseCardHtml,
       knowledge_tree: card2Html,
       apps_workspaces: card3Html,
       ai_templates: card4Html,
@@ -2952,6 +3665,255 @@ export function initRightPanel(containerEl) {
           </button>
         </div>
       `;
+  }
+
+  function extractDocOutlineData(rawText) {
+    const text = String(rawText || '').replace(/\r\n/g, '\n');
+    const lines = text.split('\n');
+    const headings = [];
+    const highlights = [];
+    const todos = [];
+    let inFence = false;
+
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      const lineNo = i + 1;
+      if (/^\s*(?:`{3,}|~{3,})/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+
+      const hMatch = line.match(/^\s*(#{1,4})\s+(.+?)\s*#*$/);
+      if (hMatch) {
+        const cleanHeading = hMatch[2].replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim();
+        if (cleanHeading) {
+          headings.push({
+            level: hMatch[1].length,
+            text: cleanHeading,
+            lineNo,
+          });
+        }
+      }
+
+      const hlRegex = /==([^=\n]+)==/g;
+      let hlMatch;
+      while ((hlMatch = hlRegex.exec(line)) !== null) {
+        const hlText = hlMatch[1].trim();
+        if (hlText) {
+          highlights.push({ text: hlText, lineNo });
+        }
+      }
+
+      const todoMatch = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.+)$/);
+      if (todoMatch) {
+        todos.push({
+          checked: todoMatch[1].toLowerCase() === 'x',
+          text: todoMatch[2].trim(),
+          lineNo,
+        });
+      }
+    }
+
+    return { headings, highlights, todos };
+  }
+
+  function computeTextStudioStats(rawText) {
+    const text = String(rawText || '');
+    const chars = text.length;
+    const lines = text ? text.replace(/\r\n/g, '\n').split('\n').length : 0;
+    const cjkCount = (text.match(/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+    const asciiWords = (
+      text.replace(/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/g, ' ').match(/[A-Za-z0-9_]+/g) || []
+    ).length;
+    const words = cjkCount + asciiWords;
+    const readMins = words === 0 ? 0 : Math.max(1, Math.ceil(words / 300));
+    return { words, chars, lines, readMins };
+  }
+
+  function syncTextStudioStatsDom() {
+    if (!toolsEl) return;
+    const sourceText = state.studioText.trim()
+      ? state.studioText
+      : (store.state.activeDocumentText || '');
+    const st = computeTextStudioStats(sourceText);
+    const wordsEl = toolsEl.querySelector('[data-role="studio-stat-words"]');
+    const charsEl = toolsEl.querySelector('[data-role="studio-stat-chars"]');
+    const linesEl = toolsEl.querySelector('[data-role="studio-stat-lines"]');
+    const readEl = toolsEl.querySelector('[data-role="studio-stat-read"]');
+    const headerWordsEl = toolsEl.querySelector('[data-role="studio-header-words"]');
+    if (wordsEl) wordsEl.textContent = String(st.words);
+    if (charsEl) charsEl.textContent = `字数 (${st.chars}字符)`;
+    if (linesEl) linesEl.textContent = String(st.lines);
+    if (readEl) readEl.textContent = `${st.readMins}m`;
+    if (headerWordsEl) headerWordsEl.textContent = `${st.words} 字`;
+  }
+
+  function applyStudioTransform(op, inputStr) {
+    const src = String(inputStr || '').replace(/\r\n/g, '\n');
+    if (!src.trim()) return src;
+
+    if (op === 'pangu') {
+      return src
+        .replace(/([\u4e00-\u9fa5])([A-Za-z0-9])/g, '$1 $2')
+        .replace(/([A-Za-z0-9])([\u4e00-\u9fa5])/g, '$1 $2');
+    }
+
+    if (op === 'clean') {
+      return src
+        .replace(/[\u200B-\u200D\uFEFF\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/g, '')
+        .split('\n')
+        .map((l) => l.replace(/[ \t]+$/g, ''))
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
+
+    if (op === 'csv-to-table') {
+      const nonEmptyLines = src
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (nonEmptyLines.length === 0) return src;
+      const useTab = nonEmptyLines.some((l) => l.includes('\t'));
+      const splitRow = (line) => {
+        if (useTab) return line.split('\t').map((c) => c.trim());
+        const cells = [];
+        let cur = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i += 1) {
+          const ch = line[i];
+          if (ch === '"') {
+            inQuotes = !inQuotes;
+          } else if ((ch === ',' || ch === '，') && !inQuotes) {
+            cells.push(cur.trim());
+            cur = '';
+          } else {
+            cur += ch;
+          }
+        }
+        cells.push(cur.trim());
+        return cells;
+      };
+      const rows = nonEmptyLines.map(splitRow);
+      const colCount = Math.max(1, ...rows.map((r) => r.length));
+      const padRow = (r) => {
+        const next = [...r];
+        while (next.length < colCount) next.push('');
+        return `| ${next.map((c) => c.replace(/\|/g, '\\|') || ' ').join(' | ')} |`;
+      };
+      const headerLine = padRow(rows[0]);
+      const sepLine = `| ${Array.from({ length: colCount }, () => '---').join(' | ')} |`;
+      const bodyLines = rows.slice(1).map(padRow);
+      return [headerLine, sepLine, ...bodyLines].join('\n');
+    }
+
+    if (op === 'to-todos') {
+      return src
+        .split('\n')
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return '';
+          if (/^[-*+]\s+\[[ xX]\]\s+/.test(trimmed)) return trimmed;
+          const cleaned = trimmed.replace(/^(?:[-*+•]|\d+[.)、])\s+/, '');
+          return `- [ ] ${cleaned}`;
+        })
+        .filter(Boolean)
+        .join('\n');
+    }
+
+    if (op === 'json-format') {
+      const stripped = src
+        .trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/, '');
+      const parsed = JSON.parse(stripped);
+      return JSON.stringify(parsed, null, 2);
+    }
+
+    return src;
+  }
+
+  function renderMiniLinkGraphSvgHtml(linkGraph) {
+    const nodes = Array.isArray(linkGraph?.local_graph?.nodes)
+      ? linkGraph.local_graph.nodes.slice(0, 11)
+      : [];
+    const edges = Array.isArray(linkGraph?.local_graph?.edges)
+      ? linkGraph.local_graph.edges
+      : [];
+
+    if (nodes.length === 0) {
+      return `
+        <svg class="mini-link-graph-svg" viewBox="0 0 320 132" role="img" aria-label="局部关系微图谱">
+          <text x="160" y="70" text-anchor="middle" font-size="11.5" fill="var(--text-tertiary)">暂无双链或 #标签 节点（在笔记中使用 [[笔记名]] 或 #标签）</text>
+        </svg>
+      `;
+    }
+
+    const cx = 160;
+    const cy = 64;
+    const rx = 112;
+    const ry = 42;
+    const posMap = new Map();
+
+    const centerIdx = Math.max(0, nodes.findIndex((n) => n.kind === 'active'));
+    const centerNode = nodes[centerIdx];
+    const outerNodes = nodes.filter((_, i) => i !== centerIdx);
+
+    posMap.set(centerNode.id, { x: cx, y: cy, node: centerNode, isCenter: true });
+    outerNodes.forEach((n, idx) => {
+      const angle = (2 * Math.PI * idx) / Math.max(1, outerNodes.length) - Math.PI / 2;
+      const x = Math.round(cx + rx * Math.cos(angle));
+      const y = Math.round(cy + ry * Math.sin(angle));
+      posMap.set(n.id, { x, y, node: n, isCenter: false });
+    });
+
+    const linesSvg = edges
+      .map((ed) => {
+        const s = posMap.get(ed.source);
+        const t = posMap.get(ed.target);
+        if (!s || !t) return '';
+        const strokeColor = ed.kind === 'tag' ? 'rgba(245, 158, 11, 0.45)' : 'rgba(0, 122, 255, 0.38)';
+        return `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${strokeColor}" stroke-width="1.5" ${ed.kind === 'tag' ? 'stroke-dasharray="3,2"' : ''} />`;
+      })
+      .join('');
+
+    const nodesSvg = Array.from(posMap.values())
+      .map(({ x, y, node, isCenter }) => {
+        const fill =
+          node.kind === 'active'
+            ? '#007AFF'
+            : node.kind === 'tag'
+              ? '#F59E0B'
+              : node.kind === 'neighbor'
+                ? '#34C759'
+                : '#5856D6';
+        const rawLabel = String(node.label || '').replace(/\.md$/i, '');
+        const shortLabel = rawLabel.length > 10 ? `${rawLabel.slice(0, 9)}…` : rawLabel;
+        const r = isCenter ? 8 : 5.5;
+        return `
+          <g
+            class="mini-graph-node"
+            data-action="graph-node-click"
+            data-node-id="${escapeHtml(node.id)}"
+            data-node-kind="${escapeHtml(node.kind)}"
+            data-node-label="${escapeHtml(node.label)}"
+            style="cursor:pointer;"
+          >
+            <title>${escapeHtml(node.label)}（点击打开）</title>
+            <circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" stroke="#FFFFFF" stroke-width="1.5" />
+            <text x="${x}" y="${Math.min(126, y + r + 10)}" text-anchor="middle" font-size="9.5" font-weight="${isCenter ? '700' : '500'}" fill="var(--text-secondary)">${escapeHtml(shortLabel)}</text>
+          </g>
+        `;
+      })
+      .join('');
+
+    return `
+      <svg class="mini-link-graph-svg" viewBox="0 0 320 132" role="img" aria-label="局部关系微图谱">
+        ${linesSvg}
+        ${nodesSvg}
+      </svg>
+    `;
   }
 
   function openAddColSheet() {
@@ -3287,6 +4249,109 @@ export function initRightPanel(containerEl) {
       return;
     }
 
+    // 3b. V7.3 Tools Draggable Items (T1 Clipboard & Snippets, T2 Outline & Highlights, T3 Text Studio)
+    const clipCard = e.target.closest('[data-drag-type="clipboard-item"]');
+    if (clipCard) {
+      e.stopPropagation();
+      const clipId = clipCard.dataset.clipId;
+      const clip = (store.state.clipboardHistory || []).find((c) => c.id === clipId);
+      if (!clip?.text) {
+        e.preventDefault();
+        return;
+      }
+      setDragPayload(e, {
+        type: 'clipboard-item',
+        label: clip.preview || '剪贴板片段',
+        markdown: clip.text,
+      });
+      clipCard.classList.add('is-dragging');
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const snipPill = e.target.closest('[data-drag-type="md-snippet"]');
+    if (snipPill) {
+      e.stopPropagation();
+      const snipId = snipPill.dataset.snippetId;
+      const snip = getAllMdSnippets().find((s) => s.id === snipId);
+      if (!snip?.content) {
+        e.preventDefault();
+        return;
+      }
+      const md = resolveSnippetMarkdown(snip.content);
+      setDragPayload(e, {
+        type: 'md-snippet',
+        label: snip.title,
+        markdown: md,
+      });
+      snipPill.classList.add('is-dragging');
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const outlineHeadingEl = e.target.closest('[data-drag-type="outline-heading"]');
+    if (outlineHeadingEl) {
+      e.stopPropagation();
+      const heading = outlineHeadingEl.dataset.heading || '';
+      const activeName = store.state.activeFile?.name || '';
+      const md = activeName ? `[[${activeName}#${heading}]]` : `[[#${heading}]]`;
+      setDragPayload(e, {
+        type: 'outline-heading',
+        label: `#${heading}`,
+        markdown: md,
+      });
+      outlineHeadingEl.classList.add('is-dragging');
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const outlineHlEl = e.target.closest('[data-drag-type="outline-highlight"]');
+    if (outlineHlEl) {
+      e.stopPropagation();
+      const hlText = outlineHlEl.dataset.highlightText || '';
+      setDragPayload(e, {
+        type: 'outline-highlight',
+        label: hlText,
+        markdown: `==${hlText}==`,
+      });
+      outlineHlEl.classList.add('is-dragging');
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const outlineTodoEl = e.target.closest('[data-drag-type="outline-todo"]');
+    if (outlineTodoEl) {
+      e.stopPropagation();
+      const tdText = outlineTodoEl.dataset.todoText || '';
+      setDragPayload(e, {
+        type: 'outline-todo',
+        label: tdText,
+        markdown: `- [ ] ${tdText}`,
+      });
+      outlineTodoEl.classList.add('is-dragging');
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const studioDragEl = e.target.closest('[data-drag-type="studio-text"]');
+    if (studioDragEl) {
+      e.stopPropagation();
+      const studioTa = toolsEl?.querySelector('[data-role="text-studio-input"]');
+      const text = (studioTa?.value ?? state.studioText ?? store.state.activeDocumentText ?? '').trim();
+      if (!text) {
+        e.preventDefault();
+        showToast('文本工坊为空，请先输入或载入内容', 'warning');
+        return;
+      }
+      setDragPayload(e, {
+        type: 'studio-text',
+        label: '排版工坊文本',
+        markdown: text,
+      });
+      store.emit('drag:active', true);
+      return;
+    }
+
     // 4. Tool Card drag-and-drop reordering
     const toolCard = e.target.closest('.tool-card.module-block[data-module-id]');
     if (toolCard && toolsEl?.contains(toolCard)) {
@@ -3508,6 +4573,22 @@ export function initRightPanel(containerEl) {
     const treeInput = e.target.closest('[data-role="inline-tree-node-input"]');
     if (treeInput) {
       state.inlineTreeCreateDraft = treeInput.value;
+      return;
+    }
+    const snipTitleInput = e.target.closest('[data-role="inline-snippet-title"]');
+    if (snipTitleInput) {
+      state.inlineSnippetTitleDraft = snipTitleInput.value;
+      return;
+    }
+    const snipContentInput = e.target.closest('[data-role="inline-snippet-content"]');
+    if (snipContentInput) {
+      state.inlineSnippetContentDraft = snipContentInput.value;
+      return;
+    }
+    const studioTa = e.target.closest('[data-role="text-studio-input"]');
+    if (studioTa) {
+      state.studioText = studioTa.value;
+      syncTextStudioStatsDom();
     }
   });
 
@@ -3595,11 +4676,22 @@ export function initRightPanel(containerEl) {
     if (!actionEl) return;
     const action = actionEl.dataset.action;
 
-    // --- V2/V3 Global Right Panel Actions ---
+    // --- V2/V3/V7.3 Global Right Panel Actions ---
+    if (action === 'open-module-size-menu') {
+      e.preventDefault();
+      e.stopPropagation();
+      const modId = actionEl.dataset.moduleId || actionEl.dataset.modId;
+      const panel = actionEl.dataset.panel || 'right';
+      if (modId) {
+        toggleRightModuleSizePopover(actionEl, panel, modId);
+      }
+      return;
+    }
+
     if (action === 'set-module-size') {
       e.preventDefault();
       e.stopPropagation();
-      const modId = actionEl.dataset.modId;
+      const modId = actionEl.dataset.modId || actionEl.dataset.moduleId;
       const preset = actionEl.dataset.preset || 'auto';
       if (modId) {
         setModuleSizePreset?.('right', modId, preset);
@@ -3610,7 +4702,7 @@ export function initRightPanel(containerEl) {
     if (action === 'toggle-module-float') {
       e.preventDefault();
       e.stopPropagation();
-      const modId = actionEl.dataset.modId;
+      const modId = actionEl.dataset.modId || actionEl.dataset.moduleId;
       const modTitle = actionEl.dataset.modTitle || modId;
       if (modId) {
         toggleModuleFloat?.(modId, { title: modTitle, panel: 'right' });
@@ -4022,7 +5114,313 @@ export function initRightPanel(containerEl) {
     }
 
     if (action === 'open-add-app') {
-      openAddAppSheet();
+      store.emit('app:add-open', { autoScan: true });
+      return;
+    }
+
+    // --- V7.3 Tool 2 Actions: clipboard_snippets ---
+    if (action === 'clip-read-system') {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim()) {
+          store.pushClipboardHistory?.(text, '系统剪贴板');
+          renderToolsMode();
+          showToast('已读取系统剪贴板', 'success');
+        } else {
+          showToast('系统剪贴板当前无文本内容', 'info');
+        }
+      } catch {
+        showToast('未能直接读取系统剪贴板，请在页面内复制或粘贴', 'warning');
+      }
+      return;
+    }
+
+    if (action === 'clip-clear-all') {
+      store.clearClipboardHistory?.();
+      renderToolsMode();
+      showToast('已清空内存剪贴板历史', 'info');
+      return;
+    }
+
+    if (action === 'clip-insert-note') {
+      const clipId = actionEl.dataset.clipId;
+      const clip = (store.state.clipboardHistory || []).find((c) => c.id === clipId);
+      if (clip?.text) {
+        if (typeof setCenterView === 'function') setCenterView('doc');
+        store.emit('doc:append', { content: clip.text });
+        showToast('已插入剪贴板内容到当前笔记', 'success');
+      }
+      return;
+    }
+
+    if (action === 'clip-copy-item') {
+      const clipId = actionEl.dataset.clipId;
+      const clip = (store.state.clipboardHistory || []).find((c) => c.id === clipId);
+      if (clip?.text) {
+        await copyInternal(clip.text, '已复制到剪贴板');
+      }
+      return;
+    }
+
+    if (action === 'clip-delete-item') {
+      const clipId = actionEl.dataset.clipId;
+      if (clipId) {
+        store.removeClipboardItem?.(clipId);
+        renderToolsMode();
+      }
+      return;
+    }
+
+    if (action === 'snippet-toggle-create') {
+      state.inlineSnippetCreateOpen = !state.inlineSnippetCreateOpen;
+      if (state.inlineSnippetCreateOpen) {
+        state.inlineSnippetTitleDraft = '';
+        state.inlineSnippetContentDraft = '';
+      }
+      renderToolsMode();
+      if (state.inlineSnippetCreateOpen) {
+        window.requestAnimationFrame(() => {
+          toolsEl?.querySelector('[data-role="inline-snippet-title"]')?.focus();
+        });
+      }
+      return;
+    }
+
+    if (action === 'snippet-create-cancel') {
+      state.inlineSnippetCreateOpen = false;
+      state.inlineSnippetTitleDraft = '';
+      state.inlineSnippetContentDraft = '';
+      renderToolsMode();
+      return;
+    }
+
+    if (action === 'snippet-create-submit') {
+      const allSnips = getAllMdSnippets();
+      const defaultTitle = nextSequentialName('新建片段', allSnips.map((s) => s.title));
+      const titleInput = toolsEl?.querySelector('[data-role="inline-snippet-title"]');
+      const contentInput = toolsEl?.querySelector('[data-role="inline-snippet-content"]');
+      const title = (titleInput?.value ?? state.inlineSnippetTitleDraft ?? '').trim() || defaultTitle;
+      const rawContent = (contentInput?.value ?? state.inlineSnippetContentDraft ?? '').trim();
+      const content = rawContent || `### ${title} ({{DATE}})\n- `;
+
+      const customList = loadCustomMdSnippets();
+      customList.push({
+        id: `snip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        icon: '📌',
+        title,
+        content,
+        custom: true,
+      });
+      saveCustomMdSnippets(customList);
+      state.inlineSnippetCreateOpen = false;
+      state.inlineSnippetTitleDraft = '';
+      state.inlineSnippetContentDraft = '';
+      renderToolsMode();
+      showToast(`已保存常用片段「${title}」`, 'success');
+      return;
+    }
+
+    if (action === 'snippet-insert') {
+      const snipId = actionEl.dataset.snippetId;
+      const snip = getAllMdSnippets().find((s) => s.id === snipId);
+      if (snip?.content) {
+        const md = resolveSnippetMarkdown(snip.content);
+        if (typeof setCenterView === 'function') setCenterView('doc');
+        store.emit('doc:append', { content: md });
+        showToast(`已插入模板片段「${snip.title}」`, 'success');
+      }
+      return;
+    }
+
+    if (action === 'snippet-delete') {
+      e.stopPropagation();
+      const snipId = actionEl.dataset.snippetId;
+      if (!snipId) return;
+      const nextCustom = loadCustomMdSnippets().filter((s) => s.id !== snipId);
+      saveCustomMdSnippets(nextCustom);
+      renderToolsMode();
+      showToast('已删除自定义模板片段', 'info');
+      return;
+    }
+
+    // --- V7.3 Tool 3 Actions: doc_outline ---
+    if (action === 'outline-jump-heading') {
+      const heading = actionEl.dataset.heading || '';
+      const lineNo = Number(actionEl.dataset.lineNo) || 1;
+      if (typeof setCenterView === 'function') setCenterView('doc');
+      store.emit('anchor:jump', {
+        type: 'heading',
+        file: store.state.activeFile?.name || store.state.activeFile?.path || '',
+        heading,
+        line: lineNo,
+      });
+      return;
+    }
+
+    if (action === 'outline-jump-highlight') {
+      const hlText = actionEl.dataset.highlightText || '';
+      const lineNo = Number(actionEl.dataset.lineNo) || 1;
+      if (typeof setCenterView === 'function') setCenterView('doc');
+      store.emit('anchor:jump', {
+        type: 'heading',
+        file: store.state.activeFile?.name || store.state.activeFile?.path || '',
+        heading: hlText,
+        line: lineNo,
+      });
+      showToast(`已定位高亮：${hlText.slice(0, 20)} (第 ${lineNo} 行)`, 'info', { duration: 1600 });
+      return;
+    }
+
+    if (action === 'outline-jump-todo') {
+      const tdText = actionEl.dataset.todoText || '';
+      const lineNo = Number(actionEl.dataset.lineNo) || 1;
+      if (typeof setCenterView === 'function') setCenterView('doc');
+      store.emit('anchor:jump', {
+        type: 'heading',
+        file: store.state.activeFile?.name || store.state.activeFile?.path || '',
+        heading: tdText,
+        line: lineNo,
+      });
+      showToast(`已定位待办：${tdText.slice(0, 20)} (第 ${lineNo} 行)`, 'info', { duration: 1600 });
+      return;
+    }
+
+    // --- V7.3 Tool 4 Actions: text_studio ---
+    if (action === 'studio-load-doc') {
+      const docText = String(store.state.activeDocumentText || '');
+      if (!docText.trim()) {
+        showToast('当前文档为空，请先打开一篇文档或直接在工坊输入', 'warning');
+        return;
+      }
+      state.studioText = docText;
+      renderToolsMode();
+      showToast('已载入当前文档内容到文本工坊', 'success');
+      return;
+    }
+
+    if (action === 'studio-clear') {
+      state.studioText = '';
+      renderToolsMode();
+      return;
+    }
+
+    if (action === 'studio-transform') {
+      const op = actionEl.dataset.op;
+      const studioTa = toolsEl?.querySelector('[data-role="text-studio-input"]');
+      const currentInput = (studioTa?.value ?? state.studioText ?? '').trim()
+        ? (studioTa?.value ?? state.studioText)
+        : String(store.state.activeDocumentText || '');
+      if (!currentInput.trim()) {
+        showToast('请先输入文本或点击「载入当前文档」', 'warning');
+        return;
+      }
+      try {
+        state.studioText = applyStudioTransform(op, currentInput);
+        renderToolsMode();
+        const opLabels = {
+          pangu: '已完成中英自动加空格',
+          clean: '已清理多余空行与不可见字符',
+          'csv-to-table': '已转换为标准 Markdown 表格',
+          'to-todos': '已转换为 Markdown 待办清单',
+          'json-format': '已完成 JSON 格式化',
+        };
+        showToast(opLabels[op] || '已完成文本转换', 'success');
+      } catch (err) {
+        showToast(`JSON 解析失败：${err?.message || '请检查 JSON 语法'}`, 'warning');
+      }
+      return;
+    }
+
+    if (action === 'studio-copy') {
+      const studioTa = toolsEl?.querySelector('[data-role="text-studio-input"]');
+      const text = (studioTa?.value ?? state.studioText ?? store.state.activeDocumentText ?? '').trim();
+      if (!text) {
+        showToast('没有可复制的文本', 'warning');
+        return;
+      }
+      await copyInternal(text, '已复制排版工坊结果');
+      return;
+    }
+
+    if (action === 'studio-insert-doc') {
+      const studioTa = toolsEl?.querySelector('[data-role="text-studio-input"]');
+      const text = (studioTa?.value ?? state.studioText ?? '').trim();
+      if (!text) {
+        showToast('请先在文本工坊输入或转换文本', 'warning');
+        return;
+      }
+      if (typeof setCenterView === 'function') setCenterView('doc');
+      store.emit('doc:append', { content: text });
+      showToast('已将工坊文本插入当前笔记', 'success');
+      return;
+    }
+
+    // --- V7.3 Tool 5 Actions: focus_pulse & K1 Mini Graph ---
+    if (action === 'pulse-start-focus') {
+      openFocusDurationPopover?.(actionEl, {
+        title: store.state.activeFile?.name
+          ? `专注：${store.state.activeFile.name}`
+          : '专注学习',
+        filePath: store.state.activeFile?.path || '',
+      });
+      return;
+    }
+
+    if (action === 'pulse-write-review') {
+      const pulse = store.state.focusPulse || { count: 0, totalMinutes: 0, sessions: [] };
+      const sessions = Array.isArray(pulse.sessions) ? pulse.sessions : [];
+      const d = new Date();
+      const dateStr =
+        pulse.date ||
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const lines = [
+        `## ⏱ 今日专注脉搏复盘 (${dateStr})`,
+        `- **累计专注**：${Number(pulse.count) || 0} 次（共 ${Number(pulse.totalMinutes) || 0} 分钟）`,
+      ];
+      if (sessions.length > 0) {
+        lines.push('- **专注记录**：');
+        sessions.forEach((s) => {
+          const hm = s.finishedAt ? formatTriggerTime(s.finishedAt).slice(-8, -3) : '';
+          lines.push(`  - [x] **${s.title}** (${s.minutes} 分钟${hm ? ` · ${hm}` : ''})`);
+        });
+      } else {
+        lines.push('- **今日复盘小结**：\n  - ');
+      }
+      if (typeof setCenterView === 'function') setCenterView('doc');
+      store.emit('doc:append', { content: lines.join('\n') });
+      showToast('已将今日专注复盘写入当前笔记', 'success');
+      return;
+    }
+
+    if (action === 'pulse-refresh-graph') {
+      try {
+        await store.refreshLinkGraph?.(store.state.activeFile?.path || '');
+        renderToolsMode();
+        showToast('已刷新局部关系微图谱', 'info', { duration: 1500 });
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    if (action === 'graph-node-click') {
+      const nodeId = actionEl.dataset.nodeId || '';
+      const nodeKind = actionEl.dataset.nodeKind || '';
+      const nodeLabel = actionEl.dataset.nodeLabel || '';
+      if (!nodeId) return;
+      if (nodeKind === 'tag' || nodeId.startsWith('tag:')) {
+        const tagName = nodeId.replace(/^tag:/, '');
+        const tagEntry = (store.state.linkGraph?.tags || []).find((t) => t.tag === tagName);
+        const firstFile = tagEntry?.files?.[0];
+        if (firstFile?.path) {
+          store.emit('file:open', { path: firstFile.path, name: firstFile.name || getBaseName(firstFile.path) });
+          showToast(`已打开标签 #${tagName} 关联笔记：${firstFile.name || getBaseName(firstFile.path)}`, 'info');
+        } else {
+          showToast(`标签 ${nodeLabel || `#${tagName}`}`, 'info');
+        }
+      } else {
+        store.emit('file:open', { path: nodeId, name: getBaseName(nodeId) });
+      }
       return;
     }
 
@@ -4158,12 +5556,32 @@ export function initRightPanel(containerEl) {
       renderSummaryMode();
       syncExcelSelection();
     }
+    if (keys?.includes('activeDocumentText')) {
+      const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+      const inStudioInput = Boolean(
+        activeEl && toolsEl?.contains(activeEl) && activeEl.matches('[data-role="text-studio-input"], [data-role="inline-snippet-title"], [data-role="inline-snippet-content"]')
+      );
+      if (!inStudioInput) {
+        renderToolsMode();
+      } else {
+        syncTextStudioStatsDom();
+      }
+    }
     if (keys?.includes('config') || keys?.includes('systemInfo')) {
       renderSummaryMode();
       renderChatHeaderStatus();
     }
   });
 
+  store.on('clipboard:updated', () => {
+    renderToolsMode();
+  });
+  store.on('focus:pulse-updated', () => {
+    renderToolsMode();
+  });
+  store.on('links:updated', () => {
+    renderToolsMode();
+  });
   store.on('apps:updated', fetchAppsAndWorkspaces);
   store.on('workspaces:updated', fetchAppsAndWorkspaces);
   store.on('tree:updated', fetchTree);

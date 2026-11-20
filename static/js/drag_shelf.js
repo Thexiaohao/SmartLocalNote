@@ -43,55 +43,43 @@ function ensureV72DrawerStyles() {
   const style = document.createElement('style');
   style.id = 'sln-v72-drawer-styles';
   style.textContent = `
-    .island-shelf-drawer { max-height: 62vh; }
-    .island-drawer-tabs {
-      display: flex; align-items: center; gap: 4px; padding: 8px 10px 6px;
-      border-bottom: 1px solid var(--border-hairline); flex-shrink: 0;
+    .island-shelf-drawer {
+      width: min(360px, 92vw);
+      max-height: 320px;
     }
-    .island-drawer-tab {
-      height: 26px; padding: 0 10px; border-radius: 9999px; font-size: 12px; font-weight: 600;
-      color: var(--text-secondary); background: transparent; border: 1px solid transparent; cursor: pointer;
-      transition: background-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+    .island-shelf-list {
+      grid-template-columns: 1fr;
+      padding: 8px;
+      gap: 6px;
     }
-    .island-drawer-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
-    .island-drawer-tab.is-active { background: var(--accent-soft); color: var(--accent); border-color: rgba(0,122,255,0.22); }
-    .island-drawer-close-btn { margin-left: auto; }
-    .island-drawer-pane { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
-    .island-drawer-pane[hidden] { display: none !important; }
-    .island-dual-drop-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
-    .island-drop-half {
-      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-      padding: 8px 10px; border-radius: 12px; border: 1.5px dashed var(--border-glass-edge);
-      background: var(--bg-subtle); color: var(--text-primary); text-align: center; cursor: copy;
-      transition: transform 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+    .island-standalone-float {
+      z-index: 1125;
     }
-    .island-drop-shelf { border-color: rgba(0,122,255,0.45); background: var(--accent-soft); color: var(--accent); }
-    .island-drop-shelf.is-drag-over { transform: scale(1.02); border-color: var(--accent); background: rgba(0,122,255,0.22); }
-    .island-drop-trash { border-color: rgba(255,59,48,0.45); background: var(--danger-soft, rgba(255,59,48,0.1)); color: var(--danger, #FF3B30); }
-    .island-drop-trash.is-drag-over { transform: scale(1.02); border-color: var(--danger, #FF3B30); background: rgba(255,59,48,0.22); }
-    .island-drop-half-title { font-size: 12px; font-weight: 600; }
-    .island-drop-half-sub { font-size: 10.5px; opacity: 0.82; }
-    .island-shelf-drop-banner { padding: 0; border: none; background: transparent; margin: 8px 10px 2px; }
+    .island-standalone-float[hidden] {
+      display: none !important;
+    }
+    .island-float-body {
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .floating-win-close-btn {
+      width: 24px;
+      height: 24px;
+      font-size: 12px;
+      flex-shrink: 0;
+    }
     .island-trash-panel, .island-stickies-panel {
       display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden;
+      max-height: none !important; padding: 0 !important; gap: 0 !important;
     }
     .island-trash-top {
-      padding: 10px 12px 8px; border-bottom: 1px solid var(--border-hairline);
-      display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+      padding: 10px 12px; border-bottom: 1px solid var(--border-hairline);
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
     }
-    .island-trash-mode-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-    .island-trash-mode-switch {
-      display: inline-flex; padding: 2px; border-radius: 9999px;
-      background: var(--bg-subtle); border: 1px solid var(--border-hairline); gap: 2px;
-    }
-    .island-trash-mode-btn {
-      height: 24px; padding: 0 9px; border-radius: 9999px; font-size: 11px; font-weight: 600;
-      color: var(--text-secondary); background: transparent; cursor: pointer;
-    }
-    .island-trash-mode-btn.is-active { background: var(--accent); color: #FFFFFF; }
-    .island-trash-purge-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); }
-    .island-trash-purge-select { height: 24px; padding: 0 6px; font-size: 11px; width: auto; min-width: 90px; }
-    .island-trash-hint { margin: 0; font-size: 11px; line-height: 1.4; color: var(--text-tertiary); }
+    .island-trash-purge-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-secondary); }
+    .island-trash-purge-select { height: 24px; padding: 0 6px; font-size: 11px; width: auto; min-width: 92px; }
     .island-trash-list, .island-stickies-list {
       flex: 1 1 auto; min-height: 80px; overflow-y: auto; padding: 8px 10px;
       display: flex; flex-direction: column; gap: 6px;
@@ -120,11 +108,33 @@ function ensureV72DrawerStyles() {
     .island-trash-row-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
     .island-trash-footer {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
-      padding: 8px 12px; border-top: 1px solid var(--border-hairline); background: var(--bg-subtle); flex-shrink: 0;
+      padding: 7px 12px; border-top: 1px solid var(--border-hairline); background: var(--bg-subtle); flex-shrink: 0;
     }
-    .island-trash-stats { font-size: 11.5px; color: var(--text-secondary); }
+    .island-trash-stats { font-size: 11px; color: var(--text-secondary); }
     .pill-btn.is-danger { color: var(--danger, #FF3B30); }
     .pill-btn.is-danger:hover:not(:disabled) { background: var(--danger-soft, rgba(255,59,48,0.12)); }
+    /* Portable Trash Dock dual drop zones (#4) */
+    #portable-trash-dock { max-width: min(560px, calc(100vw - 24px)); border-radius: 20px; }
+    .portable-trash-split {
+      display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    }
+    .portable-trash-zone {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+      padding: 6px 12px; border-radius: 13px; border: 1.5px dashed var(--border-hairline);
+      background: var(--bg-subtle); cursor: copy; min-width: 144px; text-align: center;
+      transition: transform 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+    }
+    .portable-trash-zone.is-app-trash { border-color: rgba(245,158,11,0.45); background: rgba(245,158,11,0.08); }
+    .portable-trash-zone.is-app-trash.is-drag-over {
+      transform: scale(1.04); border-style: solid; border-color: #F59E0B; background: rgba(245,158,11,0.22);
+    }
+    .portable-trash-zone.is-system-trash { border-color: rgba(255,59,48,0.45); background: rgba(255,59,48,0.08); }
+    .portable-trash-zone.is-system-trash.is-drag-over {
+      transform: scale(1.04); border-style: solid; border-color: var(--danger, #FF3B30); background: rgba(255,59,48,0.22);
+    }
+    .portable-trash-zone-title { font-size: 12px; font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+    .portable-trash-zone-sub { font-size: 10px; color: var(--text-tertiary); white-space: nowrap; }
+    .portable-trash-view-btn { height: 28px; padding: 0 10px; font-size: 11px; flex-shrink: 0; }
   `;
   if (document.head.firstChild) {
     document.head.insertBefore(style, document.head.firstChild);
@@ -332,23 +342,7 @@ function syncTriggerButtons() {
 }
 
 function renderDropBanner() {
-  if (!shelfEl) return;
-  const bannerEl = shelfEl.querySelector('.island-shelf-drop-banner');
-  if (!bannerEl) return;
-  const mode = store.state.trash?.settings?.mode === 'app' ? 'app' : 'system';
-  const modeLabel = mode === 'system' ? '系统回收站' : '内置回收站';
-  bannerEl.innerHTML = `
-    <div class="island-dual-drop-bar">
-      <div class="island-drop-half island-drop-shelf" data-drop-zone="drag-shelf">
-        <span class="island-drop-half-title">📥 松手暂存到灵动岛</span>
-        <span class="island-drop-half-sub">默认剪切 · 按住 Ctrl 复制</span>
-      </div>
-      <div class="island-drop-half island-drop-trash" data-drop-zone="trash" data-trash-mode="${mode}">
-        <span class="island-drop-half-title">🗑 松手移入回收站</span>
-        <span class="island-drop-half-sub" data-trash-role="mode-label">${modeLabel}</span>
-      </div>
-    </div>
-  `;
+  // Dragging no longer expands the shelf drawer; #dynamic-island morphs into .island-compact-drop-pill.
 }
 
 function clearDropZoneHighlights() {
@@ -356,28 +350,23 @@ function clearDropZoneHighlights() {
   shelfEl?.querySelectorAll('[data-drop-zone].is-drag-over').forEach((z) => {
     z.classList.remove('is-drag-over');
   });
-  document.getElementById('dynamic-island')?.classList.remove('is-drag-over');
+  const islandEl = document.getElementById('dynamic-island');
+  if (islandEl) {
+    islandEl.classList.remove('is-drag-over');
+    islandEl.querySelectorAll('.is-drag-over').forEach((z) => z.classList.remove('is-drag-over'));
+  }
 }
 
 function syncShelfStateClasses() {
   if (!shelfEl) return;
-  const showBanner = isDragInviting || shelfEl.classList.contains('is-drag-over') || Boolean(store.state.globalDrag);
   shelfEl.classList.toggle('is-open', isOpen);
   shelfEl.classList.toggle('is-pinned', pinnedOpen);
-  shelfEl.classList.toggle('is-drag-inviting', isDragInviting);
+  shelfEl.classList.remove('is-drag-inviting');
   shelfEl.dataset.state = isOpen ? 'open' : 'collapsed';
-
-  const bannerEl = shelfEl.querySelector('.island-shelf-drop-banner');
-  if (bannerEl) {
-    if (showBanner && !bannerEl.querySelector('.island-dual-drop-bar')) {
-      renderDropBanner();
-    }
-    bannerEl.hidden = !showBanner;
-  }
   syncTriggerButtons();
 }
 
-function openShelf({ byDrag = false, inviting = false } = {}) {
+function openShelf({ byDrag = false } = {}) {
   const el = ensureShelfElement();
   if (!el) return;
   const wasOpen = isOpen;
@@ -387,15 +376,12 @@ function openShelf({ byDrag = false, inviting = false } = {}) {
   if (byDrag && !wasOpen) {
     autoCollapseArmed = true;
   }
-  if (inviting) {
-    isDragInviting = true;
-    renderDropBanner();
-  }
+  isDragInviting = false;
   el.hidden = false;
   el.removeAttribute('hidden');
   void el.offsetWidth;
   syncShelfStateClasses();
-  store.emit('island:drawer-state', { open: true, tab: el.dataset.islandTab || 'shelf' });
+  store.emit('island:drawer-state', { open: true, tab: 'shelf' });
 }
 
 function collapseShelf({ force = false } = {}) {
@@ -406,7 +392,7 @@ function collapseShelf({ force = false } = {}) {
   isDragInviting = false;
   clearDropZoneHighlights();
   syncShelfStateClasses();
-  store.emit('island:drawer-state', { open: false, tab: shelfEl?.dataset?.islandTab || 'shelf' });
+  store.emit('island:drawer-state', { open: false, tab: 'shelf' });
   clearHideTimer();
   hideTimer = window.setTimeout(() => {
     hideTimer = 0;
@@ -454,63 +440,35 @@ function ensureShelfElement() {
       shelfEl = document.createElement('div');
       shelfEl.id = 'island-shelf-drawer';
       shelfEl.hidden = true;
-      shelfEl.dataset.islandTab = 'shelf';
       document.body.appendChild(shelfEl);
     }
     shelfEl.classList.add('island-shelf-drawer');
     shelfEl.setAttribute('data-drop-zone', 'drag-shelf');
-    shelfEl.setAttribute('aria-label', '灵动岛中枢抽屉');
+    shelfEl.setAttribute('aria-label', '灵动岛暂存舱');
   }
 
   if (!shelfEl.querySelector('.island-shelf-header')) {
     shelfEl.innerHTML = `
-      <div class="island-shelf-drop-banner" hidden></div>
-      <nav class="island-drawer-tabs" role="tablist" aria-label="灵动岛功能切换">
-        <button type="button" class="island-drawer-tab is-active" data-island-tab="shelf" role="tab" aria-selected="true">📥 暂存舱</button>
-        <button type="button" class="island-drawer-tab" data-island-tab="stickies" role="tab" aria-selected="false">📌 闪念控制</button>
-        <button type="button" class="island-drawer-tab" data-island-tab="trash" role="tab" aria-selected="false">🗑 回收站</button>
-        <button type="button" class="pill-btn pill-btn-sm island-drawer-close-btn" data-shelf-action="collapse" title="收起抽屉" aria-label="收起抽屉">收起 ×</button>
-      </nav>
-      <section class="island-drawer-pane is-active" data-island-pane="shelf" role="tabpanel">
-        <header class="island-shelf-header">
-          <div class="island-shelf-title-wrap">
-            <span>📥 灵动岛暂存栏</span>
-            <span class="island-shelf-count">0</span>
-          </div>
-          <div class="island-shelf-header-actions">
-            <button type="button" class="pill-btn pill-btn-sm island-shelf-pin-btn" data-shelf-action="toggle-pin" title="固定展开（切换文件时不自动收起）" aria-pressed="false">
-              ${icon('pin', 12)} 固定
-            </button>
-            <button type="button" class="pill-btn pill-btn-sm island-shelf-close-btn" data-shelf-action="collapse" title="收起暂存栏" aria-label="收起暂存栏">
-              收起 ×
-            </button>
-          </div>
-        </header>
-        <div class="island-shelf-list" role="list"></div>
-        <footer class="island-shelf-footer">
-          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-shelf-action="insert-all">⬇ 全部拼入当前笔记</button>
-          <button type="button" class="pill-btn pill-btn-sm" data-shelf-action="clear-all">清空</button>
-        </footer>
-      </section>
-      <section class="island-drawer-pane" data-island-pane="stickies" role="tabpanel" hidden>
-        <div id="island-stickies-panel" class="island-stickies-panel"></div>
-      </section>
-      <section class="island-drawer-pane" data-island-pane="trash" role="tabpanel" hidden>
-        <div id="island-trash-panel" class="island-trash-panel"></div>
-      </section>
+      <header class="island-shelf-header">
+        <div class="island-shelf-title-wrap">
+          <span>📥 暂存舱</span>
+          <span class="island-shelf-count">0</span>
+        </div>
+        <div class="island-shelf-header-actions">
+          <button type="button" class="pill-btn pill-btn-sm island-shelf-pin-btn" data-shelf-action="toggle-pin" title="固定展开（切换文件时不自动收起）" aria-pressed="false">
+            ${icon('pin', 12)} 固定
+          </button>
+          <button type="button" class="pill-btn pill-btn-sm island-shelf-close-btn" data-shelf-action="collapse" title="收起暂存舱" aria-label="收起暂存舱">
+            ✕
+          </button>
+        </div>
+      </header>
+      <div class="island-shelf-list" role="list"></div>
+      <footer class="island-shelf-footer">
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-shelf-action="insert-all">⬇ 全部拼入笔记</button>
+        <button type="button" class="pill-btn pill-btn-sm" data-shelf-action="clear-all">清空</button>
+      </footer>
     `;
-  } else {
-    const tabNav = shelfEl.querySelector('.island-drawer-tabs');
-    if (tabNav && !tabNav.querySelector('[data-shelf-action="collapse"]')) {
-      const closeBtn = document.createElement('button');
-      closeBtn.type = 'button';
-      closeBtn.className = 'pill-btn pill-btn-sm island-drawer-close-btn';
-      closeBtn.dataset.shelfAction = 'collapse';
-      closeBtn.title = '收起抽屉';
-      closeBtn.setAttribute('aria-label', '收起抽屉');
-      closeBtn.textContent = '收起 ×';
-      tabNav.appendChild(closeBtn);
-    }
   }
 
   return shelfEl;
@@ -565,14 +523,13 @@ function renderTrashPanel() {
     stats: { count: 0, total_bytes: 0 },
   };
   const items = Array.isArray(trashState.items) ? trashState.items : [];
-  const mode = trashState.settings?.mode === 'app' ? 'app' : 'system';
   const purgeDays = Number.isFinite(Number(trashState.settings?.auto_purge_days))
     ? Number(trashState.settings.auto_purge_days)
     : 15;
   const totalBytes = Number(trashState.stats?.total_bytes) || items.reduce((sum, it) => sum + (Number(it?.size_bytes) || 0), 0);
 
   const listHtml = items.length === 0
-    ? `<div class="island-trash-empty">内置回收站暂无记录，拖拽文件、闪念或卡片到垃圾桶即可安全暂存</div>`
+    ? `<div class="island-trash-empty">软件内置回收站暂无记录，拖拽文件、闪念、脑图卡片或段落到内置回收站即可安全暂存并随时还原</div>`
     : items
         .map((it) => {
           const meta = getTrashKindMeta(it.kind);
@@ -602,28 +559,22 @@ function renderTrashPanel() {
 
   panel.innerHTML = `
     <div class="island-trash-top">
-      <div class="island-trash-mode-row">
-        <div class="island-trash-mode-switch" role="group" aria-label="回收站模式切换">
-          <button type="button" class="island-trash-mode-btn ${mode === 'system' ? 'is-active' : ''}" data-trash-mode-btn="system" aria-pressed="${mode === 'system' ? 'true' : 'false'}">🖥 Windows 系统回收站</button>
-          <button type="button" class="island-trash-mode-btn ${mode === 'app' ? 'is-active' : ''}" data-trash-mode-btn="app" aria-pressed="${mode === 'app' ? 'true' : 'false'}">📦 软件内置回收站</button>
-        </div>
-        <label class="island-trash-purge-wrap">
-          <span>内置回收站自动清理</span>
-          <select class="apple-select island-trash-purge-select" data-trash-action="purge-days" aria-label="内置回收站自动清理">
-            <option value="3" ${purgeDays === 3 ? 'selected' : ''}>3天</option>
-            <option value="7" ${purgeDays === 7 ? 'selected' : ''}>7天</option>
-            <option value="15" ${purgeDays === 15 ? 'selected' : ''}>15天</option>
-            <option value="30" ${purgeDays === 30 ? 'selected' : ''}>30天</option>
-            <option value="0" ${purgeDays === 0 ? 'selected' : ''}>从不自动清理</option>
-          </select>
-        </label>
-      </div>
-      <p class="island-trash-hint">系统模式下删除本地文件会直接放入 Windows 回收站（可去桌面回收站回退）；软件内置回收站会保存删除的文件与闪念/卡片片段并按设定周期自动清理，也可随时手动清空。</p>
+      <label class="island-trash-purge-wrap">
+        <span>内置回收站自动清理周期</span>
+        <select class="apple-select island-trash-purge-select" data-trash-action="purge-days" aria-label="内置回收站自动清理周期">
+          <option value="3" ${purgeDays === 3 ? 'selected' : ''}>3天</option>
+          <option value="7" ${purgeDays === 7 ? 'selected' : ''}>7天</option>
+          <option value="15" ${purgeDays === 15 ? 'selected' : ''}>15天</option>
+          <option value="30" ${purgeDays === 30 ? 'selected' : ''}>30天</option>
+          <option value="0" ${purgeDays === 0 ? 'selected' : ''}>从不</option>
+        </select>
+      </label>
+      <button type="button" class="pill-btn pill-btn-sm is-danger" data-trash-action="empty-all" ${items.length === 0 ? 'disabled' : ''}>🧹 手动清空</button>
     </div>
     <div class="island-trash-list" role="list">${listHtml}</div>
     <footer class="island-trash-footer">
-      <span class="island-trash-stats">共 ${items.length} 条${totalBytes > 0 ? ` · ${formatBytes(totalBytes)}` : ''}</span>
-      <button type="button" class="pill-btn pill-btn-sm is-danger" data-trash-action="empty-all" ${items.length === 0 ? 'disabled' : ''}>🧹 手动清空内置回收站</button>
+      <span class="island-trash-stats">软件托管共 ${items.length} 条${totalBytes > 0 ? ` · ${formatBytes(totalBytes)}` : ''}</span>
+      <span class="island-trash-stats">Windows 系统回收站请前往桌面查看</span>
     </footer>
   `;
 }
@@ -634,20 +585,6 @@ function bindTrashPanelEvents() {
   panel.dataset.trashBound = '1';
 
   panel.addEventListener('click', async (e) => {
-    const modeBtn = e.target.closest('[data-trash-mode-btn]');
-    if (modeBtn) {
-      e.stopPropagation();
-      const nextMode = modeBtn.dataset.trashModeBtn === 'app' ? 'app' : 'system';
-      try {
-        await store.updateTrashSettings?.({ mode: nextMode });
-        renderDropBanner();
-        showToast(nextMode === 'system' ? '已切换：Windows 系统回收站模式' : '已切换：软件内置回收站模式', 'success');
-      } catch (err) {
-        showToast(`切换模式失败：${err?.message || '未知错误'}`, 'error');
-      }
-      return;
-    }
-
     const itemBtn = e.target.closest('[data-trash-item-action]');
     if (itemBtn) {
       e.stopPropagation();
@@ -719,7 +656,7 @@ function bindTrashPanelEvents() {
   });
 }
 
-async function handleTrashDropPayload(payload) {
+async function handleTrashDropPayload(payload, mode = 'app') {
   if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) return;
   clearPayloadSafe();
   store.endGlobalDrag?.();
@@ -728,6 +665,7 @@ async function handleTrashDropPayload(payload) {
   clearDropZoneHighlights();
   syncShelfStateClasses();
 
+  const targetMode = mode === 'system' ? 'system' : 'app';
   const kind = String(payload.kind || payload.type || '').trim();
   const virtualKinds = new Set([
     'snippet', 'block', 'lp-block', 'sticky', 'ai', 'summary', 'chat',
@@ -746,7 +684,7 @@ async function handleTrashDropPayload(payload) {
       store.emit('trash:consumed-drag', payload);
       showToast('已将暂存片段移入内置回收站', 'info');
     } else if (payload.path && !virtualKinds.has(kind)) {
-      await store.trashFile?.(payload.path);
+      await store.trashFile?.(payload.path, targetMode);
       store.emit('trash:consumed-drag', payload);
     } else {
       const title = payload.title || payload.label || payload.name || (kind === 'sticky' ? '闪念卡' : '内容片段');
@@ -757,7 +695,12 @@ async function handleTrashDropPayload(payload) {
         source_path: payload.sourceDocPath || payload.path || '',
       });
       store.emit('trash:consumed-drag', payload);
-      showToast('已移入内置回收站（可在灵动岛回收站还原）', 'info');
+      showToast(
+        targetMode === 'system'
+          ? '虚拟片段已自动移入内置回收站（可在内置回收站还原）'
+          : '已移入内置回收站（可在内置回收站还原）',
+        'info'
+      );
     }
   } catch (err) {
     showToast(`移入回收站失败：${err?.message || '未知错误'}`, 'error');
@@ -899,22 +842,41 @@ function bindShelfEvents() {
     islandEl.addEventListener('dragover', (e) => {
       if (!isAcceptableDragEvent(e)) return;
       e.preventDefault();
+      const trashZone = e.target.closest?.('[data-drop-zone="app-trash"]');
+      const shelfZone = e.target.closest?.('[data-drop-zone="drag-shelf"]');
       if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
+        e.dataTransfer.dropEffect = trashZone ? 'move' : (e.ctrlKey ? 'copy' : 'move');
       }
       clearCollapseTimer();
       islandEl.classList.add('is-drag-over');
-      if (!isOpen) {
-        openShelf({ byDrag: true, inviting: true });
+      islandEl.querySelectorAll('.island-compact-drop-half').forEach((half) => half.classList.remove('is-drag-over'));
+      if (trashZone) {
+        trashZone.classList.add('is-drag-over');
+      } else if (shelfZone) {
+        shelfZone.classList.add('is-drag-over');
+      } else {
+        islandEl.querySelector('[data-drop-zone="drag-shelf"]')?.classList.add('is-drag-over');
       }
     });
 
     islandEl.addEventListener('dragleave', (e) => {
       if (e.relatedTarget && islandEl.contains(e.relatedTarget)) return;
       islandEl.classList.remove('is-drag-over');
+      islandEl.querySelectorAll('.is-drag-over').forEach((z) => z.classList.remove('is-drag-over'));
     });
 
-    islandEl.addEventListener('drop', (e) => handleDropIntoShelf(e, islandEl));
+    islandEl.addEventListener('drop', (e) => {
+      const trashZone = e.target.closest?.('[data-drop-zone="app-trash"]');
+      if (trashZone) {
+        e.preventDefault();
+        e.stopPropagation();
+        const payload = readPayloadSafe(e) || store.getGlobalDrag?.();
+        draggingShelfItemId = null;
+        handleTrashDropPayload(payload, 'app');
+        return;
+      }
+      handleDropIntoShelf(e, islandEl);
+    });
   }
 
   el.addEventListener('click', (e) => {
@@ -1137,11 +1099,10 @@ function bindShelfEvents() {
     collapseShelf({ force: false });
   });
 
-  // Auto-reveal on any acceptable HTML5 dragenter across window
+  // Track drag active state WITHOUT ever auto-opening #island-shelf-drawer (#3)
   window.addEventListener('dragenter', (e) => {
     if (!isAcceptableDragEvent(e)) return;
     isDragActive = true;
-    openShelf({ byDrag: true, inviting: true });
   });
 
   window.addEventListener('dragleave', (e) => {
@@ -1153,9 +1114,6 @@ function bindShelfEvents() {
     isDragInviting = false;
     clearDropZoneHighlights();
     syncShelfStateClasses();
-    if (autoCollapseArmed && !pinnedOpen && !isPointerHoveringShelfOrIsland()) {
-      scheduleAutoCollapse();
-    }
   });
 
   window.addEventListener('dragend', () => {
@@ -1163,9 +1121,6 @@ function bindShelfEvents() {
     isDragInviting = false;
     clearDropZoneHighlights();
     syncShelfStateClasses();
-    if (autoCollapseArmed && !pinnedOpen && !isPointerHoveringShelfOrIsland()) {
-      scheduleAutoCollapse();
-    }
   });
 
   window.addEventListener('drop', () => {
@@ -1173,14 +1128,11 @@ function bindShelfEvents() {
     isDragInviting = false;
     clearDropZoneHighlights();
     syncShelfStateClasses();
-    if (autoCollapseArmed && !pinnedOpen && !isPointerHoveringShelfOrIsland()) {
-      scheduleAutoCollapse();
-    }
   });
 }
 
 /**
- * Initialize the Dynamic Island NotchDrop Staging Pocket & Dual Drop / Trash Panel.
+ * Initialize the Dynamic Island NotchDrop Staging Pocket & Built-in Trash Panel.
  */
 export function initDragShelf() {
   if (initialized || typeof document === 'undefined') return;
@@ -1193,12 +1145,10 @@ export function initDragShelf() {
   renderShelf();
   renderTrashPanel();
 
-  // A1: Unified global drag start/end -> reveal dual drop bar (shelf + trash)
+  // #3: During drag, #dynamic-island morphs in-place into .island-compact-drop-pill; NEVER open drawer!
   store.on('drag:global-start', (payload) => {
     if (isDisallowedGlobalDrag(payload)) return;
     isDragActive = true;
-    renderDropBanner();
-    openShelf({ byDrag: true, inviting: true });
   });
 
   store.on('drag:global-end', () => {
@@ -1206,9 +1156,6 @@ export function initDragShelf() {
     isDragInviting = false;
     clearDropZoneHighlights();
     syncShelfStateClasses();
-    if (autoCollapseArmed && !pinnedOpen && !isPointerHoveringShelfOrIsland()) {
-      scheduleAutoCollapse();
-    }
   });
 
   store.on('drag:active', (active) => {
@@ -1216,16 +1163,11 @@ export function initDragShelf() {
       if (draggingShelfItemId) return;
       if (isDisallowedPayload(store.state.activeDragPayload)) return;
       isDragActive = true;
-      renderDropBanner();
-      openShelf({ byDrag: true, inviting: true });
     } else {
       isDragActive = false;
       isDragInviting = false;
       clearDropZoneHighlights();
       syncShelfStateClasses();
-      if (autoCollapseArmed && !pinnedOpen && !isPointerHoveringShelfOrIsland()) {
-        scheduleAutoCollapse();
-      }
     }
   });
 
@@ -1242,6 +1184,16 @@ export function initDragShelf() {
   });
 
   store.on('island:switch-tab', (tabName) => {
+    if (tabName === 'stickies' || tabName === 'trash') {
+      if (isOpen && !pinnedOpen) {
+        collapseShelf({ force: false });
+      }
+      if (tabName === 'trash') {
+        store.refreshTrash?.().catch(() => {});
+        renderTrashPanel();
+      }
+      return;
+    }
     ensureShelfElement();
     clearCollapseTimer();
     clearHideTimer();
@@ -1249,7 +1201,7 @@ export function initDragShelf() {
     autoCollapseArmed = false;
     isDragInviting = false;
     syncShelfStateClasses();
-    store.emit('island:drawer-state', { open: true, tab: tabName || 'shelf' });
+    store.emit('island:drawer-state', { open: true, tab: 'shelf' });
   });
 
   store.on('island:close-drawer', () => {
@@ -1259,14 +1211,10 @@ export function initDragShelf() {
   });
 
   store.on('island:tab-change', (tab) => {
-    if (shelfEl?.classList.contains('is-open')) {
-      isOpen = true;
-    }
     if (tab === 'trash') {
       store.refreshTrash?.().catch(() => {});
       renderTrashPanel();
     }
-    store.emit('island:drawer-state', { open: isOpen, tab: tab || 'shelf' });
   });
 
   store.on('shelf:add-item', (payload) => {
@@ -1297,8 +1245,5 @@ export function initDragShelf() {
 
   store.on('trash:updated', () => {
     renderTrashPanel();
-    if (isDragInviting || store.state.globalDrag) {
-      renderDropBanner();
-    }
   });
 }

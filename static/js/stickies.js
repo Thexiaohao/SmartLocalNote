@@ -1361,17 +1361,18 @@ function bindCardInteractions(card, stickyId) {
     let altDetached = false;
     let globalDragStarted = false;
 
+    const STICKY_TRASH_SEL = '#portable-trash-dock, [data-drop-zone="trash"], [data-drop-zone="app-trash"], [data-drop-zone="system-trash"]';
     const clearStickyGlobalDropHighlights = () => {
       document
-        .querySelectorAll('#portable-trash-dock.is-drag-over, [data-drop-zone="trash"].is-drag-over, [data-drop-zone="drag-shelf"].is-drag-over, #dynamic-island.is-drag-over')
+        .querySelectorAll('#portable-trash-dock.is-drag-over, [data-drop-zone].is-drag-over, #dynamic-island.is-drag-over')
         .forEach((el) => el.classList.remove('is-drag-over'));
     };
 
     const hitTestGlobalDropTargets = (cx, cy) => {
       if (!Number.isFinite(cx) || !Number.isFinite(cy)) return { trashTarget: null, shelfTarget: null };
       const hitEls = document.elementsFromPoint(cx, cy);
-      const trashTarget = hitEls.find((el) => el.matches?.('#portable-trash-dock, [data-drop-zone="trash"]'))
-        || hitEls.map((el) => el.closest?.('#portable-trash-dock, [data-drop-zone="trash"]')).find(Boolean)
+      const trashTarget = hitEls.find((el) => el.matches?.(STICKY_TRASH_SEL))
+        || hitEls.map((el) => el.closest?.(STICKY_TRASH_SEL)).find(Boolean)
         || null;
       const shelfTarget = !trashTarget
         ? (hitEls.find((el) => el.matches?.('[data-drop-zone="drag-shelf"], #dynamic-island'))

@@ -41,6 +41,7 @@ hiddenimports = [
     "core.daemon_bridge",
     "core.trash_manager",
     "core.todo_indexer",
+    "core.link_graph",
     # Uvicorn / FastAPI / Starlette dynamic imports
     "uvicorn.logging",
     "uvicorn.loops",
