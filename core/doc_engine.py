@@ -484,13 +484,8 @@ def read_document(path_str: str) -> dict[str, Any]:
         }
 
     if ext == ".pdf":
-        import pymupdf
-
-        doc = pymupdf.open(target)
-        try:
-            page_count = len(doc)
-        finally:
-            doc.close()
+        pages = get_pdf_pages_text(target)
+        page_count = len(pages)
 
         companion_path, companion_content, companion_exists = _load_companion_note(target)
         return {
@@ -985,37 +980,86 @@ def write_text_document(path_str: str, content: str) -> dict[str, Any]:
     return safe_io.atomic_write_text(str(target), content, snapshot=True)
 
 
-def extract_pdf_text(path_str: str, max_pages: int = 12, max_chars: int = 4000) -> str:
-    """Lazily extract page text from a PDF using PyMuPDF with head+tail truncation."""
-    import pymupdf
+def _stdlib_extract_pdf_pages(target: Path) -> list[str]:
+    """Zero-dependency stdlib PDF page & text extractor (zlib + regex) when PyMuPDF is omitted."""
+    import zlib
 
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        return []
+    page_count = len(re.findall(rb"/Type\s*/Page\b", raw))
+    page_texts: list[str] = []
+
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.S):
+        chunk = m.group(1)
+        try:
+            dec = zlib.decompress(chunk)
+        except Exception:
+            dec = chunk
+        if b"BT" not in dec and b"Tj" not in dec and b"TJ" not in dec:
+            continue
+        lines: list[str] = []
+        for hx in re.findall(rb"<([0-9A-Fa-f]{4,})>", dec):
+            try:
+                b_val = bytes.fromhex(hx.decode("ascii"))
+                txt = b_val.decode("utf-16-be", errors="ignore").strip()
+                if txt and any(ch.isprintable() for ch in txt):
+                    lines.append(txt)
+            except Exception:
+                pass
+        for lit in re.findall(rb"\(([^()\\]*(?:\\.[^()\\]*)*)\)", dec):
+            try:
+                txt = lit.decode("utf-8", errors="ignore").strip()
+                if txt and any(ch.isalnum() for ch in txt):
+                    lines.append(txt)
+            except Exception:
+                pass
+        if lines:
+            page_texts.append("\n".join(lines))
+
+    total = max(page_count, len(page_texts), 1 if raw else 0)
+    while len(page_texts) < total:
+        page_texts.append("")
+    return page_texts[:total]
+
+
+def get_pdf_pages_text(target: Path) -> list[str]:
+    """Return list of extracted text per PDF page using PyMuPDF if available, else stdlib fallback."""
+    try:
+        import pymupdf
+
+        with pymupdf.open(target) as doc:
+            return [(page.get_text("text") or "").strip() for page in doc]
+    except ImportError:
+        return _stdlib_extract_pdf_pages(target)
+
+
+def extract_pdf_text(path_str: str, max_pages: int = 12, max_chars: int = 4000) -> str:
+    """Lazily extract page text from a PDF with head+tail truncation."""
     target = safe_io.resolve_safe_path(path_str, must_exist=True)
     if target.suffix.lower() != ".pdf":
         raise ValueError(f"仅支持 .pdf 文件：{target.name}")
 
-    doc = pymupdf.open(target)
-    try:
-        total_pages = len(doc)
-        limit = min(total_pages, max(1, int(max_pages)))
-        chunks: list[str] = []
-        current_len = 0
+    pages = get_pdf_pages_text(target)
+    total_pages = len(pages)
+    limit = min(total_pages, max(1, int(max_pages)))
+    chunks: list[str] = []
+    current_len = 0
 
-        for idx in range(limit):
-            page_text = (doc[idx].get_text("text") or "").strip()
-            block = f"[第 {idx + 1} 页]\n{page_text}" if page_text else f"[第 {idx + 1} 页]\n（本页无文本层）"
-            chunks.append(block)
-            current_len += len(block) + 2
-            # Stop early if we already gathered well beyond the head+tail budget
-            if current_len > max_chars * 2 and idx + 1 >= 3:
-                break
+    for idx in range(limit):
+        page_text = (pages[idx] or "").strip()
+        block = f"[第 {idx + 1} 页]\n{page_text}" if page_text else f"[第 {idx + 1} 页]\n（本页无文本层）"
+        chunks.append(block)
+        current_len += len(block) + 2
+        if current_len > max_chars * 2 and idx + 1 >= 3:
+            break
 
-        if total_pages > limit:
-            chunks.append(f"\n（PDF 共 {total_pages} 页，已抽取前 {limit} 页）")
+    if total_pages > limit:
+        chunks.append(f"\n（PDF 共 {total_pages} 页，已抽取前 {limit} 页）")
 
-        combined = "\n\n".join(chunks)
-        return _truncate_head_tail(combined, max_chars)
-    finally:
-        doc.close()
+    combined = "\n\n".join(chunks)
+    return _truncate_head_tail(combined, max_chars)
 
 
 def annotate_pdf(path_str: str, page: int, note_text: str) -> dict[str, Any]:
@@ -1287,61 +1331,56 @@ def _extract_xlsx_inline(
 
 
 def _extract_pdf_inline(target: Path, page: int | None, max_chars: int) -> dict[str, Any]:
-    import pymupdf
+    pages = get_pdf_pages_text(target)
+    total_pages = len(pages)
+    if total_pages == 0:
+        return {"supported": False, "source_name": target.name, "reason": "该 PDF 文件为空，无可读页面"}
 
-    doc = pymupdf.open(target)
-    try:
-        total_pages = len(doc)
-        if total_pages == 0:
-            return {"supported": False, "source_name": target.name, "reason": "该 PDF 文件为空，无可读页面"}
-
-        if page is not None:
-            page_num = int(page)
-            if page_num < 1 or page_num > total_pages:
-                raise ValueError(f"页码越界：{page_num}（PDF 共 {total_pages} 页）")
-            text = (doc[page_num - 1].get_text("text") or "").strip()
-            if not text:
-                return {
-                    "supported": False,
-                    "source_name": target.name,
-                    "reason": "该 PDF 无可提取的文字层（可能为纯图片扫描件），不支持直接展开为文本",
-                }
-            md, trunc = _truncate_inline_markdown(f"### {target.name} · 第 {page_num} 页\n\n{text}", max_chars)
-            return {
-                "supported": True,
-                "kind": "pdf",
-                "source_name": target.name,
-                "title": f"{target.name} · 第 {page_num} 页",
-                "markdown": md,
-                "truncated": trunc,
-            }
-
-        limit = min(5, total_pages)
-        blocks: list[str] = []
-        for idx in range(limit):
-            text = (doc[idx].get_text("text") or "").strip()
-            if text:
-                blocks.append(f"#### 第 {idx + 1} 页\n\n{text}")
-        if not blocks:
+    if page is not None:
+        page_num = int(page)
+        if page_num < 1 or page_num > total_pages:
+            raise ValueError(f"页码越界：{page_num}（PDF 共 {total_pages} 页）")
+        text = (pages[page_num - 1] or "").strip()
+        if not text:
             return {
                 "supported": False,
                 "source_name": target.name,
                 "reason": "该 PDF 无可提取的文字层（可能为纯图片扫描件），不支持直接展开为文本",
             }
-        truncated = total_pages > limit
-        if truncated:
-            blocks.append(f"> *（PDF 共 {total_pages} 页，已展开前 {limit} 页）*")
-        md, char_trunc = _truncate_inline_markdown("\n\n".join(blocks), max_chars)
+        md, trunc = _truncate_inline_markdown(f"### {target.name} · 第 {page_num} 页\n\n{text}", max_chars)
         return {
             "supported": True,
             "kind": "pdf",
             "source_name": target.name,
-            "title": f"{target.name}（前 {limit} 页）",
+            "title": f"{target.name} · 第 {page_num} 页",
             "markdown": md,
-            "truncated": truncated or char_trunc,
+            "truncated": trunc,
         }
-    finally:
-        doc.close()
+
+    limit = min(5, total_pages)
+    blocks: list[str] = []
+    for idx in range(limit):
+        text = (pages[idx] or "").strip()
+        if text:
+            blocks.append(f"#### 第 {idx + 1} 页\n\n{text}")
+    if not blocks:
+        return {
+            "supported": False,
+            "source_name": target.name,
+            "reason": "该 PDF 无可提取的文字层（可能为纯图片扫描件），不支持直接展开为文本",
+        }
+    truncated = total_pages > limit
+    if truncated:
+        blocks.append(f"> *（PDF 共 {total_pages} 页，已展开前 {limit} 页）*")
+    md, char_trunc = _truncate_inline_markdown("\n\n".join(blocks), max_chars)
+    return {
+        "supported": True,
+        "kind": "pdf",
+        "source_name": target.name,
+        "title": f"{target.name}（前 {limit} 页）",
+        "markdown": md,
+        "truncated": truncated or char_trunc,
+    }
 
 
 def extract_inline_content(

@@ -39,6 +39,7 @@ if errorlevel 1 (
 move "dist-ui-tmp\SmartLocalNote-UI" "dist-dual\app-ui" >nul
 rmdir /s /q "dist-ui-tmp" 2>nul
 rmdir /s /q "build-ui-tmp" 2>nul
+compact /c /s:"dist-dual\app-ui" /i /q /exe:lzx >nul 2>&1
 
 echo.
 echo ============================================================

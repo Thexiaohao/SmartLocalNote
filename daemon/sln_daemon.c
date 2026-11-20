@@ -84,7 +84,7 @@ static HWND            g_ui_main_hwnd   = NULL;
 static HWND            g_ui_msg_hwnd    = NULL;
 static BOOL            g_exiting_daemon = FALSE;
 
-static UINT g_idle_timeout_sec = 180;
+static UINT g_idle_timeout_sec = 30;
 static UINT g_hotkey_mod       = MOD_ALT;
 static UINT g_hotkey_vk        = VK_SPACE;
 
@@ -232,7 +232,7 @@ static void init_paths_and_config(void) {
     wstr_cat(g_ini_path, MAX_PATH, L"\\data\\daemon.ini");
 
     if (file_exists_w(g_ini_path)) {
-        g_idle_timeout_sec = GetPrivateProfileIntW(L"daemon", L"idle_timeout_sec", 180, g_ini_path);
+        g_idle_timeout_sec = GetPrivateProfileIntW(L"daemon", L"idle_timeout_sec", 30, g_ini_path);
         g_hotkey_mod       = GetPrivateProfileIntW(L"daemon", L"hotkey_mod", MOD_ALT, g_ini_path);
         g_hotkey_vk        = GetPrivateProfileIntW(L"daemon", L"hotkey_vk", VK_SPACE, g_ini_path);
         if (g_hotkey_vk == 0) g_hotkey_vk = VK_SPACE;
@@ -541,6 +541,7 @@ static LRESULT CALLBACK DaemonWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         case CMD_UI_HIDDEN:
             if (g_ui_process != NULL && g_state != STATE_TERMINATING) {
+                trim_working_set();
                 if (g_idle_timeout_sec == 0) {
                     request_ui_quit(QUIT_REASON_IDLE);
                 } else {

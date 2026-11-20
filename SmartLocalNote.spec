@@ -70,8 +70,6 @@ hiddenimports = [
     # Document engines
     "openpyxl",
     "openpyxl.cell._writer",
-    "pymupdf",
-    "fitz",
 ]
 
 # Collect pywebview & Windows .NET/WebView2 runtime assemblies
@@ -106,6 +104,10 @@ excludes = [
     "pytest",
     "IPython",
     "jupyter",
+    "pymupdf",
+    "fitz",
+    "tkinter",
+    "_tkinter",
 ]
 
 a = Analysis(
@@ -120,6 +122,25 @@ a = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+_STRIP_TOKENS = (
+    "mupdf",
+    "pymupdf",
+    "tcl86",
+    "tk86",
+    "_tkinter",
+    "_tcl_data",
+    "_tk_data",
+)
+
+a.binaries = [
+    b for b in a.binaries
+    if not any(tok in b[0].lower() or tok in b[1].lower() for tok in _STRIP_TOKENS)
+]
+a.datas = [
+    d for d in a.datas
+    if not any(tok in d[0].lower() or tok in d[1].lower() for tok in _STRIP_TOKENS)
+]
 
 pyz = PYZ(a.pure)
 

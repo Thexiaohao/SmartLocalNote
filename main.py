@@ -52,7 +52,12 @@ from config import (
     load_config,
     update_config,
 )
-from core.daemon_bridge import DaemonBridge, load_window_state, save_window_state
+from core.daemon_bridge import (
+    DaemonBridge,
+    load_window_state,
+    save_window_state,
+    start_auto_memory_trim,
+)
 
 # Explicit router imports so PyInstaller static analysis always bundles all API & core modules
 from api import ai_api, excel_api, files_api, system_api, tools_api  # noqa: F401
@@ -357,6 +362,7 @@ def main() -> None:
             create_kwargs["y"] = int(win_geom["y"])
 
         win = webview.create_window("SmartLocalNote", url, **create_kwargs)
+        start_auto_memory_trim()
         if bridge is not None:
             bridge.attach_window(win)
             win.events.shown += lambda: bridge.notify_ready(win)
@@ -365,14 +371,13 @@ def main() -> None:
         else:
             win.events.closing += lambda: (save_window_state(win), True)[1]
 
-        wv_storage = str((DATA_DIR / "webview_cache").resolve())
         if sys.platform == "win32":
             try:
-                webview.start(gui="edgechromium", private_mode=False, storage_path=wv_storage)
+                webview.start(gui="edgechromium", private_mode=False)
             except Exception:
-                webview.start(private_mode=False, storage_path=wv_storage)
+                webview.start(private_mode=False)
         else:
-            webview.start(private_mode=False, storage_path=wv_storage)
+            webview.start(private_mode=False)
     except Exception:
         # Ultimate fallback: open system default browser so user is never stuck
         webbrowser.open(url)

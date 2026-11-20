@@ -1,14 +1,16 @@
-"""Win32 native IPC & window state snapshot bridge for SmartLocalNote Daemon."""
+"""Win32 native IPC, window state snapshot, and aggressive process-tree memory trimmer."""
 
 from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import gc
 import json
 import os
 import struct
 import sys
 import threading
+import time
 from typing import Any
 
 from config import WINDOW_STATE_FILE, atomic_write_json
@@ -33,6 +35,10 @@ SW_SHOW = 5
 MONITOR_DEFAULTTONULL = 0
 SMTO_ABORTIFHUNG = 0x0002
 
+TH32CS_SNAPPROCESS = 0x00000002
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_SET_QUOTA = 0x0100
+
 DEFAULT_WIDTH = 1360
 DEFAULT_HEIGHT = 840
 MIN_WIDTH = 960
@@ -42,6 +48,7 @@ LRESULT = ctypes.c_ssize_t
 WPARAM = ctypes.c_size_t
 LPARAM = ctypes.c_ssize_t
 ULONG_PTR = ctypes.c_size_t
+SIZE_T_MAX = ctypes.c_size_t(-1)
 
 
 def _is_win32() -> bool:
@@ -65,15 +72,56 @@ class _COPYDATASTRUCT(ctypes.Structure):
     ]
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ULONG_PTR),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
 if sys.platform == "win32":
     # Private DLL instances with explicit 64-bit prototypes; never mutate global ctypes.windll
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    try:
+        _psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    except Exception:
+        _psapi = None
 
     _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
     _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
     _kernel32.GetCurrentThreadId.argtypes = []
     _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    _kernel32.SetProcessWorkingSetSize.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+    ]
+    _kernel32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+    _kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    _kernel32.Process32FirstW.restype = wintypes.BOOL
+    _kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    _kernel32.Process32NextW.restype = wintypes.BOOL
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    if _psapi is not None and hasattr(_psapi, "EmptyWorkingSet"):
+        _psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+        _psapi.EmptyWorkingSet.restype = wintypes.BOOL
 
     _user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
     _user32.RegisterWindowMessageW.restype = wintypes.UINT
@@ -158,7 +206,97 @@ if sys.platform == "win32":
 else:
     _user32 = None
     _kernel32 = None
+    _psapi = None
     _get_dpi_for_window = None
+
+
+def _trim_single_handle(hproc: Any) -> None:
+    if not hproc or _kernel32 is None:
+        return
+    try:
+        if _psapi is not None and hasattr(_psapi, "EmptyWorkingSet"):
+            _psapi.EmptyWorkingSet(hproc)
+    except Exception:
+        pass
+    try:
+        _kernel32.SetProcessWorkingSetSize(hproc, SIZE_T_MAX, SIZE_T_MAX)
+    except Exception:
+        pass
+
+
+def trim_process_tree_memory(include_children: bool = True) -> None:
+    """Reclaim cold physical pages from UI process and all child WebView2 processes."""
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if not _is_win32() or _kernel32 is None:
+        return
+
+    if include_children:
+        try:
+            snap = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            invalid_handle = wintypes.HANDLE(-1).value
+            if snap and snap != invalid_handle:
+                try:
+                    parent_map: dict[int, list[int]] = {}
+                    pe = _PROCESSENTRY32W()
+                    pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+                    ok = _kernel32.Process32FirstW(snap, ctypes.byref(pe))
+                    while ok:
+                        parent_map.setdefault(int(pe.th32ParentProcessID), []).append(int(pe.th32ProcessID))
+                        ok = _kernel32.Process32NextW(snap, ctypes.byref(pe))
+
+                    root_pid = os.getpid()
+                    queue = list(parent_map.get(root_pid, []))
+                    visited: set[int] = set()
+                    access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA
+                    while queue:
+                        child_pid = queue.pop(0)
+                        if child_pid in visited or child_pid <= 0:
+                            continue
+                        visited.add(child_pid)
+                        queue.extend(parent_map.get(child_pid, []))
+                        hchild = _kernel32.OpenProcess(access, False, child_pid)
+                        if hchild:
+                            try:
+                                _trim_single_handle(hchild)
+                            finally:
+                                _kernel32.CloseHandle(hchild)
+                finally:
+                    _kernel32.CloseHandle(snap)
+        except Exception:
+            pass
+
+    try:
+        _trim_single_handle(_kernel32.GetCurrentProcess())
+    except Exception:
+        pass
+
+
+_AUTO_TRIM_STARTED = False
+_AUTO_TRIM_LOCK = threading.Lock()
+
+
+def start_auto_memory_trim(interval_sec: float = 10.0) -> None:
+    """Start a background daemon thread that periodically trims cold pages from UI + WebView2."""
+    global _AUTO_TRIM_STARTED
+    if not _is_win32():
+        return
+    with _AUTO_TRIM_LOCK:
+        if _AUTO_TRIM_STARTED:
+            return
+        _AUTO_TRIM_STARTED = True
+
+    def _loop() -> None:
+        for delay in (1.0, 2.5, 5.0):
+            time.sleep(delay)
+            trim_process_tree_memory(include_children=True)
+        while True:
+            time.sleep(max(5.0, float(interval_sec)))
+            trim_process_tree_memory(include_children=True)
+
+    threading.Thread(target=_loop, name="sln-mem-trimmer", daemon=True).start()
 
 
 def _get_dpi_scale(hwnd: int) -> float:
@@ -289,7 +427,7 @@ def _resolve_hwnd_for_window(window: Any) -> int:
         if proc_id.value == pid:
             buf = ctypes.create_unicode_buffer(128)
             _user32.GetWindowTextW(hwnd, buf, 128)
-            if "SmartLocalNote" in buf.value:
+            if buf.value == "SmartLocalNote":
                 found.append(int(hwnd))
                 return False
         return True
@@ -329,7 +467,7 @@ def _force_foreground(hwnd: int) -> None:
 class DaemonBridge:
     """Native Win32 message-only window bridge connecting UI process to C Daemon."""
 
-    def __init__(self, daemon_hwnd: int, idle_timeout_sec: int = 180) -> None:
+    def __init__(self, daemon_hwnd: int, idle_timeout_sec: int = 30) -> None:
         self.daemon_hwnd = int(daemon_hwnd or 0)
         self.idle_timeout_sec = max(0, int(idle_timeout_sec))
         self.window: Any = None
@@ -425,6 +563,7 @@ class DaemonBridge:
 
     def notify_ready(self, window: Any) -> None:
         self.window = window
+        start_auto_memory_trim()
         if not _is_win32() or _user32 is None or not self.daemon_hwnd:
             return
         self._ready_event.wait(timeout=2.0)
@@ -490,6 +629,7 @@ class DaemonBridge:
         elif self.main_hwnd and _is_win32() and _user32 is not None:
             _user32.ShowWindow(wintypes.HWND(self.main_hwnd), SW_HIDE)
         self._post_daemon(CMD_UI_HIDDEN)
+        trim_process_tree_memory(include_children=True)
 
     def hide_window(self) -> None:
         with self._lock:

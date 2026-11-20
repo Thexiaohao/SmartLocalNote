@@ -177,29 +177,29 @@ def _chunk_text_document(target: Path) -> list[dict[str, Any]]:
 
 
 def _chunk_pdf_document(target: Path) -> list[dict[str, Any]]:
-    import pymupdf
+    from core.doc_engine import get_pdf_pages_text
 
     path_str = str(target)
     name = target.name
     chunks: list[dict[str, Any]] = []
 
-    with pymupdf.open(target) as doc:
-        limit = min(len(doc), _PDF_MAX_PAGES)
-        for idx in range(limit):
-            page_num = idx + 1
-            text = (doc[idx].get_text("text") or "").strip()
-            if not text:
-                continue
-            chunks.append(
-                _make_chunk(
-                    path=path_str,
-                    name=name,
-                    ext=".pdf",
-                    chunk_text=text,
-                    anchor=f"[[{name}#page={page_num}]]",
-                    page=page_num,
-                )
+    pages = get_pdf_pages_text(target)
+    limit = min(len(pages), _PDF_MAX_PAGES)
+    for idx in range(limit):
+        page_num = idx + 1
+        text = (pages[idx] or "").strip()
+        if not text:
+            continue
+        chunks.append(
+            _make_chunk(
+                path=path_str,
+                name=name,
+                ext=".pdf",
+                chunk_text=text,
+                anchor=f"[[{name}#page={page_num}]]",
+                page=page_num,
             )
+        )
     return chunks
 
 
