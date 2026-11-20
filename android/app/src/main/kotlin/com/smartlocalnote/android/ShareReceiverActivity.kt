@@ -4,7 +4,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -50,7 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartlocalnote.android.data.AppPrefs
-import com.smartlocalnote.android.data.OfflineItem
+import com.smartlocalnote.android.local.LocalSlnServer
 import com.smartlocalnote.android.network.SlnApiClient
 import com.smartlocalnote.android.ui.theme.SmartLocalNoteTheme
 import com.smartlocalnote.android.util.DeviceHelper
@@ -72,6 +71,7 @@ class ShareReceiverActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val prefs = AppPrefs(this)
+    val localServer = LocalSlnServer.ensureStarted(this)
     val payload = extractSharedPayload(intent)
 
     if (payload.text.isBlank() && payload.streamUri == null) {
@@ -84,6 +84,7 @@ class ShareReceiverActivity : ComponentActivity() {
       SmartLocalNoteTheme {
         ShareReceiverSheet(
           prefs = prefs,
+          localServer = localServer,
           payload = payload,
           onDone = { toastMsg ->
             if (toastMsg.isNotBlank()) {
@@ -123,14 +124,15 @@ class ShareReceiverActivity : ComponentActivity() {
 }
 
 private enum class ShareTargetAction {
-  STICKY,
-  SHELF,
-  NOTES_DIR,
+  LOCAL_ONLY,
+  LOCAL_AND_SYNC_PC,
+  PC_STICKY,
 }
 
 @Composable
 private fun ShareReceiverSheet(
   prefs: AppPrefs,
+  localServer: LocalSlnServer,
   payload: SharedPayload,
   onDone: (String) -> Unit,
   onCancel: () -> Unit,
@@ -142,21 +144,23 @@ private fun ShareReceiverSheet(
 
   val isFileShare = payload.streamUri != null
   val previewTitle = when {
-    isFileShare && payload.mimeType.startsWith("image/") -> "🖼️ 分享图片到电脑"
-    isFileShare && payload.mimeType.contains("pdf", ignoreCase = true) -> "📄 分享 PDF 到电脑"
-    isFileShare -> "📎 分享文件到电脑"
-    else -> "📝 分享内容到 SmartLocalNote"
+    isFileShare && payload.mimeType.startsWith("image/") -> "🖼️ 收集图片到 SmartLocalNote"
+    isFileShare && payload.mimeType.contains("pdf", ignoreCase = true) -> "📄 收集 PDF 到 SmartLocalNote"
+    isFileShare -> "📎 收集文件到 SmartLocalNote"
+    else -> "📝 剪藏内容到 SmartLocalNote"
   }
 
   fun dispatch(action: ShareTargetAction) {
     if (isSubmitting) return
     scope.launch {
       isSubmitting = true
-      progressLabel = "正在发送…"
+      progressLabel = "正在写入手机本地笔记库…"
 
       val textContent = payload.text.trim()
       val uri = payload.streamUri
+      val dataEngine = localServer.dataEngine
 
+      // 1. Always save locally first (works 100% offline in milliseconds!)
       if (uri != null) {
         val readFile = withContext(Dispatchers.IO) { DeviceHelper.readUriFile(context, uri) }
         if (readFile == null) {
@@ -164,136 +168,107 @@ private fun ShareReceiverSheet(
           onDone("读取分享文件失败或文件超过 25MB")
           return@launch
         }
-        val addToShelf = action != ShareTargetAction.NOTES_DIR
+
+        val savedLocal = withContext(Dispatchers.IO) {
+          dataEngine.saveRawBytes(
+            filename = readFile.filename,
+            bytes = readFile.bytes,
+            targetDir = "手机收集",
+            addToShelf = false,
+          )
+        }
+        localServer.publishEvent("files:updated", savedLocal)
+        localServer.publishEvent("mobile:upload", savedLocal)
+
+        if (action == ShareTargetAction.LOCAL_ONLY) {
+          DeviceHelper.hapticTick(context)
+          onDone("✅ 已保存到手机本地：手机收集/${savedLocal.optString("name")}")
+          return@launch
+        }
 
         if (prefs.isPaired) {
-          progressLabel = "正在直传 ${readFile.filename}…"
+          progressLabel = "已存手机，正在同步到电脑…"
           val uploadRes = SlnApiClient.uploadFile(
             host = prefs.host,
             port = prefs.port,
             token = prefs.token,
             filename = readFile.filename,
             bytes = readFile.bytes,
-            addToShelf = addToShelf,
+            addToShelf = action == ShareTargetAction.PC_STICKY,
+            targetDir = "手机收集",
           )
           if (uploadRes.ok) {
-            if (action == ShareTargetAction.STICKY) {
-              val noteBody = buildString {
-                append("📎 已传文件：${readFile.filename}")
-                if (textContent.isNotBlank()) append("\n$textContent")
-              }
+            if (action == ShareTargetAction.PC_STICKY) {
+              val noteBody = "📎 已同步文件：${readFile.filename}" +
+                if (textContent.isNotBlank()) "\n$textContent" else ""
               SlnApiClient.sendQuickSticky(prefs.host, prefs.port, prefs.token, noteBody, "blue")
             }
             DeviceHelper.hapticTick(context)
-            val msg = when (action) {
-              ShareTargetAction.STICKY -> "📌 文件已传并弹出电脑闪念卡"
-              ShareTargetAction.SHELF -> "📥 文件已放入电脑灵动岛暂存"
-              ShareTargetAction.NOTES_DIR -> "📁 文件已存入电脑笔记目录"
-            }
-            onDone(msg)
+            onDone("✅ 已存手机本地并同步到电脑：${readFile.filename}")
             return@launch
           }
         }
 
-        // Offline queue fallback for files
-        if (readFile.bytes.size <= DeviceHelper.MAX_OFFLINE_FILE_BYTES) {
-          val b64 = withContext(Dispatchers.Default) {
-            Base64.encodeToString(readFile.bytes, Base64.NO_WRAP)
-          }
-          prefs.enqueueOffline(
-            OfflineItem(
-              kind = "upload",
-              filename = readFile.filename,
-              base64 = b64,
-              addToShelf = addToShelf,
-            ),
-          )
-          if (action == ShareTargetAction.STICKY) {
-            prefs.enqueueOffline(
-              OfflineItem(
-                kind = "sticky",
-                text = "📎 已传文件：${readFile.filename}" +
-                  if (textContent.isNotBlank()) "\n$textContent" else "",
-                color = "blue",
-              ),
-            )
-          }
-          DeviceHelper.hapticTick(context)
-          onDone("📥 当前离线，已写入本地同步队列")
-        } else {
-          onDone("当前无法连接电脑，且文件超过 6MB 暂不支持离线队列")
-        }
+        DeviceHelper.hapticTick(context)
+        onDone("✅ 已存手机本地（电脑暂未连通，回 Wi-Fi 后可一键双向同步）")
         return@launch
       }
 
-      // Text / URL share
-      when (action) {
-        ShareTargetAction.STICKY -> {
-          if (prefs.isPaired) {
-            val res = SlnApiClient.sendQuickSticky(prefs.host, prefs.port, prefs.token, textContent, "yellow")
-            if (res.ok) {
-              DeviceHelper.hapticTick(context)
-              onDone("📌 已弹为电脑闪念卡")
-              return@launch
-            }
-          }
-          prefs.enqueueOffline(OfflineItem(kind = "sticky", text = textContent, color = "yellow"))
-          DeviceHelper.hapticTick(context)
-          onDone("📥 当前离线，闪念已入队等待同步")
-        }
+      // Text / URL share -> save Markdown note in notes/手机收集/
+      val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+      val titlePrefix = payload.subject.take(24).ifBlank { "手机剪藏" }
+      val mdContent = buildString {
+        append("# $titlePrefix\n\n")
+        append("- 收集时间：${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}\n")
+        append("- 标签：#手机收集 #随手记\n\n")
+        append(textContent)
+        append("\n")
+      }
+      val savedNote = withContext(Dispatchers.IO) {
+        dataEngine.createNote(
+          title = "${titlePrefix}_$stamp",
+          content = mdContent,
+          folderRel = "手机收集",
+        )
+      }
+      localServer.publishEvent("files:updated", savedNote)
+      localServer.publishEvent("mobile:upload", savedNote)
 
-        ShareTargetAction.SHELF -> {
-          if (prefs.isPaired) {
-            val res = SlnApiClient.sendClipboard(prefs.host, prefs.port, prefs.token, textContent)
-            if (res.ok) {
-              DeviceHelper.hapticTick(context)
-              onDone("📥 已放入电脑灵动岛暂存")
-              return@launch
-            }
-          }
-          prefs.enqueueOffline(OfflineItem(kind = "clipboard", text = textContent))
-          DeviceHelper.hapticTick(context)
-          onDone("📥 当前离线，已加入同步队列")
-        }
+      if (action == ShareTargetAction.LOCAL_ONLY) {
+        DeviceHelper.hapticTick(context)
+        onDone("✅ 已保存到手机本地：手机收集/${savedNote.optString("name")}")
+        return@launch
+      }
 
-        ShareTargetAction.NOTES_DIR -> {
-          val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-          val filename = "手机分享_$stamp.md"
-          val mdContent = buildString {
-            append("# 手机分享剪藏\n\n")
-            append("- 时间：${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}\n\n")
-            append(textContent)
-            append("\n")
-          }
-          val bytes = mdContent.toByteArray(Charsets.UTF_8)
-          if (prefs.isPaired) {
-            val res = SlnApiClient.uploadFile(
-              host = prefs.host,
-              port = prefs.port,
-              token = prefs.token,
-              filename = filename,
-              bytes = bytes,
-              addToShelf = false,
-            )
-            if (res.ok) {
-              DeviceHelper.hapticTick(context)
-              onDone("📁 已保存为电脑笔记：$filename")
-              return@launch
-            }
-          }
-          val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-          prefs.enqueueOffline(
-            OfflineItem(
-              kind = "upload",
-              filename = filename,
-              base64 = b64,
-              addToShelf = false,
-            ),
-          )
+      if (prefs.isPaired) {
+        progressLabel = "已存手机，正在同步到电脑…"
+        val syncOk = if (action == ShareTargetAction.PC_STICKY) {
+          SlnApiClient.sendQuickSticky(prefs.host, prefs.port, prefs.token, textContent, "yellow").ok
+        } else {
+          SlnApiClient.uploadFile(
+            host = prefs.host,
+            port = prefs.port,
+            token = prefs.token,
+            filename = savedNote.optString("name", "手机剪藏_$stamp.md"),
+            bytes = mdContent.toByteArray(Charsets.UTF_8),
+            addToShelf = false,
+            targetDir = "手机收集",
+          ).ok
+        }
+        if (syncOk) {
           DeviceHelper.hapticTick(context)
-          onDone("📥 当前离线，笔记文件已入队等待同步")
+          val msg = if (action == ShareTargetAction.PC_STICKY) {
+            "✅ 已存手机本地并弹为电脑闪念卡"
+          } else {
+            "✅ 已存手机本地并同步到电脑"
+          }
+          onDone(msg)
+          return@launch
         }
       }
+
+      DeviceHelper.hapticTick(context)
+      onDone("✅ 已保存到手机本地（电脑未连通，稍后可一键同步）")
     }
   }
 
@@ -340,11 +315,7 @@ private fun ShareReceiverSheet(
               fontWeight = FontWeight.Bold,
             )
             Text(
-              text = if (prefs.isPaired) {
-                "电脑：${prefs.hostName.ifBlank { prefs.host }}（断网自动入队）"
-              } else {
-                "未配对 · 将自动保存到本地离线同步队列"
-              },
+              text = "离线直存手机本地库（notes/手机收集/）",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -354,7 +325,6 @@ private fun ShareReceiverSheet(
           }
         }
 
-        // Content Preview Box
         Surface(
           shape = RoundedCornerShape(12.dp),
           color = MaterialTheme.colorScheme.surfaceContainer,
@@ -364,7 +334,7 @@ private fun ShareReceiverSheet(
             payload.text.isNotBlank() && payload.streamUri != null ->
               "${payload.text}\n（附带文件：${payload.streamUri.lastPathSegment ?: payload.mimeType}）"
             payload.text.isNotBlank() -> payload.text
-            else -> "待发送文件：${payload.streamUri?.lastPathSegment ?: payload.mimeType.ifBlank { "未知文件" }}"
+            else -> "待保存文件：${payload.streamUri?.lastPathSegment ?: payload.mimeType.ifBlank { "未知文件" }}"
           }
           Text(
             text = previewText,
@@ -390,33 +360,35 @@ private fun ShareReceiverSheet(
           }
         } else {
           Button(
-            onClick = { dispatch(ShareTargetAction.STICKY) },
+            onClick = { dispatch(ShareTargetAction.LOCAL_ONLY) },
             modifier = Modifier
               .fillMaxWidth()
               .height(48.dp),
             shape = RoundedCornerShape(12.dp),
           ) {
-            Text("📌 弹为电脑闪念卡", fontWeight = FontWeight.SemiBold)
+            Text("📁 存入手机本地笔记（离线秒存）", fontWeight = FontWeight.SemiBold)
           }
 
-          FilledTonalButton(
-            onClick = { dispatch(ShareTargetAction.SHELF) },
-            modifier = Modifier
-              .fillMaxWidth()
-              .height(48.dp),
-            shape = RoundedCornerShape(12.dp),
-          ) {
-            Text("📥 放进电脑灵动岛暂存", fontWeight = FontWeight.Medium)
-          }
+          if (prefs.isPaired) {
+            FilledTonalButton(
+              onClick = { dispatch(ShareTargetAction.LOCAL_AND_SYNC_PC) },
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+              shape = RoundedCornerShape(12.dp),
+            ) {
+              Text("🔄 存手机并同步到电脑（${prefs.hostName.ifBlank { prefs.host }}）", fontWeight = FontWeight.Medium)
+            }
 
-          OutlinedButton(
-            onClick = { dispatch(ShareTargetAction.NOTES_DIR) },
-            modifier = Modifier
-              .fillMaxWidth()
-              .height(46.dp),
-            shape = RoundedCornerShape(12.dp),
-          ) {
-            Text("📁 存入电脑笔记目录")
+            OutlinedButton(
+              onClick = { dispatch(ShareTargetAction.PC_STICKY) },
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp),
+              shape = RoundedCornerShape(12.dp),
+            ) {
+              Text("📌 存手机并弹为电脑闪念卡")
+            }
           }
         }
       }

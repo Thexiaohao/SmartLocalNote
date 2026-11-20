@@ -556,3 +556,68 @@ def get_sync_manifest() -> list[dict[str, Any]]:
 
     manifest.sort(key=lambda item: item["rel_path"].lower())
     return manifest
+
+
+def _resolve_notes_rel(rel_path: str) -> Path:
+    """Resolve a relative path safely inside default notes directory."""
+    clean = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+    if not clean or ".." in Path(clean).parts:
+        raise ValueError("非法的相对路径")
+    notes_root = get_default_notes_dir().resolve()
+    target = (notes_root / clean).resolve()
+    if notes_root not in target.parents and target != notes_root:
+        raise PermissionError("路径越界")
+    return target
+
+
+def sync_pull_file(rel_path: str) -> dict[str, Any]:
+    """Return base64-encoded content and metadata for a single note under default notes dir."""
+    target = _resolve_notes_rel(rel_path)
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError(f"文件不存在：{rel_path}")
+    raw = target.read_bytes()
+    st = target.stat()
+    return {
+        "rel_path": target.relative_to(get_default_notes_dir().resolve()).as_posix(),
+        "name": target.name,
+        "mtime": round(st.st_mtime, 3),
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "content_base64": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def sync_push_file(rel_path: str, content_base64: str, mtime: float = 0.0) -> dict[str, Any]:
+    """Write a synced file from Android atomically, creating a conflict copy if Windows is newer."""
+    target = _resolve_notes_rel(rel_path)
+    raw_b64 = str(content_base64 or "").strip()
+    try:
+        data = base64.b64decode(raw_b64, validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("无效的 Base64 内容") from exc
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    incoming_sha = hashlib.sha256(data).hexdigest()
+    conflict = False
+    final_target = target
+
+    if target.exists() and target.is_file():
+        existing_raw = target.read_bytes()
+        existing_sha = hashlib.sha256(existing_raw).hexdigest()
+        if existing_sha == incoming_sha:
+            return {"ok": True, "rel_path": rel_path, "skipped": True, "conflict": False}
+        local_mtime = target.stat().st_mtime
+        if mtime > 0 and local_mtime > mtime + 5.0:
+            conflict = True
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            final_target = target.with_name(f"{target.stem}_Android冲突副本_{ts}{target.suffix}")
+
+    safe_io.atomic_write_bytes(final_target, data, snapshot=False)
+    if mtime > 0 and not conflict:
+        try:
+            os.utime(final_target, (mtime, mtime))
+        except OSError:
+            pass
+    rel_out = final_target.resolve().relative_to(get_default_notes_dir().resolve()).as_posix()
+    _publish_mobile_event("mobile:upload", {"path": str(final_target), "name": final_target.name, "rel_dir": "", "add_to_shelf": False})
+    return {"ok": True, "rel_path": rel_out, "conflict": conflict, "sha256": incoming_sha}

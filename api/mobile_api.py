@@ -102,7 +102,26 @@ def mobile_upload(payload: UploadBody, request: Request) -> dict:
     return ok(res, message="文件已直传至本地笔记目录")
 
 
+class SyncPushBody(BaseModel):
+    rel_path: str
+    content_base64: str
+    mtime: float = 0.0
+    token: str = ""
+
+
 @router.get("/sync-manifest")
 def mobile_sync_manifest(request: Request) -> dict:
     _check_auth(request)
     return ok(mobile_bridge.get_sync_manifest())
+
+
+@router.get("/sync-pull")
+def mobile_sync_pull(rel_path: str, request: Request) -> dict:
+    _check_auth(request)
+    return ok(mobile_bridge.sync_pull_file(rel_path))
+
+
+@router.post("/sync-push")
+def mobile_sync_push(payload: SyncPushBody, request: Request) -> dict:
+    _check_auth(request, payload.token)
+    return ok(mobile_bridge.sync_push_file(payload.rel_path, payload.content_base64, payload.mtime))

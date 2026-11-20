@@ -1,0 +1,105 @@
+/* SmartLocalNote — Apple Sonoma/Sequoia & iOS Design Tokens
+ * Strict adherence to SPEC.md Section 8
+ * Zero external font imports; zero harsh borders or gaudy gradients.
+ */
+
+:root {
+  /* 画布与悬浮岛屿色阶（浅色 macOS Sonoma/Sequoia 风格） */
+  --bg-canvas: #F5F5F7;
+  --bg-island: #FFFFFF;
+  --bg-glass: rgba(255, 255, 255, 0.72);
+  --bg-glass-strong: rgba(255, 255, 255, 0.86);
+  --bg-subtle: rgba(118, 118, 128, 0.09);
+  --bg-hover: rgba(118, 118, 128, 0.14);
+
+  /* 文字色阶 */
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #8E8E93;
+
+  /* 苹果克制强调色 */
+  --accent: #007AFF;
+  --accent-soft: rgba(0, 122, 255, 0.12);
+  --success: #34C759;
+  --warning: #FF9500;
+  --danger: #FF3B30;
+
+  /* 语义状态柔光底色 */
+  --success-soft: rgba(52, 199, 89, 0.14);
+  --warning-soft: rgba(255, 149, 0, 0.14);
+  --danger-soft: rgba(255, 59, 48, 0.12);
+
+  /* 细微高光描边与漫反射阴影 */
+  --border-hairline: rgba(0, 0, 0, 0.07);
+  --border-glass-edge: rgba(255, 255, 255, 0.65);
+  --shadow-island: 0 8px 30px rgba(0, 0, 0, 0.045), 0 1px 2px rgba(0, 0, 0, 0.03);
+  --shadow-float: 0 16px 48px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.04);
+
+  /* 椭圆与超椭圆几何层级 */
+  --radius-pill: 9999px;      /* 导航分段器、动作按钮、软件标签、搜索框、灵动岛 */
+  --radius-island: 22px;      /* 三栏悬浮主卡片、弹窗、Bottom Sheet */
+  --radius-card: 16px;        /* 内部信息卡片、气泡、待办项 */
+  --radius-control: 12px;     /* 输入框、下拉项、表格单元格高亮 */
+
+  /* 毛玻璃滤镜 */
+  --blur-glass: blur(20px) saturate(180%);
+
+  /* 系统原生字体栈（零外部字体加载） */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-serif: "Songti SC", "STSong", "Noto Serif SC", Georgia, Cambria, serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+
+  /* 文档字体动态令牌 */
+  --doc-font-size: 15px;
+  --doc-font-family: var(--font-sans);
+
+  /* 物理阻尼动效曲线（严禁动画化 width/height/top/left，只动 transform/opacity） */
+  --ease-apple: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast: 160ms;
+  --dur-normal: 280ms;
+  --dur-slow: 420ms;
+
+  /* 布局与安全区尺度令牌 */
+  --gap-island: 12px;
+  --left-w: 260px;
+  --right-w: 360px;
+  --topbar-h: 52px;
+  --mobile-nav-h: 64px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  /* 层级令牌 */
+  --z-topbar: 20;
+  --z-drawer: 40;
+  --z-mobile-nav: 45;
+  --z-overlay: 60;
+  --z-toast: 80;
+}
+
+[data-theme="dark"] {
+  --bg-canvas: #0D0D0F;
+  --bg-island: #1C1C1E;
+  --bg-glass: rgba(28, 28, 30, 0.76);
+  --bg-glass-strong: rgba(38, 38, 42, 0.88);
+  --bg-subtle: rgba(255, 255, 255, 0.08);
+  --bg-hover: rgba(255, 255, 255, 0.13);
+
+  --text-primary: #F5F5F7;
+  --text-secondary: #A1A1A6;
+  --text-tertiary: #636366;
+
+  --accent: #0A84FF;
+  --accent-soft: rgba(10, 132, 255, 0.18);
+  --success: #30D158;
+  --warning: #FF9F0A;
+  --danger: #FF453A;
+
+  --success-soft: rgba(48, 209, 88, 0.18);
+  --warning-soft: rgba(255, 159, 10, 0.18);
+  --danger-soft: rgba(255, 69, 58, 0.18);
+
+  --border-hairline: rgba(255, 255, 255, 0.09);
+  --border-glass-edge: rgba(255, 255, 255, 0.14);
+  --shadow-island: 0 10px 32px rgba(0, 0, 0, 0.38);
+  --shadow-float: 0 20px 56px rgba(0, 0, 0, 0.55);
+}

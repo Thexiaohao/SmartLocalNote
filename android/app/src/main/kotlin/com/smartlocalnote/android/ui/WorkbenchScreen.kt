@@ -7,7 +7,6 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -33,13 +32,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -62,6 +59,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.smartlocalnote.android.data.AppPrefs
+import com.smartlocalnote.android.local.LocalSlnServer
 import com.smartlocalnote.android.util.DeviceHelper
 import org.json.JSONObject
 
@@ -69,6 +67,7 @@ import org.json.JSONObject
 @Composable
 fun WorkbenchScreen(
   prefs: AppPrefs,
+  localServer: LocalSlnServer,
   initialAction: String? = null,
   onOpenQuickCapture: () -> Unit,
   onOpenConnectSettings: () -> Unit,
@@ -86,10 +85,9 @@ fun WorkbenchScreen(
   var loadProgress by remember { mutableIntStateOf(0) }
   var errorMessage by remember { mutableStateOf<String?>(null) }
   var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
-  var pendingOfflineCount by remember { mutableIntStateOf(prefs.pendingOfflineCount()) }
 
-  val targetUrl = remember(prefs.host, prefs.port, prefs.token, initialAction) {
-    buildWorkbenchUrl(prefs, initialAction)
+  val targetUrl = remember(localServer.port, initialAction) {
+    buildLocalWorkbenchUrl(localServer.port, initialAction)
   }
 
   val fileChooserLauncher = rememberLauncherForActivityResult(
@@ -123,20 +121,13 @@ fun WorkbenchScreen(
   fun reloadWorkbench() {
     errorMessage = null
     isLoading = true
-    pendingOfflineCount = prefs.pendingOfflineCount()
+    localServer.start()
     val wv = webViewRef ?: return
-    syncTokenCookie(prefs)
-    val headers = if (prefs.token.isNotBlank()) {
-      mapOf("X-SLN-Token" to prefs.token)
-    } else {
-      emptyMap()
-    }
-    wv.loadUrl(targetUrl, headers)
+    wv.loadUrl(buildLocalWorkbenchUrl(localServer.port, initialAction))
   }
 
   // Reload if initialAction changes (e.g., tapped "open_todos" widget while already open)
   LaunchedEffect(targetUrl) {
-    pendingOfflineCount = prefs.pendingOfflineCount()
     val wv = webViewRef
     if (wv != null && wv.url != targetUrl && errorMessage == null) {
       reloadWorkbench()
@@ -145,7 +136,7 @@ fun WorkbenchScreen(
 
   BackHandler(enabled = true) {
     if (errorMessage != null) {
-      latestConnectSettings()
+      reloadWorkbench()
       return@BackHandler
     }
     val wv = webViewRef
@@ -200,15 +191,10 @@ fun WorkbenchScreen(
           settings.displayZoomControls = false
           settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
           settings.cacheMode = WebSettings.LOAD_DEFAULT
-          settings.userAgentString = "${settings.userAgentString} SmartLocalNoteAndroid/7.5.0"
+          settings.userAgentString = "${settings.userAgentString} SmartLocalNoteAndroid/7.5.0 Standalone"
 
           isVerticalScrollBarEnabled = false
           isHorizontalScrollBarEnabled = false
-
-          val cookieManager = CookieManager.getInstance()
-          cookieManager.setAcceptCookie(true)
-          cookieManager.setAcceptThirdPartyCookies(this, true)
-          syncTokenCookie(prefs)
 
           val bridge = object {
             @JavascriptInterface
@@ -217,10 +203,12 @@ fun WorkbenchScreen(
             @JavascriptInterface
             fun getHostInfo(): String {
               return JSONObject().apply {
+                put("standalone", true)
+                put("localPort", localServer.port)
                 put("host", prefs.host)
                 put("port", prefs.port)
                 put("hostName", prefs.hostName.ifBlank { prefs.host })
-                put("baseUrl", prefs.baseUrl())
+                put("isPaired", prefs.isPaired)
                 put("appVersion", "7.5.0")
                 put("pendingOfflineCount", prefs.pendingOfflineCount())
               }.toString()
@@ -271,6 +259,8 @@ fun WorkbenchScreen(
             override fun onPageFinished(view: WebView?, url: String?) {
               if (url != "about:blank") {
                 isLoading = false
+                // Redirect top-bar 📱 button to native Windows Sync Center without modifying static JS
+                view?.evaluateJavascript(INJECT_SYNC_BUTTON_HOOK_JS, null)
               }
             }
 
@@ -299,8 +289,7 @@ fun WorkbenchScreen(
               val code = error?.errorCode ?: 0
               val desc = error?.description?.toString().orEmpty()
               isLoading = false
-              pendingOfflineCount = prefs.pendingOfflineCount()
-              errorMessage = mapWebViewError(code, desc)
+              errorMessage = "本地工作台微引擎加载异常（$code $desc）"
               view?.loadUrl("about:blank")
             }
 
@@ -313,8 +302,7 @@ fun WorkbenchScreen(
               val status = errorResponse?.statusCode ?: 0
               if (status >= 500) {
                 isLoading = false
-                pendingOfflineCount = prefs.pendingOfflineCount()
-                errorMessage = "桌面端服务返回错误（HTTP $status）"
+                errorMessage = "本地微引擎返回错误（HTTP $status）"
                 view?.loadUrl("about:blank")
               }
             }
@@ -352,12 +340,7 @@ fun WorkbenchScreen(
           }
 
           webViewRef = this
-          val headers = if (prefs.token.isNotBlank()) {
-            mapOf("X-SLN-Token" to prefs.token)
-          } else {
-            emptyMap()
-          }
-          loadUrl(targetUrl, headers)
+          loadUrl(targetUrl)
         }
       },
     )
@@ -375,7 +358,7 @@ fun WorkbenchScreen(
       )
     }
 
-    // Native offline / connection-error recovery overlay
+    // Local recovery overlay (rarely shown since engine is 127.0.0.1 in-process)
     if (errorMessage != null) {
       Surface(
         modifier = Modifier.fillMaxSize(),
@@ -400,12 +383,9 @@ fun WorkbenchScreen(
               horizontalAlignment = Alignment.CenterHorizontally,
               verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+              Text(text = "🛠️", style = MaterialTheme.typography.displaySmall)
               Text(
-                text = "📡",
-                style = MaterialTheme.typography.displaySmall,
-              )
-              Text(
-                text = "暂时无法连接到电脑工作台",
+                text = "本地工作台需要重新加载",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center,
@@ -416,20 +396,7 @@ fun WorkbenchScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
               )
-              Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-              ) {
-                Text(
-                  text = "${prefs.hostName.ifBlank { "电脑" }} · ${prefs.baseUrl()}",
-                  style = MaterialTheme.typography.labelMedium,
-                  color = MaterialTheme.colorScheme.onSurfaceVariant,
-                  modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                )
-              }
-
               Spacer(Modifier.height(4.dp))
-
               Button(
                 onClick = {
                   DeviceHelper.hapticTick(context)
@@ -440,29 +407,14 @@ fun WorkbenchScreen(
                   .height(48.dp),
                 shape = RoundedCornerShape(12.dp),
               ) {
-                Text("🔄 重新连接电脑", fontWeight = FontWeight.SemiBold)
+                Text("🔄 重启本地引擎并加载", fontWeight = FontWeight.SemiBold)
               }
-
-              FilledTonalButton(
-                onClick = {
-                  DeviceHelper.hapticTick(context)
-                  onOpenQuickCapture()
-                },
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-              ) {
-                val suffix = if (pendingOfflineCount > 0) "（$pendingOfflineCount 条待同步）" else ""
-                Text("⚡ 离线速记（断网可用）$suffix", fontWeight = FontWeight.Medium)
-              }
-
               OutlinedButton(
                 onClick = { onOpenConnectSettings() },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
               ) {
-                Text("⚙️ 切换电脑 / 重新配对")
+                Text("🔄 打开 Windows 双向同步中心")
               }
             }
           }
@@ -472,41 +424,30 @@ fun WorkbenchScreen(
   }
 }
 
-private fun buildWorkbenchUrl(prefs: AppPrefs, initialAction: String?): String {
-  val base = prefs.baseUrl().trimEnd('/')
+private fun buildLocalWorkbenchUrl(port: Int, initialAction: String?): String {
   val params = mutableListOf("mobile=1")
-  if (prefs.token.isNotBlank()) {
-    params.add("token=${Uri.encode(prefs.token)}")
-  }
   if (!initialAction.isNullOrBlank()) {
     params.add("action=${Uri.encode(initialAction)}")
   }
-  return "$base/?${params.joinToString("&")}"
+  return "http://127.0.0.1:$port/?${params.joinToString("&")}"
 }
 
-private fun syncTokenCookie(prefs: AppPrefs) {
-  try {
-    if (prefs.host.isNotBlank() && prefs.token.isNotBlank()) {
-      val cm = CookieManager.getInstance()
-      cm.setCookie(prefs.baseUrl(), "sln_token=${prefs.token}; path=/")
-      cm.flush()
-    }
-  } catch (_: Exception) {
+private const val INJECT_SYNC_BUTTON_HOOK_JS = """
+(function() {
+  function hookBtn() {
+    var btn = document.getElementById('btn-mobile-connect');
+    if (!btn || btn.dataset.androidSyncHooked === '1') return;
+    btn.dataset.androidSyncHooked = '1';
+    btn.title = '与 Windows 电脑双向同步';
+    btn.addEventListener('click', function(e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (window.SmartLocalNoteAndroid && typeof window.SmartLocalNoteAndroid.openConnectSettings === 'function') {
+        window.SmartLocalNoteAndroid.openConnectSettings();
+      }
+    }, true);
   }
-}
-
-private fun mapWebViewError(code: Int, desc: String): String {
-  return when {
-    desc.contains("ERR_CONNECTION_REFUSED", ignoreCase = true) ->
-      "电脑端 SmartLocalNote 似乎未启动，请先在电脑打开桌面程序"
-    desc.contains("ERR_CONNECTION_TIMED_OUT", ignoreCase = true) ||
-      desc.contains("ERR_TIMED_OUT", ignoreCase = true) ->
-      "连接超时，请确认手机与电脑处于同一 Wi-Fi 或已连接 Tailscale"
-    desc.contains("ERR_INTERNET_DISCONNECTED", ignoreCase = true) ||
-      desc.contains("ERR_ADDRESS_UNREACHABLE", ignoreCase = true) ||
-      desc.contains("ERR_NETWORK_CHANGED", ignoreCase = true) ->
-      "当前处于离线或局域网不可达状态，可以先使用离线速记，联网后自动同步"
-    desc.isNotBlank() -> "连接中断（$desc）"
-    else -> "网络请求失败（错误码 $code）"
-  }
-}
+  hookBtn();
+  setTimeout(hookBtn, 600);
+})();
+"""

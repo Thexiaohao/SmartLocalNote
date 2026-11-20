@@ -18,6 +18,7 @@ import androidx.lifecycle.lifecycleScope
 import com.smartlocalnote.android.data.AppPrefs
 import com.smartlocalnote.android.data.OfflineItem
 import com.smartlocalnote.android.data.ParsedPairLink
+import com.smartlocalnote.android.local.LocalSlnServer
 import com.smartlocalnote.android.network.SlnApiClient
 import com.smartlocalnote.android.ui.ConnectScreen
 import com.smartlocalnote.android.ui.QuickCaptureScreen
@@ -34,13 +35,15 @@ sealed interface AppRoute {
 
 class MainActivity : ComponentActivity() {
   private lateinit var prefs: AppPrefs
-  private var currentRoute by mutableStateOf<AppRoute>(AppRoute.Connect)
+  private lateinit var localServer: LocalSlnServer
+  private var currentRoute by mutableStateOf<AppRoute>(AppRoute.Workbench())
   private var prefilledPairLink by mutableStateOf<ParsedPairLink?>(null)
   private var pendingClipboardPush = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     prefs = AppPrefs(this)
+    localServer = LocalSlnServer.ensureStarted(this)
     enableEdgeToEdge()
 
     handleIncomingIntent(intent, isInitialLaunch = true)
@@ -68,8 +71,9 @@ class MainActivity : ComponentActivity() {
           when (val route = currentRoute) {
             AppRoute.Connect -> ConnectScreen(
               prefs = prefs,
+              localServer = localServer,
               prefilledLink = prefilledPairLink,
-              onConnected = {
+              onBackToWorkbench = {
                 prefilledPairLink = null
                 currentRoute = AppRoute.Workbench()
               },
@@ -80,6 +84,7 @@ class MainActivity : ComponentActivity() {
 
             is AppRoute.Workbench -> WorkbenchScreen(
               prefs = prefs,
+              localServer = localServer,
               initialAction = route.initialAction,
               onOpenQuickCapture = {
                 currentRoute = AppRoute.QuickCapture
@@ -95,7 +100,7 @@ class MainActivity : ComponentActivity() {
             AppRoute.QuickCapture -> QuickCaptureScreen(
               prefs = prefs,
               onBack = {
-                currentRoute = if (prefs.isPaired) AppRoute.Workbench() else AppRoute.Connect
+                currentRoute = AppRoute.Workbench()
               },
               onOpenConnectSettings = {
                 currentRoute = AppRoute.Connect
@@ -122,7 +127,7 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun handleIncomingIntent(intent: Intent?, isInitialLaunch: Boolean) {
-    // 1. Check sln://pair DeepLink
+    // 1. Check sln://pair DeepLink -> open Windows Sync Center prefilled
     val dataUri = intent?.data
     if (dataUri != null && dataUri.scheme.equals("sln", ignoreCase = true)) {
       val parsed = AppPrefs.parsePairingUri(dataUri.toString())
@@ -142,22 +147,18 @@ class MainActivity : ComponentActivity() {
       }
       ACTION_PUSH_CLIPBOARD -> {
         pendingClipboardPush = true
-        currentRoute = if (prefs.isPaired) AppRoute.Workbench() else AppRoute.QuickCapture
+        currentRoute = AppRoute.Workbench()
         return
       }
       ACTION_OPEN_TODOS -> {
-        currentRoute = if (prefs.isPaired) {
-          AppRoute.Workbench(initialAction = ACTION_OPEN_TODOS)
-        } else {
-          AppRoute.Connect
-        }
+        currentRoute = AppRoute.Workbench(initialAction = ACTION_OPEN_TODOS)
         return
       }
     }
 
-    // 3. Default startup route
+    // 3. Default startup route: always open full offline local Workbench immediately
     if (isInitialLaunch) {
-      currentRoute = if (prefs.isPaired) AppRoute.Workbench() else AppRoute.Connect
+      currentRoute = AppRoute.Workbench()
     }
   }
 

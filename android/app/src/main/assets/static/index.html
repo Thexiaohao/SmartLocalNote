@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#F5F5F7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="LocalNote">
+  <title>SmartLocalNote</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23007AFF'/%3E%3Crect x='15' y='13' width='34' height='38' rx='6' fill='%23FFFFFF'/%3E%3Cpath d='M22 24h20M22 32h20M22 40h12' stroke='%23007AFF' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/tokens.css?v=7.4">
+  <link rel="stylesheet" href="/static/css/app.css?v=7.4">
+  <script src="/static/vendor/marked.min.js?v=7.4" defer></script>
+  <script type="module" src="/static/js/app.js?v=7.5"></script>
+  <script>
+    window.addEventListener('DOMContentLoaded', function () {
+      setTimeout(function () {
+        if (!window.__SLN_BOOTED__) {
+          var body = document.querySelector('#left-panel .panel-body');
+          if (body) {
+            body.innerHTML = '<div class="empty-state"><p class="empty-title">前端脚本未启动</p><p class="empty-desc">请点击刷新或用浏览器打开本页排查控制台日志。</p><button class="pill-btn pill-btn-primary pill-btn-sm" onclick="location.reload()">重新加载</button></div>';
+          }
+        }
+      }, 3500);
+    });
+  </script>
+</head>
+<body>
+  <div id="app-shell"
+       class="app-shell"
+       data-mobile-tab="doc"
+       data-left-collapsed="false"
+       data-right-collapsed="false">
+
+    <!-- 顶部栏：左右折叠控制 + 居中多态灵动岛 + 快捷工具 -->
+    <header id="top-bar" class="top-bar">
+      <div class="top-bar-left">
+        <button id="btn-toggle-left" class="icon-pill desktop-only" type="button" title="折叠/展开左侧目录" aria-label="切换左侧栏">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="4"/>
+            <line x1="9" y1="3" x2="9" y2="21"/>
+          </svg>
+        </button>
+        <button id="btn-tablet-drawer" class="icon-pill tablet-only" type="button" title="打开目录抽屉" aria-label="打开目录抽屉">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="4" y1="7" x2="20" y2="7"/>
+            <line x1="4" y1="12" x2="20" y2="12"/>
+            <line x1="4" y1="17" x2="14" y2="17"/>
+          </svg>
+        </button>
+        <div class="brand-badge">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <span class="brand-title">SmartLocalNote</span>
+        </div>
+        <button id="btn-center-home" class="pill-btn pill-btn-ghost pill-btn-sm center-home-btn" type="button" title="切换文件资源管理器与全局待办主面板" aria-label="主面板" aria-pressed="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+          <span>主面板</span>
+        </button>
+      </div>
+
+      <!-- 居中多态灵动岛 -->
+      <div id="dynamic-island" class="dynamic-island" data-mode="idle" role="status" aria-live="polite">
+        <div class="island-idle-view">
+          <span class="island-status-dot" aria-hidden="true"></span>
+          <span class="island-label">本地工作台就绪</span>
+        </div>
+      </div>
+
+      <div class="top-bar-right">
+        <button id="btn-spotlight" class="pill-btn pill-btn-ghost pill-btn-sm spotlight-trigger" type="button" title="全局搜索 (Ctrl+K)" aria-label="Spotlight 搜索">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/>
+            <line x1="20" y1="20" x2="16.2" y2="16.2"/>
+          </svg>
+          <span class="hide-sm">搜索</span>
+          <kbd class="kbd-hint hide-sm">⌘K</kbd>
+        </button>
+        <button id="btn-voice-quick" class="icon-pill" type="button" title="语音速记" aria-label="语音速记">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </button>
+        <button id="btn-theme" class="icon-pill" type="button" title="切换浅色/深色模式" aria-label="切换主题">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          </svg>
+        </button>
+        <button id="btn-zen-mode" type="button" class="icon-pill" title="极简专注禅模式 (Ctrl+\)" aria-label="极简专注禅模式">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 3 21 3 21 9"/>
+            <polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+        </button>
+        <button id="btn-mobile-connect" class="icon-pill" type="button" title="连接 Android 手机（局域网直连 / 扫码配对）" aria-label="连接 Android 手机">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="6" y="2" width="12" height="20" rx="2.5"/>
+            <line x1="11" y1="18" x2="13" y2="18"/>
+          </svg>
+        </button>
+        <button id="btn-settings" class="icon-pill" type="button" title="系统与 AI 设置" aria-label="系统设置">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+          </svg>
+        </button>
+        <button id="btn-toggle-right" class="icon-pill desktop-or-tablet" type="button" title="折叠/展开右侧 AI 副驾驶" aria-label="切换右侧栏">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="4"/>
+            <line x1="15" y1="3" x2="15" y2="21"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 灵动岛下拉暂存栏 (V7.1 NotchDrop 视觉风格) -->
+    <div id="island-shelf-drawer" class="island-shelf-drawer" data-drop-zone="drag-shelf" aria-label="灵动岛暂存栏" hidden>
+      <header class="island-shelf-header">
+        <div class="island-shelf-title-wrap">
+          <span>📥 灵动岛暂存栏</span>
+          <span class="island-shelf-count">0</span>
+        </div>
+        <div class="island-shelf-header-actions">
+          <button type="button" class="pill-btn pill-btn-sm island-shelf-pin-btn" data-shelf-action="toggle-pin" title="固定展开（切换文件时不自动收起）" aria-pressed="false">固定</button>
+          <button type="button" class="pill-btn pill-btn-sm island-shelf-close-btn" data-shelf-action="collapse" title="收起暂存栏" aria-label="收起暂存栏">收起 ×</button>
+        </div>
+      </header>
+      <div class="island-shelf-list" role="list"></div>
+      <footer class="island-shelf-footer">
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-shelf-action="insert-all">⬇ 全部拼入当前笔记</button>
+        <button type="button" class="pill-btn pill-btn-sm" data-shelf-action="clear-all">清空</button>
+      </footer>
+    </div>
+
+    <!-- 三栏悬浮岛屿主体 -->
+    <div id="main-grid" class="main-grid">
+      <div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true"></div>
+
+      <!-- 左侧栏：文件目录、联合问答勾选、软件直达、桌面现场捕获 -->
+      <aside id="left-panel" class="island-panel left-panel" aria-label="本地文件与软件工作区">
+        <div class="panel-header">
+          <span class="panel-title">资料与工作区</span>
+        </div>
+        <div class="panel-body">
+          <div class="empty-state">
+            <p class="empty-title">正在初始化工作区…</p>
+          </div>
+        </div>
+      </aside>
+
+      <div id="resizer-left" class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整左侧栏宽度" title="拖动调整宽度，双击恢复默认"></div>
+
+      <!-- 中间栏：MD/TXT 编辑预览、Excel 分页表、PDF + 伴生笔记 -->
+      <main id="center-panel" class="island-panel center-panel" aria-label="文档预览与原位编辑">
+        <div class="panel-header">
+          <span class="panel-title">文档工作区</span>
+        </div>
+        <div class="panel-body">
+          <div class="empty-state">
+            <p class="empty-title">选择或导入本地文档</p>
+            <p class="empty-desc">支持 Markdown、纯文本、Excel 表格与 PDF 原位预览与编辑</p>
+          </div>
+        </div>
+      </main>
+
+      <div id="resizer-right" class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整右侧栏宽度" title="拖动调整宽度，双击恢复默认"></div>
+
+      <!-- 右侧栏：AI 总结 / 跨格式联网问答 / 工具台 -->
+      <aside id="right-panel" class="island-panel right-panel" aria-label="AI 副驾驶与本地工具台">
+        <div class="panel-header">
+          <span class="panel-title">AI 副驾驶</span>
+        </div>
+        <div class="panel-body">
+          <div class="empty-state">
+            <p class="empty-title">AI 副驾驶已就绪</p>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 移动端底部悬浮全椭圆毛玻璃 4 项拇指导航栏 -->
+    <nav id="mobile-nav" class="mobile-bottom-nav" aria-label="移动端视图切换">
+      <div class="mobile-nav-pills">
+        <button class="mobile-nav-item" type="button" data-tab="files" aria-label="笔记目录">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>
+          </svg>
+          <span>笔记</span>
+        </button>
+        <button class="mobile-nav-item is-active" type="button" data-tab="doc" aria-label="文档编辑">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <span>编辑</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-tab="todos" aria-label="全局待办">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="4"/>
+            <path d="m8.5 12.2 2.4 2.4 4.8-5.2"/>
+          </svg>
+          <span>待办</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-tab="ai" aria-label="AI 与工具">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3Z"/>
+          </svg>
+          <span>AI/工具</span>
+        </button>
+      </div>
+      <button id="btn-mobile-quick-add" class="mobile-quick-add" type="button" title="快捷创建（闪念 / 笔记 / 拍照上传）" aria-label="快捷创建">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Spotlight 全局搜索胶囊面板 (Ctrl+K) -->
+  <div id="spotlight-overlay" class="overlay-backdrop spotlight-overlay" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-label="Spotlight 全局搜索">
+    <div class="spotlight-card">
+      <div class="spotlight-input-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="20" y1="20" x2="16.2" y2="16.2"/>
+        </svg>
+        <input id="spotlight-input" class="spotlight-input" type="search" placeholder="搜索笔记、本地文件或启动应用…" autocomplete="off" spellcheck="false">
+        <kbd class="kbd-hint">ESC</kbd>
+      </div>
+      <div id="spotlight-results" class="spotlight-results"></div>
+    </div>
+  </div>
+
+  <!-- 通用弹窗 / 移动端 Bottom Sheet 容器 -->
+  <div id="sheet-overlay" class="overlay-backdrop sheet-overlay" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-card" role="document">
+      <div class="sheet-grabber" aria-hidden="true"></div>
+      <div id="sheet-header" class="sheet-header">
+        <h2 id="sheet-title" class="sheet-title"></h2>
+        <button id="sheet-close" class="icon-pill" type="button" aria-label="关闭弹窗">✕</button>
+      </div>
+      <div id="sheet-body" class="sheet-body"></div>
+      <div id="sheet-footer" class="sheet-footer"></div>
+    </div>
+  </div>
+
+  <!-- 右下角 Sonner 风格堆叠 Toast 容器 -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- 底部居中悬浮便携垃圾桶（双落区：内置回收站 vs Windows 系统回收站） -->
+  <div id="portable-trash-dock" class="portable-trash-dock" role="region" aria-label="便携回收站拖放区" hidden>
+    <div class="portable-trash-split">
+      <div class="portable-trash-zone is-app-trash" data-drop-zone="app-trash" title="软件托管 · 可随时在内置回收站还原">
+        <span class="portable-trash-zone-title">📦 放进内置回收站</span>
+        <span class="portable-trash-zone-sub">软件托管 · 可随时还原</span>
+      </div>
+      <div class="portable-trash-zone is-system-trash" data-drop-zone="system-trash" title="交由 Windows 系统回收站 · 软件不管">
+        <span class="portable-trash-zone-title">🖥 扔进系统回收站</span>
+        <span class="portable-trash-zone-sub">交由 Windows · 软件不管</span>
+      </div>
+      <button type="button" class="pill-btn pill-btn-sm portable-trash-view-btn" data-trash-dock-action="open-trash" title="打开内置回收站独立浮窗">查看</button>
+    </div>
+  </div>
+
+  <!-- C1 共享模块浮窗宿主层 -->
+  <div id="floating-modules-layer" class="floating-modules-layer" aria-label="浮动模块窗口层"></div>
+
+  <!-- 独立浮窗：📌 闪念控制中心 -->
+  <section id="floating-stickies-win" class="floating-module-window island-standalone-float" data-floating-win="stickies" role="dialog" aria-label="闪念控制独立浮窗" hidden>
+    <header class="floating-module-header" data-float-drag-handle="1">
+      <span class="floating-module-title">📌 闪念控制</span>
+      <button type="button" class="icon-pill floating-win-close-btn" data-float-win-close="stickies" title="关闭浮窗" aria-label="关闭闪念控制">✕</button>
+    </header>
+    <div class="floating-module-body island-float-body">
+      <div id="island-stickies-panel" class="island-stickies-panel"></div>
+    </div>
+    <div class="float-resize-handle float-resize-n" data-resize-dir="n" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-s" data-resize-dir="s" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-e" data-resize-dir="e" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-w" data-resize-dir="w" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-ne" data-resize-dir="ne" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-nw" data-resize-dir="nw" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-se" data-resize-dir="se" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-sw" data-resize-dir="sw" aria-hidden="true"></div>
+  </section>
+
+  <!-- 独立浮窗：📦 软件内置回收站 -->
+  <section id="floating-trash-win" class="floating-module-window island-standalone-float" data-floating-win="trash" role="dialog" aria-label="内置回收站独立浮窗" hidden>
+    <header class="floating-module-header" data-float-drag-handle="1">
+      <span class="floating-module-title">📦 内置回收站</span>
+      <button type="button" class="icon-pill floating-win-close-btn" data-float-win-close="trash" title="关闭浮窗" aria-label="关闭内置回收站">✕</button>
+    </header>
+    <div class="floating-module-body island-float-body">
+      <div id="island-trash-panel" class="island-trash-panel"></div>
+    </div>
+    <div class="float-resize-handle float-resize-n" data-resize-dir="n" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-s" data-resize-dir="s" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-e" data-resize-dir="e" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-w" data-resize-dir="w" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-ne" data-resize-dir="ne" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-nw" data-resize-dir="nw" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-se" data-resize-dir="se" aria-hidden="true"></div>
+    <div class="float-resize-handle float-resize-sw" data-resize-dir="sw" aria-hidden="true"></div>
+  </section>
+
+  <!-- #9 轻量专注时长选择气泡 -->
+  <div id="focus-duration-popover" class="focus-duration-popover" role="dialog" aria-label="选择专注时长" hidden></div>
+
+  <!-- #1 折叠式模块尺寸弹出微菜单 -->
+  <div id="module-size-popover" class="module-size-popover" role="menu" aria-label="模块尺寸预设" hidden></div>
+
+  <!-- 全局右键上下文菜单 -->
+  <div id="context-menu" class="context-menu" role="menu" aria-hidden="true" hidden></div>
+
+  <!-- 胶囊右键上下文菜单 -->
+  <div id="capsule-context-menu" class="context-menu capsule-context-menu" hidden></div>
+
+  <!-- 便签贴边预览框 -->
+  <div id="sticky-snap-preview" class="sticky-snap-preview" hidden></div>
+
+  <!-- 斜杠命令菜单 (/) -->
+  <div id="slash-command-menu" class="slash-command-menu" role="listbox" hidden></div>
+
+  <!-- 链接悬停速览卡 -->
+  <div id="hover-peek-card" class="hover-peek-card" hidden></div>
+
+  <!-- 模块级右键菜单 -->
+  <div id="module-context-menu" class="context-menu module-context-menu" role="menu" hidden></div>
+</body>
+</html>
