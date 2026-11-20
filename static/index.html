@@ -10,10 +10,10 @@
   <title>SmartLocalNote</title>
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23007AFF'/%3E%3Crect x='15' y='13' width='34' height='38' rx='6' fill='%23FFFFFF'/%3E%3Cpath d='M22 24h20M22 32h20M22 40h12' stroke='%23007AFF' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/css/tokens.css?v=7.3">
-  <link rel="stylesheet" href="/static/css/app.css?v=7.3">
-  <script src="/static/vendor/marked.min.js?v=7.3" defer></script>
-  <script type="module" src="/static/js/app.js?v=7.3"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css?v=7.4">
+  <link rel="stylesheet" href="/static/css/app.css?v=7.4">
+  <script src="/static/vendor/marked.min.js?v=7.4" defer></script>
+  <script type="module" src="/static/js/app.js?v=7.4"></script>
   <script>
     window.addEventListener('DOMContentLoaded', function () {
       setTimeout(function () {
@@ -116,21 +116,21 @@
       </div>
     </header>
 
-    <!-- 灵动岛轻量单面板暂存小浮层 (点击 📥 触发，宽度 360px) -->
-    <div id="island-shelf-drawer" class="island-shelf-drawer" data-drop-zone="drag-shelf" aria-label="灵动岛暂存舱" hidden>
+    <!-- 灵动岛下拉暂存栏 (V7.1 NotchDrop 视觉风格) -->
+    <div id="island-shelf-drawer" class="island-shelf-drawer" data-drop-zone="drag-shelf" aria-label="灵动岛暂存栏" hidden>
       <header class="island-shelf-header">
         <div class="island-shelf-title-wrap">
-          <span>📥 暂存舱</span>
+          <span>📥 灵动岛暂存栏</span>
           <span class="island-shelf-count">0</span>
         </div>
         <div class="island-shelf-header-actions">
           <button type="button" class="pill-btn pill-btn-sm island-shelf-pin-btn" data-shelf-action="toggle-pin" title="固定展开（切换文件时不自动收起）" aria-pressed="false">固定</button>
-          <button type="button" class="pill-btn pill-btn-sm island-shelf-close-btn" data-shelf-action="collapse" title="收起暂存舱" aria-label="收起暂存舱">✕</button>
+          <button type="button" class="pill-btn pill-btn-sm island-shelf-close-btn" data-shelf-action="collapse" title="收起暂存栏" aria-label="收起暂存栏">收起 ×</button>
         </div>
       </header>
       <div class="island-shelf-list" role="list"></div>
       <footer class="island-shelf-footer">
-        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-shelf-action="insert-all">⬇ 全部拼入笔记</button>
+        <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-shelf-action="insert-all">⬇ 全部拼入当前笔记</button>
         <button type="button" class="pill-btn pill-btn-sm" data-shelf-action="clear-all">清空</button>
       </footer>
     </div>

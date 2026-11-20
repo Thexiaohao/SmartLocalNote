@@ -5581,11 +5581,7 @@ body.is-zen-mode #btn-zen-mode {
   color: #FFE4B5;
 }
 
-/* Expanded Hub Drawer Sizing & 3-Segment Tabs */
-.island-shelf-drawer {
-  width: min(520px, 94vw);
-  max-height: 60vh;
-}
+/* V7.1 NotchDrop drawer sizing preserved at .island-shelf-drawer (460px / 52vh) */
 
 .island-drawer-tabs {
   display: grid;
@@ -7556,20 +7552,7 @@ body.is-global-dragging #sticky-dock-pill {
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.32), 0 6px 16px rgba(245, 158, 11, 0.28);
 }
 
-#island-shelf-drawer,
-.island-shelf-drawer {
-  width: min(370px, 92vw);
-  max-height: 340px;
-  padding: 10px 12px;
-  border-radius: 18px;
-}
-
-#island-shelf-drawer .island-shelf-list,
-.island-shelf-drawer .island-shelf-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
+/* V7.1 NotchDrop #island-shelf-drawer dimensions preserved (see section 11) */
 
 #floating-stickies-win,
 #floating-trash-win {

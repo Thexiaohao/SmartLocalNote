@@ -1740,6 +1740,12 @@ export function initRightPanel(containerEl) {
     if (state.summaryLoading) return;
     state.summaryLoading = true;
     state.summaryError = '';
+    const taskId = `ai_sum_${Date.now()}`;
+    setBgAiTaskSafe({
+      id: taskId,
+      label: filePath ? 'AI 正在总结当前文档…' : 'AI 正在提炼文本与待办…',
+      status: 'running',
+    });
     renderSummaryMode();
 
     try {
@@ -1759,9 +1765,35 @@ export function initRightPanel(containerEl) {
         ? '已完成离线规则提炼（可配 API Key 升级大模型）'
         : 'AI 智能提炼完成';
       showToast(toastMsg, 'success');
+      setBgAiTaskSafe({
+        id: taskId,
+        label: '✓ AI 总结已完成',
+        status: 'done',
+        onView() {
+          if (typeof store.setState === 'function') {
+            store.setState({ rightCollapsed: false }, 'layout:changed');
+          } else {
+            store.state.rightCollapsed = false;
+            store.emit('layout:changed');
+          }
+          state.mode = 'summary';
+          renderAll();
+          window.requestAnimationFrame(() => {
+            containerEl?.querySelector('[data-module-id="summary_card"]')?.scrollIntoView({
+              behavior: 'smooth',
+              block: 'nearest',
+            });
+          });
+        },
+      });
     } catch (err) {
       state.summaryError = err?.message || 'AI 总结失败';
       showToast(state.summaryError, 'error');
+      setBgAiTaskSafe({
+        id: taskId,
+        label: `AI 总结失败：${state.summaryError}`,
+        status: 'error',
+      });
     } finally {
       state.summaryLoading = false;
       renderSummaryMode();

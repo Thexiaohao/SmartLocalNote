@@ -1074,7 +1074,6 @@ function renderPomodoroMiniSection() {
 function getModuleQuickActionsHtml(modId, _selectedCount, itemsCount) {
   if (modId === 'files') {
     return `
-      <button type="button" class="pill-btn pill-btn-sm left-root-back-btn" data-action="back-to-notes-root" title="清除筛选并回到默认笔记主文件夹顶部" style="height:20px;padding:0 6px;font-size:10.5px;">⌂ 主目录顶部</button>
       <span data-role="files-count-label" style="font-size:11px;color:var(--text-tertiary);">${itemsCount}</span>
     `;
   }
@@ -1437,7 +1436,6 @@ function renderStickyTopHtml(selectedCount) {
       <div class="left-quick-bar" style="display:flex;align-items:center;gap:5px;margin-top:6px;flex-wrap:wrap;">
         <button type="button" class="pill-btn pill-btn-sm" data-action="new-note" title="新建笔记 (Ctrl+N)" style="height:24px;padding:0 8px;font-size:11px;">+ 笔记</button>
         <button type="button" class="pill-btn pill-btn-sm" data-action="new-folder" title="新建文件夹" style="height:24px;padding:0 8px;font-size:11px;">+ 文件夹</button>
-        <button type="button" class="pill-btn pill-btn-sm" data-action="back-to-notes-root" title="清除筛选并回到默认笔记主文件夹顶部" style="height:24px;padding:0 8px;font-size:11px;margin-left:auto;">⌂ 主目录顶部</button>
       </div>
     </div>
   `;

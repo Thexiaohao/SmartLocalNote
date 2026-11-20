@@ -577,9 +577,12 @@ function layoutStack(stackId, anchorX = null, anchorY = null) {
     return;
   }
 
-  // Expanded: fan out neatly vertically with 10px gap, or side-by-side if vertical space insufficient
+  // Expanded: ALWAYS fan out VERTICALLY top-to-bottom (column-major).
+  // If cards fit in a single vertical column, keep them neatly stacked down from baseY (or TOP_BAR_SAFE_Y).
+  // If more cards exceed viewport height, fill downward vertically first and wrap to an adjacent vertical column.
+  const availH = Math.max(220, vh - TOP_BAR_SAFE_Y - VIEWPORT_PAD);
   const totalVertH = list.reduce((sum, s) => sum + s.h, 0) + (list.length - 1) * STACK_EXPAND_GAP;
-  if (totalVertH <= vh - TOP_BAR_SAFE_Y - VIEWPORT_PAD) {
+  if (totalVertH <= availH) {
     let curY = Math.max(TOP_BAR_SAFE_Y, Math.min(vh - totalVertH - VIEWPORT_PAD, Math.round(baseY)));
     for (const s of list) {
       s.stackExpanded = true;
@@ -591,26 +594,23 @@ function layoutStack(stackId, anchorX = null, anchorY = null) {
     return;
   }
 
-  // Side-by-side fan-out (near bottom or many cards), wrapping rows cleanly inside viewport
+  // Column-major vertical expansion: fill top-to-bottom first, then move to adjacent column (left or right)
+  const dirX = baseX + maxCardW * 2 + STACK_EXPAND_GAP <= vw - VIEWPORT_PAD ? 1 : -1;
   let curX = clampPosX(baseX, maxCardW);
-  let curY = Math.max(TOP_BAR_SAFE_Y, Math.min(vh - maxCardH - VIEWPORT_PAD, Math.round(baseY)));
-  const totalRowW = list.reduce((sum, s) => sum + s.w, 0) + (list.length - 1) * STACK_EXPAND_GAP;
-  if (curX + totalRowW > vw - VIEWPORT_PAD) {
-    curX = Math.max(VIEWPORT_PAD, vw - Math.min(totalRowW, vw - VIEWPORT_PAD * 2) - VIEWPORT_PAD);
-  }
-  let rowMaxH = 0;
+  let curY = TOP_BAR_SAFE_Y;
+  let colMaxW = 0;
   for (const s of list) {
-    if (curX + s.w > vw - VIEWPORT_PAD && curX > VIEWPORT_PAD) {
-      curX = VIEWPORT_PAD;
-      curY = clampPosY(curY + rowMaxH + STACK_EXPAND_GAP, s.h);
-      rowMaxH = 0;
+    if (curY + s.h > vh - VIEWPORT_PAD && curY > TOP_BAR_SAFE_Y) {
+      curY = TOP_BAR_SAFE_Y;
+      curX = clampPosX(curX + dirX * (colMaxW + STACK_EXPAND_GAP), s.w);
+      colMaxW = 0;
     }
     s.stackExpanded = true;
     s.zone = 'free';
     s.x = clampPosX(curX, s.w);
     s.y = clampPosY(curY, s.h);
-    curX += s.w + STACK_EXPAND_GAP;
-    rowMaxH = Math.max(rowMaxH, s.h);
+    curY += s.h + STACK_EXPAND_GAP;
+    colMaxW = Math.max(colMaxW, s.w);
   }
 }
 

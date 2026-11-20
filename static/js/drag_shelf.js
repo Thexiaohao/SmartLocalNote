@@ -43,15 +43,7 @@ function ensureV72DrawerStyles() {
   const style = document.createElement('style');
   style.id = 'sln-v72-drawer-styles';
   style.textContent = `
-    .island-shelf-drawer {
-      width: min(360px, 92vw);
-      max-height: 320px;
-    }
-    .island-shelf-list {
-      grid-template-columns: 1fr;
-      padding: 8px;
-      gap: 6px;
-    }
+    /* Preserve V7.1 NotchDrop #island-shelf-drawer visual layout (460px / 52vh / 2-col grid in app.css) */
     .island-standalone-float {
       z-index: 1125;
     }
