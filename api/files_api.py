@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api import ok
@@ -32,6 +32,7 @@ class PdfAnnotateBody(BaseModel):
     path: str
     page: int
     note_text: str
+    color: str = "yellow"
 
 
 class PrivacyBody(BaseModel):
@@ -108,15 +109,9 @@ def stream_pdf(path: str = Query(...)) -> FileResponse:
     return FileResponse(target, media_type="application/pdf", headers={"Content-Disposition": "inline"})
 
 
-@router.get("/pdf-page")
-def render_pdf_page(path: str = Query(...), page: int = Query(1, ge=1), zoom: float = Query(1.6, ge=0.5, le=3.0)) -> Response:
-    png_bytes = doc_engine.render_pdf_page_png(path, page=page, zoom=zoom)
-    return Response(content=png_bytes, media_type="image/png", headers={"Cache-Control": "private, max-age=60"})
-
-
 @router.post("/pdf-annotate")
 def annotate_pdf(body: PdfAnnotateBody) -> dict:
-    return ok(doc_engine.annotate_pdf(body.path, body.page, body.note_text))
+    return ok(doc_engine.annotate_pdf(body.path, body.page, body.note_text, color=body.color))
 
 
 @router.post("/privacy")

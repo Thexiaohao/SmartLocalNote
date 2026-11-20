@@ -216,8 +216,23 @@ def list_snapshots(path_str: str) -> list[dict[str, Any]]:
 
 
 def _fsync_file(path: Path) -> None:
-    with open(path, "rb") as fh:
+    # Windows FlushFileBuffers (os.fsync) requires write access; "rb" raises EBADF.
+    with open(path, "r+b") as fh:
+        fh.flush()
         os.fsync(fh.fileno())
+
+
+def _replace_with_retry(src: Path, dst: Path, retries: int = 4, delay_sec: float = 0.06) -> None:
+    import time
+
+    for attempt in range(retries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt + 1 >= retries:
+                raise
+            time.sleep(delay_sec * (attempt + 1))
 
 
 def atomic_write_bytes(
@@ -238,7 +253,7 @@ def atomic_write_bytes(
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_path, target)
+        _replace_with_retry(tmp_path, target)
     except BaseException:
         if tmp_path.exists():
             try:
@@ -282,7 +297,7 @@ def atomic_save_via_callback(
     try:
         writer_fn(tmp_path)
         _fsync_file(tmp_path)
-        os.replace(tmp_path, target)
+        _replace_with_retry(tmp_path, target)
     except BaseException:
         if tmp_path.exists():
             try:

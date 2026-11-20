@@ -1062,10 +1062,16 @@ def extract_pdf_text(path_str: str, max_pages: int = 12, max_chars: int = 4000) 
     return _truncate_head_tail(combined, max_chars)
 
 
-def annotate_pdf(path_str: str, page: int, note_text: str) -> dict[str, Any]:
-    """Add a text annotation to a PDF page using PyMuPDF and save atomically with snapshot."""
-    import pymupdf
+_PDF_ANNOT_TAG_MAP = {
+    "yellow": "🟡 重点",
+    "red": "🔴 疑问",
+    "green": "🟢 结论",
+    "blue": "🔵 摘录",
+}
 
+
+def annotate_pdf(path_str: str, page: int, note_text: str, color: str = "yellow") -> dict[str, Any]:
+    """Add a text annotation to a PDF page (and sync to its companion note) atomically with snapshot."""
     cleaned_note = (note_text or "").strip()
     if not cleaned_note:
         raise ValueError("批注内容不能为空")
@@ -1074,29 +1080,65 @@ def annotate_pdf(path_str: str, page: int, note_text: str) -> dict[str, Any]:
     if target.suffix.lower() != ".pdf":
         raise ValueError(f"仅支持 .pdf 文件：{target.name}")
 
-    doc = pymupdf.open(target)
+    pages = get_pdf_pages_text(target)
+    total_pages = max(1, len(pages))
+    page_num = int(page)
+    if page_num < 1 or page_num > total_pages:
+        raise ValueError(f"页码越界：{page_num}（PDF 共 {total_pages} 页）")
+
+    color_key = str(color or "yellow").strip().lower()
+    tag_label = _PDF_ANNOT_TAG_MAP.get(color_key, _PDF_ANNOT_TAG_MAP["yellow"])
+
+    snapshot_id: str | None = None
+    embedded_in_pdf = False
     try:
-        total_pages = len(doc)
-        page_num = int(page)
-        if page_num < 1 or page_num > total_pages:
-            raise ValueError(f"页码越界：{page_num}（PDF 共 {total_pages} 页）")
+        import pymupdf
 
-        page_obj = doc[page_num - 1]
-        page_obj.add_text_annot(pymupdf.Point(48, 48), cleaned_note)
+        doc = pymupdf.open(target)
+        try:
+            page_obj = doc[page_num - 1]
+            existing_annots = list(page_obj.annots() or [])
+            offset_y = 48 + (len(existing_annots) % 12) * 26
+            page_obj.add_text_annot(pymupdf.Point(48, offset_y), f"[{tag_label}] {cleaned_note}")
 
-        def _save_pdf(tmp_path: Path) -> None:
-            doc.save(str(tmp_path), garbage=3, deflate=True)
-            doc.close()
+            def _save_pdf(tmp_path: Path) -> None:
+                doc.save(str(tmp_path), garbage=3, deflate=True)
+                doc.close()
 
-        save_res = safe_io.atomic_save_via_callback(target, _save_pdf, snapshot=True)
-        return {
-            "path": str(target),
-            "page": page_num,
-            "snapshot_id": save_res["snapshot_id"],
-        }
-    finally:
-        if not doc.is_closed:
-            doc.close()
+            save_res = safe_io.atomic_save_via_callback(target, _save_pdf, snapshot=True)
+            snapshot_id = save_res.get("snapshot_id")
+            embedded_in_pdf = True
+        finally:
+            if not doc.is_closed:
+                doc.close()
+    except (ImportError, PermissionError):
+        snap = safe_io.create_snapshot(target)
+        snapshot_id = snap.name if snap else None
+
+    companion_path, companion_content, _ = _load_companion_note(target)
+    single_line_note = " ".join(cleaned_note.splitlines()).strip()
+    entry_line = f"- {tag_label} [[{target.name}#page={page_num}]] **第 {page_num} 页**：{single_line_note}"
+    base_comp = (companion_content or "").rstrip()
+    if not base_comp:
+        next_comp = f"# {target.name} 伴生笔记与批注\n\n{entry_line}\n"
+    else:
+        next_comp = f"{base_comp}\n{entry_line}\n"
+
+    comp_save = safe_io.atomic_write_text(str(companion_path), next_comp, snapshot=True)
+    if not snapshot_id:
+        snapshot_id = comp_save.get("snapshot_id")
+
+    return {
+        "path": str(target),
+        "page": page_num,
+        "note_text": cleaned_note,
+        "color": color_key,
+        "tag": tag_label,
+        "embedded_in_pdf": embedded_in_pdf,
+        "snapshot_id": snapshot_id,
+        "companion_path": str(companion_path),
+        "companion_content": next_comp,
+    }
 
 
 def extract_text_for_ai(path_str: str, max_chars: int = 4000) -> str:
@@ -1121,41 +1163,6 @@ def extract_text_for_ai(path_str: str, max_chars: int = 4000) -> str:
         return _truncate_head_tail(_extract_office_preview_markdown(target), max_chars)
 
     raise ValueError(f"暂不支持为该格式抽取 AI 文本：{ext or target.name}")
-
-
-def render_pdf_page_png(path_str: str, page: int = 1, zoom: float = 1.6) -> bytes:
-    """Render a PDF page as crisp PNG bytes using lazy PyMuPDF with a 32-entry LRU cache."""
-    target = safe_io.resolve_safe_path(path_str, must_exist=True)
-    if target.suffix.lower() != ".pdf":
-        raise ValueError(f"仅支持 .pdf 文件：{target.name}")
-
-    zoom_clamped = round(max(0.5, min(3.0, float(zoom))), 2)
-    req_page = max(1, int(page))
-    mtime_ns = target.stat().st_mtime_ns
-    cache_key = (str(target), mtime_ns, req_page, zoom_clamped)
-
-    with _PDF_PAGE_CACHE_LOCK:
-        cached = _PDF_PAGE_CACHE.get(cache_key)
-        if cached is not None:
-            _PDF_PAGE_CACHE.move_to_end(cache_key)
-            return cached
-
-    import pymupdf
-
-    with pymupdf.open(target) as doc:
-        if len(doc) == 0:
-            raise ValueError(f"PDF 文件为空：{target.name}")
-        page_idx = max(0, min(len(doc) - 1, req_page - 1))
-        pix = doc[page_idx].get_pixmap(matrix=pymupdf.Matrix(zoom_clamped, zoom_clamped), alpha=False)
-        png_bytes = pix.tobytes("png")
-
-    with _PDF_PAGE_CACHE_LOCK:
-        _PDF_PAGE_CACHE[cache_key] = png_bytes
-        _PDF_PAGE_CACHE.move_to_end(cache_key)
-        while len(_PDF_PAGE_CACHE) > _PDF_PAGE_CACHE_MAX:
-            _PDF_PAGE_CACHE.popitem(last=False)
-
-    return png_bytes
 
 
 _INLINE_CODE_LANG_MAP = {

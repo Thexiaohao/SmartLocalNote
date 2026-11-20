@@ -59,7 +59,6 @@ import { api } from './api_client.js';
 import { icon } from './icons.js';
 import { renderMindMap } from './mindmap.js';
 
-const PDF_ZOOM_STEPS = [0.8, 1.0, 1.25, 1.5, 1.6, 1.75, 2.0, 2.4];
 const IMAGE_ZOOM_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
 /**
@@ -507,6 +506,152 @@ function injectV4CenterStyles() {
       word-break: break-word;
       color: var(--text-primary);
     }
+    body.is-pane-resizing,
+    body.is-pane-resizing * {
+      user-select: none !important;
+    }
+    body.is-pane-resizing iframe {
+      pointer-events: none !important;
+    }
+    .center-split-resizer,
+    .companion-split-resizer {
+      width: 8px;
+      flex: 0 0 8px;
+      cursor: col-resize;
+      position: relative;
+      background: transparent;
+      z-index: 18;
+      user-select: none;
+      touch-action: none;
+    }
+    .center-split-resizer::after,
+    .companion-split-resizer::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 3px;
+      width: 1px;
+      background: var(--border-hairline);
+      transition: background 0.14s ease, width 0.14s ease, left 0.14s ease;
+    }
+    .center-split-resizer:hover::after,
+    .center-split-resizer.is-resizing::after,
+    .companion-split-resizer:hover::after,
+    .companion-split-resizer.is-resizing::after {
+      left: 2px;
+      width: 3px;
+      background: var(--accent);
+    }
+    .pdf-workspace.is-comp-split {
+      display: flex !important;
+      flex-direction: row !important;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .pdf-workspace.is-comp-float {
+      display: flex !important;
+      flex-direction: column !important;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .pdf-workspace.is-comp-split > .pdf-frame-wrap,
+    .pdf-workspace.is-comp-float > .pdf-frame-wrap {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 0;
+      border-right: none;
+    }
+    .companion-float-win {
+      position: absolute;
+      z-index: 42;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-island);
+      backdrop-filter: blur(22px) saturate(180%);
+      -webkit-backdrop-filter: blur(22px) saturate(180%);
+      border: 1px solid rgba(128, 128, 136, 0.28);
+      border-radius: 14px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.2), 0 2px 10px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      min-width: 260px;
+      min-height: 220px;
+    }
+    .companion-float-win .pdf-side-notes {
+      flex: 1 1 auto;
+      min-height: 0;
+      padding: 10px 12px 12px;
+    }
+    .companion-float-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border-hairline);
+      background: var(--bg-glass);
+      cursor: move;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .comp-resize-handle {
+      position: absolute;
+      z-index: 5;
+      touch-action: none;
+      user-select: none;
+    }
+    .comp-resize-w {
+      top: 10px;
+      bottom: 14px;
+      left: 0;
+      width: 6px;
+      cursor: ew-resize;
+    }
+    .comp-resize-e {
+      top: 10px;
+      bottom: 14px;
+      right: 0;
+      width: 6px;
+      cursor: ew-resize;
+    }
+    .comp-resize-s {
+      left: 14px;
+      right: 14px;
+      bottom: 0;
+      height: 6px;
+      cursor: ns-resize;
+    }
+    .comp-resize-sw {
+      left: 0;
+      bottom: 0;
+      width: 14px;
+      height: 14px;
+      cursor: nesw-resize;
+    }
+    .comp-resize-se {
+      right: 0;
+      bottom: 0;
+      width: 16px;
+      height: 16px;
+      cursor: nwse-resize;
+    }
+    .comp-resize-se::after {
+      content: '';
+      position: absolute;
+      right: 4px;
+      bottom: 4px;
+      width: 7px;
+      height: 7px;
+      border-right: 2px solid var(--text-tertiary);
+      border-bottom: 2px solid var(--text-tertiary);
+      opacity: 0.65;
+    }
   `;
   document.head.appendChild(style);
 }
@@ -519,10 +664,37 @@ export function initCenterView(containerEl) {
   if (!containerEl) return;
   injectV4CenterStyles();
 
+  const loadStoredFloatRect = () => {
+    try {
+      const r = JSON.parse(localStorage.getItem('sln_companion_float_rect') || 'null');
+      if (r && Number.isFinite(r.w) && Number.isFinite(r.h) && r.w >= 260 && r.h >= 220) {
+        return r;
+      }
+    } catch {
+      // ignore
+    }
+    return { right: 16, top: 14, left: null, w: 360, h: 430 };
+  };
+
   const state = {
     activeDoc: null,
     dirty: false,
     mdMode: 'live', // 'live' | 'source' | 'mindmap'
+    dragDefaultMode: (() => {
+      try {
+        return localStorage.getItem('sln_drag_default_mode') === 'copy' ? 'copy' : 'cut';
+      } catch {
+        return 'cut';
+      }
+    })(),
+    splitRatio: (() => {
+      try {
+        const v = Number.parseFloat(localStorage.getItem('sln_split_ratio'));
+        return Number.isFinite(v) ? Math.min(0.8, Math.max(0.2, v)) : 0.5;
+      } catch {
+        return 0.5;
+      }
+    })(),
     editingBlockIdx: null,
     editingBlockRange: null, // { startLine, endLine }
     editingDraftNewBlock: false,
@@ -537,7 +709,23 @@ export function initCenterView(containerEl) {
     backlinkSeq: 0,
     splitSeq: 0,
     excelSearchTimer: null,
-    companionOpen: false, // collapsible companion note for archive/image/office/generic
+    companionOpen: true, // toggleable companion note across PDF / media / archive / image / office
+    companionLayout: (() => {
+      try {
+        return localStorage.getItem('sln_companion_layout') === 'split' ? 'split' : 'float';
+      } catch {
+        return 'float';
+      }
+    })(),
+    companionSplitRatio: (() => {
+      try {
+        const v = Number.parseFloat(localStorage.getItem('sln_companion_split_ratio'));
+        return Number.isFinite(v) ? Math.min(0.72, Math.max(0.22, v)) : 0.36;
+      } catch {
+        return 0.36;
+      }
+    })(),
+    companionFloatRect: loadStoredFloatRect(),
     backlinks: { count: 0, items: [] },
     history: {
       path: '',
@@ -572,15 +760,13 @@ export function initCenterView(containerEl) {
       editingKey: null,
     },
     pdf: {
-      viewMode: 'iframe', // 'iframe' | 'hd'
-      zoom: 1.6,
       currentPage: 1,
       totalPages: 1,
       companionMode: 'edit', // 'edit' | 'preview'
       companionDirty: false,
       cacheBust: Date.now(),
-      imgLoading: false,
-      imgError: false,
+      annotOpen: false,
+      annotColor: 'yellow',
     },
     archive: {
       entries: [],
@@ -638,9 +824,9 @@ export function initCenterView(containerEl) {
       mainPane.className = 'center-split-main';
       mainPane.dataset.role = 'center-main-pane';
       mainPane.style.position = 'relative';
-      const splitPane = layout.querySelector(':scope > .center-split-pane');
-      if (splitPane) {
-        layout.insertBefore(mainPane, splitPane);
+      const splitAnchor = layout.querySelector(':scope > [data-role="center-split-resizer"], :scope > .center-split-pane');
+      if (splitAnchor) {
+        layout.insertBefore(mainPane, splitAnchor);
       } else {
         layout.appendChild(mainPane);
       }
@@ -691,8 +877,7 @@ export function initCenterView(containerEl) {
     return (
       mainPane.querySelector('.md-scroll-area') ||
       mainPane.querySelector('.md-editor:not([data-role])') ||
-      mainPane.querySelector('.excel-table-wrap') ||
-      mainPane.querySelector('.pdf-hd-viewer')
+      mainPane.querySelector('.excel-table-wrap')
     );
   }
 
@@ -1172,7 +1357,7 @@ export function initCenterView(containerEl) {
           </div>
           <h2 class="empty-title" style="font-size:16px;">欢迎使用 SmartLocalNote</h2>
           <p class="empty-desc" style="max-width:380px;line-height:1.65;">
-            本地优先的苹果风学习与办公工作台。全面支持 Markdown、TXT/代码、Excel 表格、PDF 高清阅览、ZIP 压缩包免解压预览、图片与音视频、Word/PPT 速览。
+            本地优先的苹果风学习与办公工作台。全面支持 Markdown、TXT/代码、Excel 表格、PDF 原生预览与批注、ZIP 压缩包免解压预览、图片与音视频、Word/PPT 速览。
           </p>
           <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:10px;">
             <button type="button" class="pill-btn pill-btn-primary" data-action="welcome-new-note">
@@ -1229,44 +1414,54 @@ export function initCenterView(containerEl) {
 
   // =========================================================================
   // Shared Companion Note Panel (PDF / Audio / Video / Archive / Image / Office)
+  // Supports Floating Resizable Window ('float') & Resizable Split-Pane ('split')
   // =========================================================================
   function renderCompanionPaneHtml(doc, { placeholderText = '', extraActionHtml = '' } = {}) {
+    if (!state.companionOpen) return '';
     const isCompPreview = state.pdf.companionMode === 'preview';
     const disabledNote = !hasCompanionNote(doc);
-    return `
-      <div class="pdf-side-notes">
-        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; flex-shrink:0;">
-          <div style="display:flex; align-items:center; gap:6px;">
-            <span style="font-size:13px; font-weight:600; color:var(--text-primary);">伴生笔记</span>
-            <span
-              data-role="pdf-companion-dirty"
-              title="伴生笔记有未保存修改"
-              style="width:7px; height:7px; border-radius:9999px; background:var(--warning); display:${state.pdf.companionDirty ? 'inline-block' : 'none'};"
-            ></span>
-          </div>
+    const isFloat = state.companionLayout !== 'split';
 
-          <div class="segmented-pill" data-seg="pdf-companion-mode" role="tablist" aria-label="伴生笔记模式">
-            <div class="segmented-thumb" style="width:calc(50% - 3px); transform:translateX(${isCompPreview ? '100%' : '0%'});"></div>
-            <button type="button" class="segmented-btn ${!isCompPreview ? 'is-active' : ''}" data-comp-mode="edit" role="tab" aria-selected="${!isCompPreview}">
-              编辑
-            </button>
-            <button type="button" class="segmented-btn ${isCompPreview ? 'is-active' : ''}" data-comp-mode="preview" role="tab" aria-selected="${isCompPreview}">
-              预览
-            </button>
-          </div>
+    const headerControlsHtml = `
+      <div class="companion-float-header" data-role="companion-float-header" title="${isFloat ? '按住拖动伴生笔记浮窗位置' : '伴生笔记分屏栏'}">
+        <div style="display:flex; align-items:center; gap:6px; min-width:0; overflow:hidden;">
+          <span style="font-size:12.5px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${isFloat ? '❐ 伴生笔记' : '◫ 伴生笔记'}</span>
+          <span
+            data-role="pdf-companion-dirty"
+            title="伴生笔记有未保存修改"
+            style="width:7px; height:7px; border-radius:9999px; background:var(--warning); display:${state.pdf.companionDirty ? 'inline-block' : 'none'}; flex-shrink:0;"
+          ></span>
         </div>
 
-        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; flex-shrink:0;">
-          ${renderTypographyControlsHtml(true)}
+        <div style="display:inline-flex; align-items:center; gap:4px; flex-shrink:0;">
+          <button type="button" class="pill-btn pill-btn-sm ${isFloat ? 'pill-btn-primary' : ''}" data-action="companion-set-float" title="切换为可自由拖动与调节大小的浮窗模块" style="height:22px;padding:0 7px;font-size:11px;">浮窗</button>
+          <button type="button" class="pill-btn pill-btn-sm ${!isFloat ? 'pill-btn-primary' : ''}" data-action="companion-set-split" title="切换为可拖动分隔条调节左右间距的分屏模式" style="height:22px;padding:0 7px;font-size:11px;">分屏</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="toggle-companion" title="收起伴生笔记" style="height:22px;width:22px;padding:0;">✕</button>
         </div>
+      </div>
+    `;
 
+    const innerBodyHtml = `
+      <div class="pdf-side-notes" style="padding:8px 12px 12px; gap:8px;">
         <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; flex-shrink:0;">
           <div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">
-            ${extraActionHtml}
+            <div class="segmented-pill" data-seg="pdf-companion-mode" role="tablist" aria-label="伴生笔记模式" style="height:24px;">
+              <div class="segmented-thumb" style="width:calc(50% - 3px); transform:translateX(${isCompPreview ? '100%' : '0%'});"></div>
+              <button type="button" class="segmented-btn ${!isCompPreview ? 'is-active' : ''}" data-comp-mode="edit" role="tab" aria-selected="${!isCompPreview}" style="height:20px;padding:0 8px;font-size:11px;">
+                编辑
+              </button>
+              <button type="button" class="segmented-btn ${isCompPreview ? 'is-active' : ''}" data-comp-mode="preview" role="tab" aria-selected="${isCompPreview}" style="height:20px;padding:0 8px;font-size:11px;">
+                预览
+              </button>
+            </div>
+            ${renderTypographyControlsHtml(true)}
           </div>
-          <button type="button" class="pill-btn pill-btn-sm ${state.pdf.companionDirty ? 'pill-btn-primary' : ''}" data-action="pdf-save-companion" ${disabledNote ? 'disabled' : ''}>
-            ${icon('save', 12)} 保存
-          </button>
+          <div style="display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap;">
+            ${extraActionHtml}
+            <button type="button" class="pill-btn pill-btn-sm ${state.pdf.companionDirty ? 'pill-btn-primary' : ''}" data-action="pdf-save-companion" ${disabledNote ? 'disabled' : ''}>
+              ${icon('save', 12)} 保存
+            </button>
+          </div>
         </div>
 
         <div style="flex:1 1 auto; min-height:0; display:flex; flex-direction:column;">
@@ -1274,10 +1469,46 @@ export function initCenterView(containerEl) {
             disabledNote
               ? `<div class="empty-state"><p class="empty-desc">当前文件暂无关联伴生笔记路径</p></div>`
               : isCompPreview
-              ? `<div class="md-scroll-area"><div class="md-preview" style="padding:8px 6px 40px;">${renderMarkdownSafe(doc.companionContent || '', { withLineMap: true })}</div></div>`
-              : `<textarea class="md-editor" data-role="pdf-companion-editor" spellcheck="false" style="min-height:160px; flex:1 1 auto; padding:12px; border:1px solid var(--border-hairline); border-radius:var(--radius-control); background:var(--bg-subtle);" placeholder="${escapeHtml(placeholderText || `随时记录关于 ${doc.name} 的伴生笔记…`)}">${escapeHtml(doc.companionContent || '')}</textarea>`
+              ? `<div class="md-scroll-area"><div class="md-preview" style="padding:8px 6px 28px;">${renderMarkdownSafe(doc.companionContent || '', { withLineMap: true })}</div></div>`
+              : `<textarea class="md-editor" data-role="pdf-companion-editor" spellcheck="false" style="min-height:130px; flex:1 1 auto; padding:10px 12px; border:1px solid var(--border-hairline); border-radius:var(--radius-control); background:var(--bg-subtle);" placeholder="${escapeHtml(placeholderText || `随时记录关于 ${doc.name} 的伴生笔记…`)}">${escapeHtml(doc.companionContent || '')}</textarea>`
           }
         </div>
+      </div>
+    `;
+
+    if (isFloat) {
+      const r = state.companionFloatRect || { right: 16, top: 14, left: null, w: 360, h: 430 };
+      const hostEl = containerEl.querySelector(':scope > .center-split-layout > [data-role="center-main-pane"]') || containerEl;
+      const hostW = Math.max(320, hostEl?.clientWidth || window.innerWidth || 960);
+      const hostH = Math.max(260, (hostEl?.clientHeight || window.innerHeight || 680) - 56);
+      const clampedW = Math.min(Math.max(260, Math.round(r.w || 360)), Math.max(260, hostW - 20));
+      const clampedH = Math.min(Math.max(220, Math.round(r.h || 430)), Math.max(220, hostH - 20));
+      const maxLeft = Math.max(8, hostW - clampedW - 8);
+      const maxTop = Math.max(8, hostH - Math.min(clampedH, 120) - 8);
+      const posStyle = Number.isFinite(r.left)
+        ? `left:${Math.min(maxLeft, Math.max(8, Math.round(r.left)))}px;`
+        : `right:${Math.max(8, Math.round(r.right ?? 16))}px;`;
+      const topStyle = `top:${Math.min(maxTop, Math.max(8, Math.round(r.top ?? 14)))}px;`;
+      const sizeStyle = `width:${clampedW}px; height:${clampedH}px; max-width:calc(100% - 16px); max-height:calc(100% - 16px);`;
+      return `
+        <div class="companion-float-win" data-role="companion-float-win" style="${posStyle}${topStyle}${sizeStyle}">
+          ${headerControlsHtml}
+          ${innerBodyHtml}
+          <div class="comp-resize-handle comp-resize-w" data-comp-resize="w" title="拖动调节宽度"></div>
+          <div class="comp-resize-handle comp-resize-e" data-comp-resize="e" title="拖动调节宽度"></div>
+          <div class="comp-resize-handle comp-resize-s" data-comp-resize="s" title="拖动调节高度"></div>
+          <div class="comp-resize-handle comp-resize-sw" data-comp-resize="sw" title="拖动调节大小"></div>
+          <div class="comp-resize-handle comp-resize-se" data-comp-resize="se" title="拖动调节大小"></div>
+        </div>
+      `;
+    }
+
+    const pct = (Math.min(0.72, Math.max(0.22, state.companionSplitRatio || 0.36)) * 100).toFixed(1);
+    return `
+      <div class="companion-split-resizer" data-role="companion-split-resizer" title="拖动调节伴生笔记左右间距（双击恢复默认比例）"></div>
+      <div data-role="companion-split-pane" style="flex:0 0 ${pct}%; width:${pct}%; min-width:230px; max-width:75%; height:100%; display:flex; flex-direction:column; border-left:1px solid var(--border-hairline); background:var(--bg-island); overflow:hidden;">
+        ${headerControlsHtml}
+        ${innerBodyHtml}
       </div>
     `;
   }
@@ -2099,7 +2330,42 @@ export function initCenterView(containerEl) {
     focusActiveBlockEditor('start');
   }
 
+  function isCopyDragEvent(ev) {
+    if (state.dragDefaultMode === 'copy') {
+      return !Boolean(ev?.shiftKey);
+    }
+    return Boolean(ev?.ctrlKey || ev?.metaKey);
+  }
+
+  function setDragDefaultMode(nextMode, { showMsg = true } = {}) {
+    const mode = nextMode === 'copy' ? 'copy' : 'cut';
+    state.dragDefaultMode = mode;
+    try {
+      localStorage.setItem('sln_drag_default_mode', mode);
+    } catch {
+      // ignore
+    }
+    containerEl.querySelectorAll('[data-action="toggle-drag-mode"]').forEach((btn) => {
+      btn.classList.toggle('pill-btn-primary', mode === 'copy');
+      btn.title =
+        mode === 'copy'
+          ? '当前拖动默认：复制插入（按住 Shift 拖动为剪切移动，点击切换）'
+          : '当前拖动默认：剪切移动（按住 Ctrl 拖动为复制插入，点击切换）';
+      btn.innerHTML = `${icon(mode === 'copy' ? 'copy' : 'scissors', 12)}<span data-role="drag-mode-label">${mode === 'copy' ? '拖动:默认复制' : '拖动:默认剪切'}</span>`;
+    });
+    if (showMsg) {
+      showToast(
+        mode === 'copy'
+          ? '已切换为「拖动默认：复制」（按住 Shift 为剪切移动）'
+          : '已切换为「拖动默认：剪切移动」（按住 Ctrl 为复制）',
+        'success',
+        { duration: 2000 }
+      );
+    }
+  }
+
   function renderWysiwygFormatBarHtml() {
+    const isCopyDefault = state.dragDefaultMode === 'copy';
     return `
       <div class="wysiwyg-format-bar" data-role="wysiwyg-format-bar" role="toolbar" aria-label="文档格式工具栏">
         <button type="button" class="fmt-icon-btn" data-fmt-bar="h1" title="一级标题">${icon('heading-1', 14)}</button>
@@ -2119,6 +2385,17 @@ export function initCenterView(containerEl) {
         <button type="button" class="fmt-icon-btn" data-fmt-bar="cut" title="剪切 Ctrl+X">${icon('scissors', 14)}</button>
         <button type="button" class="fmt-icon-btn" data-fmt-bar="copy" title="复制 Ctrl+C">${icon('copy', 14)}</button>
         <button type="button" class="fmt-icon-btn" data-fmt-bar="paste" title="粘贴 Ctrl+V">${icon('clipboard-paste', 14)}</button>
+        <span class="fmt-sep" aria-hidden="true"></span>
+        <button
+          type="button"
+          class="pill-btn pill-btn-sm ${isCopyDefault ? 'pill-btn-primary' : ''}"
+          data-action="toggle-drag-mode"
+          title="${isCopyDefault ? '当前拖动默认：复制插入（按住 Shift 拖动为剪切移动，点击切换）' : '当前拖动默认：剪切移动（按住 Ctrl 拖动为复制插入，点击切换）'}"
+          style="height:24px;padding:0 8px;font-size:11.5px;gap:4px;"
+        >
+          ${icon(isCopyDefault ? 'copy' : 'scissors', 12)}
+          <span data-role="drag-mode-label">${isCopyDefault ? '拖动:默认复制' : '拖动:默认剪切'}</span>
+        </button>
       </div>
     `;
   }
@@ -3301,85 +3578,18 @@ export function initCenterView(containerEl) {
   }
 
   // =========================================================================
-  // Rendering: PDF HD PyMuPDF Viewer + Iframe Toggle + Companion Note + AI MindMap
+  // Rendering: PDF Native Vector Viewer + Companion Note + AI MindMap
   // =========================================================================
   function buildPdfStreamSrc() {
     const p = encodeURIComponent(state.activeDoc.path);
     return `/api/files/pdf-stream?path=${p}&_t=${state.pdf.cacheBust}#page=${state.pdf.currentPage}`;
   }
 
-  function buildPdfPageImgSrc() {
-    const p = encodeURIComponent(state.activeDoc.path);
-    const page = state.pdf.currentPage || 1;
-    const zoom = Number(state.pdf.zoom || 1.6).toFixed(2);
-    return `/api/files/pdf-page?path=${p}&page=${page}&zoom=${zoom}&_t=${state.pdf.cacheBust}`;
-  }
-
   function renderPdfViewerStage() {
     const doc = state.activeDoc;
-    const pdf = state.pdf;
     const wrap = containerEl.querySelector('[data-role="pdf-frame-wrap"]');
     if (!wrap || !doc) return;
-
-    if (pdf.viewMode === 'iframe') {
-      wrap.innerHTML = `<iframe class="pdf-frame" src="${buildPdfStreamSrc()}" title="${escapeHtml(doc.name)}"></iframe>`;
-      return;
-    }
-
-    const zoomPct = Math.round((pdf.zoom || 1.6) * 100);
-    wrap.innerHTML = `
-      <div style="display:flex;flex-direction:column;height:100%;min-height:0;">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;padding:7px 12px;border-bottom:1px solid var(--border-hairline);background:var(--bg-glass);flex-shrink:0;">
-          <div style="display:inline-flex;align-items:center;gap:6px;">
-            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-prev-page" ${pdf.currentPage <= 1 ? 'disabled' : ''} title="上一页 (←)">上一页</button>
-            <span data-role="pdf-stage-page-label" style="font-size:12px;font-weight:600;color:var(--text-secondary);">第 ${pdf.currentPage} / ${pdf.totalPages} 页</span>
-            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-next-page" ${pdf.currentPage >= pdf.totalPages ? 'disabled' : ''} title="下一页 (→)">下一页</button>
-          </div>
-          <div style="display:inline-flex;align-items:center;gap:4px;">
-            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-zoom-out" ${pdf.zoom <= PDF_ZOOM_STEPS[0] ? 'disabled' : ''} title="缩小" style="width:28px;padding:0;">－</button>
-            <span data-role="pdf-zoom-label" style="font-size:11.5px;font-weight:600;min-width:44px;text-align:center;color:var(--text-secondary);">${zoomPct}%</span>
-            <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-zoom-in" ${pdf.zoom >= PDF_ZOOM_STEPS[PDF_ZOOM_STEPS.length - 1] ? 'disabled' : ''} title="放大" style="width:28px;padding:0;">＋</button>
-          </div>
-        </div>
-        <div class="pdf-hd-viewer" data-role="pdf-hd-viewer">
-          <div data-role="pdf-hd-loading" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);padding:6px 12px;border-radius:var(--radius-pill);background:var(--bg-island);border:1px solid var(--border-hairline);">
-            正在高清渲染第 ${pdf.currentPage} 页…
-          </div>
-          <div data-role="pdf-hd-error" class="glass-card" style="display:none;text-align:center;max-width:300px;padding:16px;">
-            <p class="empty-title" style="font-size:13px;">页面渲染失败</p>
-            <p class="empty-desc" style="margin:6px 0 10px;">请检查本地 PDF 是否存在或切换原生预览</p>
-            <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="pdf-hd-retry">重试渲染</button>
-          </div>
-          <div class="pdf-page-card" data-role="pdf-page-card" style="display:none;">
-            <img class="pdf-page-img" data-role="pdf-page-img" src="${buildPdfPageImgSrc()}" alt="${escapeHtml(doc.name)} 第 ${pdf.currentPage} 页" />
-          </div>
-        </div>
-      </div>
-    `;
-
-    const img = wrap.querySelector('[data-role="pdf-page-img"]');
-    const loadingEl = wrap.querySelector('[data-role="pdf-hd-loading"]');
-    const errorEl = wrap.querySelector('[data-role="pdf-hd-error"]');
-    const cardEl = wrap.querySelector('[data-role="pdf-page-card"]');
-
-    if (img) {
-      state.pdf.imgLoading = true;
-      state.pdf.imgError = false;
-      img.addEventListener('load', () => {
-        state.pdf.imgLoading = false;
-        state.pdf.imgError = false;
-        if (loadingEl) loadingEl.style.display = 'none';
-        if (errorEl) errorEl.style.display = 'none';
-        if (cardEl) cardEl.style.display = 'block';
-      });
-      img.addEventListener('error', () => {
-        state.pdf.imgLoading = false;
-        state.pdf.imgError = true;
-        if (loadingEl) loadingEl.style.display = 'none';
-        if (cardEl) cardEl.style.display = 'none';
-        if (errorEl) errorEl.style.display = 'block';
-      });
-    }
+    wrap.innerHTML = `<iframe class="pdf-frame" src="${buildPdfStreamSrc()}" title="${escapeHtml(doc.name)}"></iframe>`;
   }
 
   function updatePdfFrameAndControls({ forceReload = false } = {}) {
@@ -3396,14 +3606,10 @@ export function initCenterView(containerEl) {
     if (pageInput) {
       pageInput.value = String(state.pdf.currentPage);
     }
-    if (state.pdf.viewMode === 'iframe') {
-      const iframe = containerEl.querySelector('.pdf-frame');
-      if (iframe) {
-        state.pdf.cacheBust = Date.now();
-        iframe.src = buildPdfStreamSrc();
-      } else {
-        renderPdfViewerStage();
-      }
+    const iframe = containerEl.querySelector('.pdf-frame');
+    if (iframe) {
+      state.pdf.cacheBust = Date.now();
+      iframe.src = buildPdfStreamSrc();
     } else {
       renderPdfViewerStage();
     }
@@ -3432,7 +3638,7 @@ export function initCenterView(containerEl) {
     removeDropInsertLine();
     const doc = state.activeDoc;
     const pdf = state.pdf;
-    const isIframe = pdf.viewMode !== 'hd';
+    const compModeCls = state.companionLayout === 'split' ? 'is-comp-split' : 'is-comp-float';
 
     ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
@@ -3463,22 +3669,13 @@ export function initCenterView(containerEl) {
             />
             <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-jump-page">跳转</button>
           </div>
-          <div class="segmented-pill" data-seg="pdf-view-mode" role="tablist" aria-label="PDF 渲染模式切换">
-            <div class="segmented-thumb" style="width:calc(50% - 3px); transform:translateX(${isIframe ? '0%' : '100%'});"></div>
-            <button type="button" class="segmented-btn ${isIframe ? 'is-active' : ''}" data-pdf-view="iframe" role="tab" aria-selected="${isIframe}" style="height:24px;padding:0 9px;font-size:11.5px;">
-              原生预览
-            </button>
-            <button type="button" class="segmented-btn ${!isIframe ? 'is-active' : ''}" data-pdf-view="hd" role="tab" aria-selected="${!isIframe}" style="height:24px;padding:0 9px;font-size:11.5px;">
-              高清兼容
-            </button>
-          </div>
         </div>
 
         <div class="center-toolbar-group">
           <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-copy-anchor" title="复制当前页码锚点">
             ${icon('pin', 13)} 复制页码锚点
           </button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-annotate">
+          <button type="button" class="pill-btn pill-btn-sm ${pdf.annotOpen ? 'pill-btn-primary' : ''}" data-action="pdf-annotate" title="打开/收起非遮挡行内批注栏">
             ${icon('plus', 13)} 写入 PDF 批注
           </button>
           <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-ai-mindmap" title="AI 提炼 PDF 思维导图">
@@ -3490,11 +3687,67 @@ export function initCenterView(containerEl) {
           <button type="button" class="pill-btn pill-btn-sm" data-action="ai-summarize">
             ${icon('sparkles', 13)} AI 总结
           </button>
+          ${
+            hasCompanionNote(doc)
+              ? `<button type="button" class="pill-btn pill-btn-sm ${state.companionOpen ? 'pill-btn-primary' : ''}" data-action="toggle-companion" title="打开/收起伴生笔记浮窗或分屏">
+                  ${icon('file-text', 13)} 伴生笔记
+                </button>`
+              : ''
+          }
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden;">
-        <div class="pdf-workspace">
+      <div
+        data-role="pdf-annot-bar"
+        style="display:${pdf.annotOpen ? 'flex' : 'none'}; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 14px; border-bottom:1px solid var(--border-hairline); background:var(--bg-glass); flex-shrink:0;"
+      >
+        <div style="display:inline-flex; align-items:center; gap:5px; flex-shrink:0;">
+          <span style="font-size:12px; font-weight:600; color:var(--text-secondary);">页码</span>
+          <input
+            type="number"
+            class="apple-input"
+            data-role="pdf-annot-page"
+            min="1"
+            max="${pdf.totalPages}"
+            value="${pdf.currentPage}"
+            aria-label="批注目标页码"
+            style="width:62px; height:28px; padding:2px 6px; font-size:12px; text-align:center;"
+          />
+        </div>
+        <div style="display:inline-flex; align-items:center; gap:4px; flex-shrink:0;" role="group" aria-label="批注标签颜色">
+          ${[
+            { id: 'yellow', label: '🟡 重点' },
+            { id: 'red', label: '🔴 疑问' },
+            { id: 'green', label: '🟢 结论' },
+            { id: 'blue', label: '🔵 摘录' },
+          ]
+            .map(
+              (c) => `
+            <button
+              type="button"
+              class="pill-btn pill-btn-sm ${(pdf.annotColor || 'yellow') === c.id ? 'pill-btn-primary' : ''}"
+              data-pdf-annot-color="${c.id}"
+              style="height:26px; padding:0 8px; font-size:11.5px;"
+            >${c.label}</button>
+          `
+            )
+            .join('')}
+        </div>
+        <input
+          type="text"
+          class="apple-input"
+          data-role="pdf-annot-input"
+          placeholder="边看 PDF 边输入批注（回车立即写入并同步至伴生笔记，Esc 关闭）…"
+          style="flex:1 1 220px; min-width:180px; height:28px; padding:2px 10px; font-size:12.5px;"
+        />
+        <div style="display:inline-flex; align-items:center; gap:5px; flex-shrink:0;">
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-action="pdf-annot-submit">写入批注</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-action="pdf-annot-close" title="收起批注栏" style="width:26px; padding:0;">✕</button>
+        </div>
+      </div>
+
+      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; position:relative;">
+        <div class="pdf-workspace ${compModeCls}">
           <div class="pdf-frame-wrap" data-role="pdf-frame-wrap"></div>
           ${renderCompanionPaneHtml(doc, {
             placeholderText: `边看 PDF 边记笔记，支持 [[${doc.name}#page=${pdf.currentPage}]] 锚点…`,
@@ -3581,58 +3834,80 @@ export function initCenterView(containerEl) {
     }
   }
 
-  function openPdfAnnotateSheet() {
+  function openPdfAnnotateSheet(forceOpen = null) {
     if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
+    const bar = containerEl.querySelector('[data-role="pdf-annot-bar"]');
+    const nextOpen = typeof forceOpen === 'boolean' ? forceOpen : !state.pdf.annotOpen;
+    state.pdf.annotOpen = nextOpen;
+    const toggleBtn = containerEl.querySelector('[data-action="pdf-annotate"]');
+    if (toggleBtn) toggleBtn.classList.toggle('pill-btn-primary', nextOpen);
+    if (!bar) {
+      renderPdfMode();
+      if (nextOpen) {
+        containerEl.querySelector('[data-role="pdf-annot-input"]')?.focus();
+      }
+      return;
+    }
+    bar.style.display = nextOpen ? 'flex' : 'none';
+    if (nextOpen) {
+      const pageInp = bar.querySelector('[data-role="pdf-annot-page"]');
+      if (pageInp) pageInp.value = String(state.pdf.currentPage);
+      const textInp = bar.querySelector('[data-role="pdf-annot-input"]');
+      if (textInp) {
+        textInp.focus();
+        textInp.select?.();
+      }
+    }
+  }
+
+  async function submitPdfInlineAnnotation() {
     const doc = state.activeDoc;
-    openSheet({
-      title: `写入 PDF 批注 · ${doc.name}`,
-      bodyHtml: `
-        <form id="pdf-annot-form" style="display:flex; flex-direction:column; gap:10px;">
-          <div>
-            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">目标页码（共 ${state.pdf.totalPages} 页）</label>
-            <input type="number" class="apple-input" id="pdf-annot-page" min="1" max="${state.pdf.totalPages}" value="${state.pdf.currentPage}" />
-          </div>
-          <div>
-            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">批注内容</label>
-            <textarea class="apple-textarea" id="pdf-annot-text" rows="4" placeholder="输入需要永久写入 PDF 页面批注层的文字…"></textarea>
-          </div>
-        </form>
-      `,
-      footerHtml: `
-        <button type="button" class="pill-btn" id="pdf-annot-cancel">取消</button>
-        <button type="button" class="pill-btn pill-btn-primary" id="pdf-annot-submit">写入批注</button>
-      `,
-      onMount(card) {
-        card.querySelector('#pdf-annot-cancel')?.addEventListener('click', closeSheet);
-        const submitBtn = card.querySelector('#pdf-annot-submit');
-        const doAnnotate = async () => {
-          const pageVal = Number.parseInt(card.querySelector('#pdf-annot-page')?.value, 10) || state.pdf.currentPage;
-          const noteText = card.querySelector('#pdf-annot-text')?.value?.trim() || '';
-          if (!noteText) {
-            showToast('请输入批注内容', 'warning');
-            return;
-          }
-          if (submitBtn) submitBtn.disabled = true;
-          try {
-            const res = await api.post('/api/files/pdf-annotate', {
-              path: doc.path,
-              page: Math.min(Math.max(1, pageVal), state.pdf.totalPages),
-              note_text: noteText,
-            });
-            state.pdf.currentPage = Number(res?.page || pageVal);
-            closeSheet();
-            updatePdfFrameAndControls({ forceReload: true });
-            store.emit('file:saved', { path: doc.path, page: state.pdf.currentPage, snapshot_id: res?.snapshot_id || null });
-            showToast(`已写入第 ${state.pdf.currentPage} 页批注并创建安全快照`, 'success');
-          } catch (err) {
-            if (submitBtn) submitBtn.disabled = false;
-            showToast(getErrorMsg(err, '写入 PDF 批注失败'), 'error');
-          }
-        };
-        submitBtn?.addEventListener('click', doAnnotate);
-        card.querySelector('#pdf-annot-text')?.focus();
-      },
-    });
+    if (!doc || doc.type !== 'pdf') return;
+    const bar = containerEl.querySelector('[data-role="pdf-annot-bar"]');
+    const pageInp = bar?.querySelector('[data-role="pdf-annot-page"]');
+    const textInp = bar?.querySelector('[data-role="pdf-annot-input"]');
+    const submitBtn = bar?.querySelector('[data-action="pdf-annot-submit"]');
+    const pageVal = Number.parseInt(pageInp?.value, 10) || state.pdf.currentPage;
+    const clampedPage = Math.min(Math.max(1, pageVal), state.pdf.totalPages || 1);
+    const noteText = String(textInp?.value || '').trim();
+    if (!noteText) {
+      showToast('请输入批注内容', 'warning');
+      textInp?.focus();
+      return;
+    }
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      // Preserve any unsaved user edits in companion note before backend appends annotation
+      if (state.pdf.companionDirty && hasCompanionNote(doc)) {
+        await saveCompanionNote({ silent: true });
+      }
+      const color = state.pdf.annotColor || 'yellow';
+      const res = await api.post('/api/files/pdf-annotate', {
+        path: doc.path,
+        page: clampedPage,
+        note_text: noteText,
+        color,
+      });
+      state.pdf.currentPage = Number(res?.page || clampedPage);
+      state.pdf.cacheBust = Date.now();
+      if (typeof res?.companion_content === 'string') {
+        doc.companionContent = res.companion_content;
+        doc.companionExists = true;
+        state.pdf.companionDirty = false;
+        store.state.activeDocumentText = doc.companionContent;
+      }
+      state.companionOpen = true;
+      if (textInp) textInp.value = '';
+      renderPdfMode();
+      // Keep inline bar open for quick consecutive annotations and refocus input
+      const nextInp = containerEl.querySelector('[data-role="pdf-annot-input"]');
+      if (nextInp && state.pdf.annotOpen) nextInp.focus();
+      store.emit('file:saved', { path: doc.path, page: state.pdf.currentPage, snapshot_id: res?.snapshot_id || null });
+      showToast(`已写入第 ${state.pdf.currentPage} 页批注（${res?.tag || color}）并同步至伴生笔记`, 'success');
+    } catch (err) {
+      if (submitBtn) submitBtn.disabled = false;
+      showToast(getErrorMsg(err, '写入 PDF 批注失败'), 'error');
+    }
   }
 
   // =========================================================================
@@ -3782,8 +4057,8 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; display:grid; grid-template-columns:${state.companionOpen && hasCompanionNote(doc) ? 'minmax(200px,0.75fr) minmax(0,1.25fr) minmax(240px,0.9fr)' : 'minmax(210px,0.8fr) minmax(0,1.4fr)'}; overflow:hidden;">
-        <div class="archive-tree" style="border-right:1px solid var(--border-hairline); overflow-y:auto; padding:8px;">
+      <div style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:row; overflow:hidden; position:relative;">
+        <div class="archive-tree" style="width:230px; flex:0 0 230px; border-right:1px solid var(--border-hairline); overflow-y:auto; padding:8px;">
           ${
             ar.entries.length === 0
               ? `<div class="empty-state"><p class="empty-desc">压缩包为空</p></div>`
@@ -3809,7 +4084,7 @@ export function initCenterView(containerEl) {
                   .join('')
           }
         </div>
-        <div data-role="archive-preview-pane" style="display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;border-right:${state.companionOpen && hasCompanionNote(doc) ? '1px solid var(--border-hairline)' : 'none'};"></div>
+        <div data-role="archive-preview-pane" style="flex:1 1 auto; display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;"></div>
         ${
           state.companionOpen && hasCompanionNote(doc)
             ? renderCompanionPaneHtml(doc, {
@@ -3874,9 +4149,9 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; ${state.companionOpen && hasCompanionNote(doc) ? '' : 'display:flex;flex-direction:column;'}">
-        <div class="${state.companionOpen && hasCompanionNote(doc) ? 'pdf-workspace' : ''}" style="height:100%;min-height:0;display:${state.companionOpen && hasCompanionNote(doc) ? 'grid' : 'flex'};flex-direction:column;">
-          <div style="flex:1 1 auto;min-width:0;min-height:0;overflow:auto;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--bg-subtle);${state.companionOpen && hasCompanionNote(doc) ? 'border-right:1px solid var(--border-hairline);' : ''}">
+      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; position:relative;">
+        <div class="pdf-workspace ${state.companionLayout === 'split' ? 'is-comp-split' : 'is-comp-float'}">
+          <div style="flex:1 1 auto;min-width:0;min-height:0;overflow:auto;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--bg-subtle);">
             <img
               data-role="image-viewer-img"
               src="${src}"
@@ -3956,12 +4231,19 @@ export function initCenterView(containerEl) {
           <button type="button" class="pill-btn pill-btn-sm" data-action="open-system">
             ${icon('external-link', 13)} 系统打开
           </button>
+          ${
+            hasCompanionNote(doc)
+              ? `<button type="button" class="pill-btn pill-btn-sm ${state.companionOpen ? 'pill-btn-primary' : ''}" data-action="toggle-companion">
+                  ${icon('file-text', 13)} 伴生笔记
+                </button>`
+              : ''
+          }
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden;">
-        <div class="pdf-workspace">
-          <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:14px;background:var(--bg-subtle);border-right:1px solid var(--border-hairline);min-width:0;min-height:0;overflow:auto;">
+      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; position:relative;">
+        <div class="pdf-workspace ${state.companionLayout === 'split' ? 'is-comp-split' : 'is-comp-float'}">
+          <div style="flex:1 1 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:14px;background:var(--bg-subtle);min-width:0;min-height:0;overflow:auto;">
             ${
               isVideo
                 ? `<video data-role="media-player-el" controls preload="metadata" src="${src}" style="width:100%;max-height:72vh;border-radius:14px;background:#000;box-shadow:var(--shadow-float);outline:none;"></video>`
@@ -4036,9 +4318,9 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; ${state.companionOpen && hasCompanionNote(doc) ? '' : 'display:flex;flex-direction:column;'}">
-        <div class="${state.companionOpen && hasCompanionNote(doc) ? 'pdf-workspace' : ''}" style="height:100%;min-height:0;display:${state.companionOpen && hasCompanionNote(doc) ? 'grid' : 'flex'};flex-direction:column;">
-          <div class="md-scroll-area" style="${state.companionOpen && hasCompanionNote(doc) ? 'border-right:1px solid var(--border-hairline);' : ''}">
+      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; position:relative;">
+        <div class="pdf-workspace ${state.companionLayout === 'split' ? 'is-comp-split' : 'is-comp-float'}">
+          <div class="md-scroll-area" style="flex:1 1 auto;">
             <div class="md-preview">${renderMarkdownSafe(previewMd, { withLineMap: false })}</div>
           </div>
           ${
@@ -4088,9 +4370,9 @@ export function initCenterView(containerEl) {
         </div>
       </div>
 
-      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; ${state.companionOpen && hasCompanionNote(doc) ? '' : 'display:flex;flex-direction:column;'}">
-        <div class="${state.companionOpen && hasCompanionNote(doc) ? 'pdf-workspace' : ''}" style="height:100%;min-height:0;display:${state.companionOpen && hasCompanionNote(doc) ? 'grid' : 'flex'};flex-direction:column;">
-          <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto;${state.companionOpen && hasCompanionNote(doc) ? 'border-right:1px solid var(--border-hairline);' : ''}">
+      <div style="flex:1 1 auto; min-height:0; min-width:0; overflow:hidden; position:relative;">
+        <div class="pdf-workspace ${state.companionLayout === 'split' ? 'is-comp-split' : 'is-comp-float'}">
+          <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto;">
             <div class="glass-card" style="max-width:460px;width:100%;padding:28px 24px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:12px;">
               <div style="width:52px;height:52px;border-radius:16px;background:var(--bg-subtle);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;">
                 ${icon(docIconName(doc.type, doc.ext), 26)}
@@ -4429,18 +4711,14 @@ export function initCenterView(containerEl) {
       if (type === 'pdf') {
         const total = Math.max(1, Number(data.page_count || 1));
         const initPage = opts.initialPage ? Math.min(Math.max(1, Number(opts.initialPage)), total) : 1;
-        const prevViewMode = state.pdf?.viewMode === 'hd' ? 'hd' : 'iframe';
-        const prevZoom = Number(state.pdf?.zoom) || 1.6;
         state.pdf = {
-          viewMode: prevViewMode,
-          zoom: prevZoom,
           currentPage: initPage,
           totalPages: total,
           companionMode: 'edit',
           companionDirty: false,
           cacheBust: Date.now(),
-          imgLoading: false,
-          imgError: false,
+          annotOpen: false,
+          annotColor: state.pdf?.annotColor || 'yellow',
         };
         syncActiveFileStore();
         renderPdfMode();
@@ -5523,7 +5801,7 @@ export function initCenterView(containerEl) {
 
       const isSameDocMove = Boolean(
         payload?.dragMode === 'move' &&
-        !(dropEvent?.ctrlKey || dropEvent?.metaKey) &&
+        !isCopyDragEvent(dropEvent) &&
         payload?.sourceRawToken &&
         payload?.sourceDocPath &&
         isSamePath(payload.sourceDocPath, doc.path)
@@ -5616,7 +5894,7 @@ export function initCenterView(containerEl) {
     if (!isAcceptableBlockDrag(e)) return;
     e.preventDefault();
     if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = e.ctrlKey || e.metaKey ? 'copy' : 'move';
+      e.dataTransfer.dropEffect = isCopyDragEvent(e) ? 'copy' : 'move';
     }
     if (updatePrecisionDropLine(e)) {
       showDropOverlay(false);
@@ -5654,11 +5932,12 @@ export function initCenterView(containerEl) {
     const payload = readDragPayload(e);
     clearDragPayload();
     if (!payload || payload.type === 'module-reorder') return;
-    if (e.ctrlKey || e.metaKey) {
+    const isCopy = isCopyDragEvent(e);
+    if (isCopy) {
       payload.dragMode = 'copy';
     }
     insertDroppedMarkdown(payload, { lineIdx: savedLineIdx, dropEvent: e });
-    if (payload.sourceShelfId && !e.ctrlKey && !e.metaKey && typeof consumeShelfItem === 'function') {
+    if (payload.sourceShelfId && !isCopy && typeof consumeShelfItem === 'function') {
       consumeShelfItem(payload.sourceShelfId);
     }
   });
@@ -5712,7 +5991,7 @@ export function initCenterView(containerEl) {
         label,
         markdown: rawToken,
         path: filePath,
-        dragMode: e.ctrlKey || e.metaKey ? 'copy' : 'move',
+        dragMode: isCopyDragEvent(e) ? 'copy' : 'move',
         sourceDocPath: state.activeDoc?.path || '',
         sourceRawToken: rawToken,
         ...(Number.isFinite(sourceBlockStart) ? { sourceBlockStart } : {}),
@@ -6404,8 +6683,229 @@ export function initCenterView(containerEl) {
     showToast('已调整段落顺序（Ctrl+Z 可撤回）', 'success');
   }
 
-  // V4 #6: Drag Resize Handle (.media-resize-handle) & V6 0.5s Long-Press Block Drag
+  // V4 #6: Drag Resize Handle (.media-resize-handle), Split Resizers, Companion Float Win & V6 0.5s Long-Press Block Drag
   containerEl.addEventListener('pointerdown', (e) => {
+    // 1. Main Dual-Pane Split Resizer (.center-split-resizer)
+    const splitResizer = e.target.closest('[data-role="center-split-resizer"]');
+    if (splitResizer) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const layout = ensureSplitLayoutEl();
+      const mainPane = layout.querySelector(':scope > [data-role="center-main-pane"]');
+      const splitPane = layout.querySelector(':scope > .center-split-pane');
+      if (!mainPane || !splitPane) return;
+
+      splitResizer.classList.add('is-resizing');
+      document.body.classList.add('is-pane-resizing');
+
+      const onMove = (ev) => {
+        const rect = layout.getBoundingClientRect();
+        if (!rect.width) return;
+        const relX = ev.clientX - rect.left;
+        const rightRatio = Math.min(0.8, Math.max(0.2, 1 - relX / rect.width));
+        state.splitRatio = Number(rightRatio.toFixed(3));
+        const leftPct = ((1 - state.splitRatio) * 100).toFixed(1);
+        const rightPct = (state.splitRatio * 100).toFixed(1);
+        mainPane.style.flex = `0 0 calc(${leftPct}% - 4px)`;
+        splitPane.style.flex = `1 1 calc(${rightPct}% - 4px)`;
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        splitResizer.classList.remove('is-resizing');
+        document.body.classList.remove('is-pane-resizing');
+        try {
+          localStorage.setItem('sln_split_ratio', String(state.splitRatio));
+        } catch {
+          // ignore
+        }
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
+
+    // 2. Companion Split-Pane Resizer (.companion-split-resizer)
+    const compSplitResizer = e.target.closest('[data-role="companion-split-resizer"]');
+    if (compSplitResizer) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const ws = compSplitResizer.parentElement;
+      const compPane = ws?.querySelector(':scope > [data-role="companion-split-pane"]');
+      if (!ws || !compPane) return;
+
+      compSplitResizer.classList.add('is-resizing');
+      document.body.classList.add('is-pane-resizing');
+
+      const onMove = (ev) => {
+        const rect = ws.getBoundingClientRect();
+        if (!rect.width) return;
+        const relX = ev.clientX - rect.left;
+        const compRatio = Math.min(0.72, Math.max(0.22, 1 - relX / rect.width));
+        state.companionSplitRatio = Number(compRatio.toFixed(3));
+        const pct = (state.companionSplitRatio * 100).toFixed(1);
+        compPane.style.flex = `0 0 ${pct}%`;
+        compPane.style.width = `${pct}%`;
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        compSplitResizer.classList.remove('is-resizing');
+        document.body.classList.remove('is-pane-resizing');
+        try {
+          localStorage.setItem('sln_companion_split_ratio', String(state.companionSplitRatio));
+        } catch {
+          // ignore
+        }
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
+
+    // 3. Companion Floating Window 5-Way Resize Handles ([data-comp-resize])
+    const compResizeHandle = e.target.closest('[data-comp-resize]');
+    if (compResizeHandle) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      const floatWin = compResizeHandle.closest('[data-role="companion-float-win"]');
+      const hostEl = floatWin?.offsetParent || floatWin?.parentElement;
+      if (!floatWin || !hostEl) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const dir = compResizeHandle.dataset.compResize || 'se';
+      const hostRect = hostEl.getBoundingClientRect();
+      const winRect = floatWin.getBoundingClientRect();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startLeft = winRect.left - hostRect.left;
+      const startTop = winRect.top - hostRect.top;
+      const startW = winRect.width;
+      const startH = winRect.height;
+
+      document.body.classList.add('is-pane-resizing');
+
+      const onMove = (ev) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        let nextLeft = startLeft;
+        let nextTop = startTop;
+        let nextW = startW;
+        let nextH = startH;
+
+        if (dir.includes('e')) {
+          nextW = Math.min(Math.max(260, startW + dx), Math.max(280, hostRect.width - startLeft - 8));
+        }
+        if (dir.includes('w')) {
+          const maxDeltaLeft = startW - 260;
+          const clampedDx = Math.min(maxDeltaLeft, Math.max(-startLeft + 8, dx));
+          nextLeft = Math.round(startLeft + clampedDx);
+          nextW = Math.round(startW - clampedDx);
+        }
+        if (dir.includes('s')) {
+          nextH = Math.min(Math.max(220, startH + dy), Math.max(240, hostRect.height - startTop - 8));
+        }
+
+        floatWin.style.right = 'auto';
+        floatWin.style.left = `${Math.round(nextLeft)}px`;
+        floatWin.style.top = `${Math.round(nextTop)}px`;
+        floatWin.style.width = `${Math.round(nextW)}px`;
+        floatWin.style.height = `${Math.round(nextH)}px`;
+
+        state.companionFloatRect = {
+          left: Math.round(nextLeft),
+          right: null,
+          top: Math.round(nextTop),
+          w: Math.round(nextW),
+          h: Math.round(nextH),
+        };
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        document.body.classList.remove('is-pane-resizing');
+        try {
+          localStorage.setItem('sln_companion_float_rect', JSON.stringify(state.companionFloatRect));
+        } catch {
+          // ignore
+        }
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
+
+    // 4. Companion Floating Window Header Drag Move ([data-role="companion-float-header"])
+    const compFloatHeader = e.target.closest('[data-role="companion-float-header"]');
+    if (compFloatHeader && state.companionLayout !== 'split' && !e.target.closest('button, input, select, .segmented-pill')) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      const floatWin = compFloatHeader.closest('[data-role="companion-float-win"]');
+      const hostEl = floatWin?.offsetParent || floatWin?.parentElement;
+      if (floatWin && hostEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        const hostRect = hostEl.getBoundingClientRect();
+        const winRect = floatWin.getBoundingClientRect();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startLeft = winRect.left - hostRect.left;
+        const startTop = winRect.top - hostRect.top;
+        const winW = winRect.width;
+        const winH = winRect.height;
+
+        document.body.classList.add('is-pane-resizing');
+
+        const onMove = (ev) => {
+          const maxLeft = Math.max(8, hostRect.width - winW - 8);
+          const maxTop = Math.max(8, hostRect.height - Math.min(winH, 80) - 8);
+          const nextLeft = Math.round(Math.min(maxLeft, Math.max(8, startLeft + (ev.clientX - startX))));
+          const nextTop = Math.round(Math.min(maxTop, Math.max(8, startTop + (ev.clientY - startY))));
+          floatWin.style.right = 'auto';
+          floatWin.style.left = `${nextLeft}px`;
+          floatWin.style.top = `${nextTop}px`;
+          state.companionFloatRect = {
+            ...state.companionFloatRect,
+            left: nextLeft,
+            right: null,
+            top: nextTop,
+            w: Math.round(winW),
+            h: Math.round(winH),
+          };
+        };
+
+        const onUp = () => {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          document.body.classList.remove('is-pane-resizing');
+          try {
+            localStorage.setItem('sln_companion_float_rect', JSON.stringify(state.companionFloatRect));
+          } catch {
+            // ignore
+          }
+        };
+
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+        return;
+      }
+    }
+
     const handle = e.target.closest('.media-resize-handle');
     if (handle) {
       const card = handle.closest('.media-embed-card');
@@ -6535,7 +7035,7 @@ export function initCenterView(containerEl) {
       const savedLineIdx = dropTargetLineIdx;
       const hitEl = document.elementFromPoint(ev.clientX, ev.clientY);
       const payload = sess.payload;
-      const isCopyDrag = Boolean(ev.ctrlKey || ev.metaKey);
+      const isCopyDrag = isCopyDragEvent(ev);
       cancelActiveHoldSession();
       window.setTimeout(() => {
         suppressNextBlockClick = false;
@@ -6549,7 +7049,7 @@ export function initCenterView(containerEl) {
         }
         if (!isCopyDrag) {
           cutBlockRangeFromDoc(startLine, endLine);
-          showToast('已剪切至灵动岛暂存栏（按住 Ctrl 拖为复制）', 'success');
+          showToast('已剪切至灵动岛暂存栏（可在工具栏或右键切换默认复制/剪切）', 'success');
         } else {
           showToast('已复制至灵动岛暂存栏', 'success');
         }
@@ -6560,7 +7060,12 @@ export function initCenterView(containerEl) {
         return;
       }
       if (ensureMainPaneEl().contains(hitEl) && Number.isFinite(savedLineIdx)) {
-        if (savedLineIdx < startLine || savedLineIdx > endLine + 1) {
+        if (isCopyDrag) {
+          insertDroppedMarkdown(
+            { ...payload, dragMode: 'copy' },
+            { lineIdx: savedLineIdx, dropEvent: ev }
+          );
+        } else if (savedLineIdx < startLine || savedLineIdx > endLine + 1) {
           reorderLiveBlock(startLine, endLine, raw, savedLineIdx);
         }
       }
@@ -6620,7 +7125,7 @@ export function initCenterView(containerEl) {
       ghost.className = 'lp-drag-ghost';
       ghost.style.pointerEvents = 'none';
       ghost.style.transform = `translate3d(${Math.round(startX + 14)}px, ${Math.round(startY + 14)}px, 0)`;
-      ghost.textContent = `⠿ ${firstLinePreview}`;
+      ghost.textContent = `${state.dragDefaultMode === 'copy' ? '📋 复制' : '✂ 移动'} · ⠿ ${firstLinePreview}`;
       document.body.appendChild(ghost);
       sess.ghostEl = ghost;
       store.emit('drag:active', true);
@@ -6640,6 +7145,10 @@ export function initCenterView(containerEl) {
       menu.id = 'capsule-context-menu';
       menu.className = 'context-menu capsule-context-menu';
       menu.hidden = true;
+      // Prevent mousedown inside context menu from stealing editor focus or collapsing text selection
+      menu.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+      });
       document.body.appendChild(menu);
     }
     if (!capsuleMenuListenersBound) {
@@ -6893,9 +7402,289 @@ export function initCenterView(containerEl) {
     }
   }
 
+  function restoreEditorContextSelection(ctxInfo) {
+    if (!ctxInfo) return false;
+    if (ctxInfo.taEl && Number.isFinite(ctxInfo.taSelStart) && Number.isFinite(ctxInfo.taSelEnd)) {
+      ctxInfo.taEl.focus({ preventScroll: true });
+      try {
+        ctxInfo.taEl.setSelectionRange(ctxInfo.taSelStart, ctxInfo.taSelEnd);
+      } catch {
+        // ignore
+      }
+      return true;
+    }
+    if (ctxInfo.savedRange) {
+      try {
+        const activeEditor = containerEl.querySelector('.lp-block-wysiwyg');
+        if (activeEditor && activeEditor.contains(ctxInfo.savedRange.commonAncestorContainer)) {
+          activeEditor.focus({ preventScroll: true });
+        }
+        const sel = window.getSelection();
+        if (sel) {
+          sel.removeAllRanges();
+          sel.addRange(ctxInfo.savedRange);
+          return true;
+        }
+      } catch {
+        // ignore detached range
+      }
+    }
+    return false;
+  }
+
+  async function handleEditorContextMenuAction(act, ctxInfo) {
+    hideCapsuleContextMenu();
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+
+    if (act === 'set-drag-cut') {
+      setDragDefaultMode('cut');
+      return;
+    }
+    if (act === 'set-drag-copy') {
+      setDragDefaultMode('copy');
+      return;
+    }
+
+    const { selectedText, blockEl, blockIdx, startLine, endLine, blockRaw } = ctxInfo || {};
+
+    if (act === 'editor-copy') {
+      const textToCopy = (selectedText || blockRaw || doc.content || '').trim();
+      if (textToCopy) {
+        internalClipboard = textToCopy;
+        copyInternal(textToCopy, selectedText ? '已复制选中文本' : '已复制当前段落');
+      } else {
+        showToast('当前无可复制内容', 'info');
+      }
+      return;
+    }
+
+    if (act === 'editor-cut') {
+      if (state.mdMode === 'source') {
+        const ta = ensureMainPaneEl().querySelector('.md-editor:not([data-role])');
+        if (ta) {
+          restoreEditorContextSelection(ctxInfo);
+          applySourceFormatAction(ta, 'cut');
+        }
+        return;
+      }
+      const activeEditor = containerEl.querySelector('.lp-block-wysiwyg');
+      if (selectedText && state.mdMode === 'live' && activeEditor && (!blockEl || blockEl.contains(activeEditor))) {
+        restoreEditorContextSelection(ctxInfo);
+        applyWysiwygBarAction('cut');
+        return;
+      }
+      // If user selected partial text in a rendered (non-editing) block, cut only that selected substring
+      if (selectedText && state.mdMode === 'live' && Number.isFinite(startLine) && blockRaw && blockRaw.includes(selectedText)) {
+        internalClipboard = selectedText;
+        copyInternal(selectedText, '已剪切选中文本（Ctrl+Z 可撤回）');
+        commitActiveBlock({ reRender: false });
+        pushUndoSnapshot(doc.content, { immediate: true });
+        const lines = getMdLines();
+        const sIdx = Math.max(0, startLine);
+        const eIdx = Math.min(lines.length - 1, Math.max(sIdx, endLine ?? sIdx));
+        const slice = lines.slice(sIdx, eIdx + 1).join('\n');
+        const nextSlice = slice.replace(selectedText, '');
+        const repLines = nextSlice.trim() ? nextSlice.split('\n') : [];
+        lines.splice(sIdx, eIdx - sIdx + 1, ...repLines);
+        let nextFull = lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
+        if (nextFull && !nextFull.endsWith('\n')) nextFull += '\n';
+        doc.content = nextFull;
+        state.dirty = true;
+        store.state.activeDocumentText = nextFull;
+        renderMarkdownMode();
+        return;
+      }
+      if (Number.isFinite(startLine) && blockRaw) {
+        internalClipboard = blockRaw;
+        copyInternal(blockRaw, '已剪切当前段落（Ctrl+Z 可撤回）');
+        commitActiveBlock({ reRender: false });
+        cutBlockRangeFromDoc(startLine, endLine);
+      }
+      return;
+    }
+
+    if (act === 'editor-paste') {
+      let clipText = '';
+      try {
+        clipText = await navigator.clipboard.readText();
+      } catch {
+        clipText = '';
+      }
+      const textToPaste = String(clipText || internalClipboard || '');
+      if (!textToPaste.trim()) {
+        showToast('剪贴板为空', 'warning');
+        return;
+      }
+      const activeEditor = containerEl.querySelector('.lp-block-wysiwyg');
+      if (state.mdMode === 'live' && activeEditor && (!blockEl || blockEl.contains(activeEditor))) {
+        pushUndoSnapshot(doc.content, { immediate: true });
+        restoreEditorContextSelection(ctxInfo);
+        activeEditor.focus({ preventScroll: true });
+        document.execCommand?.('insertText', false, textToPaste);
+        syncWysiwygBlockInput(activeEditor, { immediateUndoAlreadyPushed: true });
+        showToast('已粘贴到光标处', 'success');
+        return;
+      }
+      if (state.mdMode === 'source') {
+        const ta = ensureMainPaneEl().querySelector('.md-editor:not([data-role])');
+        if (ta) {
+          restoreEditorContextSelection(ctxInfo);
+          applySourceFormatAction(ta, 'paste');
+          return;
+        }
+      }
+      commitActiveBlock({ reRender: false });
+      const insertAt = Number.isFinite(endLine) ? endLine + 1 : getMdLines().length;
+      insertDroppedMarkdown({ markdown: textToPaste.trim(), label: '剪贴板内容' }, { lineIdx: insertAt });
+      return;
+    }
+
+    if (act === 'editor-duplicate-block') {
+      if (!Number.isFinite(startLine) || !blockRaw) return;
+      commitActiveBlock({ reRender: false });
+      insertDroppedMarkdown({ markdown: blockRaw, label: '克隆段落', dragMode: 'copy' }, { lineIdx: endLine + 1 });
+      return;
+    }
+
+    if (act === 'editor-to-shelf') {
+      const md = (selectedText || blockRaw || '').trim();
+      if (!md) return;
+      const preview = md.split('\n')[0].replace(/[#>*`\[\]]/g, '').trim().slice(0, 28) || '笔记片段';
+      if (typeof addToShelf === 'function') {
+        addToShelf({ type: 'lp-block', label: preview, markdown: md, sourceDocPath: doc.path });
+      }
+      showToast('已放入顶部灵动岛暂存栏', 'success');
+      return;
+    }
+
+    if (act === 'editor-delete-block') {
+      if (!Number.isFinite(startLine)) return;
+      commitActiveBlock({ reRender: false });
+      cutBlockRangeFromDoc(startLine, endLine);
+      showToast('已删除段落（Ctrl+Z 可撤回）', 'success');
+      return;
+    }
+
+    if (act.startsWith('fmt:')) {
+      const fmtKind = act.slice(4);
+      if (Number.isFinite(blockIdx) && state.mdMode === 'live' && state.editingBlockIdx !== blockIdx) {
+        state.editingBlockIdx = blockIdx;
+        state.editingDraftNewBlock = false;
+        state.editingDraftInsert = null;
+        renderMarkdownMode();
+      } else {
+        restoreEditorContextSelection(ctxInfo);
+      }
+      applyWysiwygBarAction(fmtKind);
+    }
+  }
+
   containerEl.addEventListener('contextmenu', (e) => {
     const capEl = e.target.closest('.anchor-pill, .media-embed-card');
-    if (!capEl) return;
+    if (!capEl) {
+      // Check if user right-clicked inside the Live WYSIWYG editor or Source editor
+      const isEditableDoc = Boolean(
+        state.activeDoc && (state.activeDoc.type === 'markdown' || state.activeDoc.type === 'text')
+      );
+      const inEditorArea = e.target.closest('.lp-container, .lp-block, .lp-block-wysiwyg, .md-editor:not([data-role])');
+      if (!isEditableDoc || !inEditorArea) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      hideHoverPeekCard();
+
+      const taEl = e.target.closest('.md-editor:not([data-role])');
+      const sel = window.getSelection();
+      const taSelStart = taEl ? taEl.selectionStart : null;
+      const taSelEnd = taEl ? taEl.selectionEnd : null;
+      const selectedText = taEl
+        ? taSelStart !== null && taSelEnd !== null && taSelEnd > taSelStart
+          ? taEl.value.slice(taSelStart, taSelEnd)
+          : ''
+        : sel && !sel.isCollapsed
+        ? sel.toString()
+        : '';
+      const savedRange = !taEl && sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+      const blockEl = e.target.closest('.lp-block[data-md-start]');
+      const blockIdx = blockEl && blockEl.dataset.blockIdx !== undefined ? Number.parseInt(blockEl.dataset.blockIdx, 10) : null;
+      const startLine = blockEl ? Number.parseInt(blockEl.dataset.mdStart, 10) : null;
+      const endLine = blockEl ? Number.parseInt(blockEl.dataset.mdEnd ?? blockEl.dataset.mdStart, 10) : null;
+      const blockRaw =
+        Number.isFinite(startLine) && Number.isFinite(endLine)
+          ? getMdLines().slice(startLine, Math.max(startLine, endLine) + 1).join('\n')
+          : '';
+
+      const ctxInfo = { selectedText, savedRange, taEl, taSelStart, taSelEnd, blockEl, blockIdx, startLine, endLine, blockRaw };
+      const isCopyMode = state.dragDefaultMode === 'copy';
+      const menu = ensureCapsuleMenuEl();
+      menu.innerHTML = `
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-copy" role="menuitem">
+          <span class="ctx-item-left"><span>📋</span><span>${selectedText ? '复制选中内容 (Ctrl+C)' : '复制当前段落 (Ctrl+C)'}</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-cut" role="menuitem">
+          <span class="ctx-item-left"><span>✂</span><span>${selectedText ? '剪切选中内容 (Ctrl+X)' : '剪切当前段落 (Ctrl+X)'}</span></span>
+        </button>
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-paste" role="menuitem">
+          <span class="ctx-item-left"><span>📥</span><span>粘贴到此处 (Ctrl+V)</span></span>
+        </button>
+        ${
+          Number.isFinite(startLine)
+            ? `
+              <button type="button" class="context-menu-item" data-ed-ctx="editor-duplicate-block" role="menuitem">
+                <span class="ctx-item-left"><span>📑</span><span>克隆当前段落到下方</span></span>
+              </button>
+            `
+            : ''
+        }
+        <button type="button" class="context-menu-item" data-ed-ctx="editor-to-shelf" role="menuitem">
+          <span class="ctx-item-left"><span>🏝</span><span>放入顶部灵动岛暂存栏</span></span>
+        </button>
+        <div class="context-menu-sep" role="separator"></div>
+        <div style="display:flex;align-items:center;gap:4px;padding:4px 8px;">
+          <button type="button" class="pill-btn pill-btn-sm" data-ed-ctx="fmt:h1" title="一级标题" style="height:24px;padding:0 7px;font-size:11px;">H1</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-ed-ctx="fmt:h2" title="二级标题" style="height:24px;padding:0 7px;font-size:11px;">H2</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-ed-ctx="fmt:h3" title="三级标题" style="height:24px;padding:0 7px;font-size:11px;">H3</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-ed-ctx="fmt:bold" title="加粗" style="height:24px;padding:0 7px;font-size:11px;font-weight:700;">B</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-ed-ctx="fmt:mark" title="荧光高亮" style="height:24px;padding:0 7px;font-size:11px;">高亮</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-ed-ctx="fmt:todo" title="待办清单" style="height:24px;padding:0 7px;font-size:11px;">待办</button>
+        </div>
+        <div class="context-menu-sep" role="separator"></div>
+        <button type="button" class="context-menu-item ${!isCopyMode ? 'is-active' : ''}" data-ed-ctx="set-drag-cut" role="menuitem">
+          <span class="ctx-item-left"><span>${!isCopyMode ? '✓' : '✂'}</span><span>拖动默认：剪切移动 (Ctrl 为复制)</span></span>
+        </button>
+        <button type="button" class="context-menu-item ${isCopyMode ? 'is-active' : ''}" data-ed-ctx="set-drag-copy" role="menuitem">
+          <span class="ctx-item-left"><span>${isCopyMode ? '✓' : '📋'}</span><span>拖动默认：复制插入 (Shift 为剪切)</span></span>
+        </button>
+        ${
+          Number.isFinite(startLine)
+            ? `
+              <div class="context-menu-sep" role="separator"></div>
+              <button type="button" class="context-menu-item" data-ed-ctx="editor-delete-block" role="menuitem" style="color:var(--danger);">
+                <span class="ctx-item-left"><span>🗑</span><span>删除当前段落</span></span>
+              </button>
+            `
+            : ''
+        }
+      `;
+
+      menu.querySelectorAll('[data-ed-ctx]').forEach((btn) => {
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          handleEditorContextMenuAction(btn.dataset.edCtx, ctxInfo);
+        });
+      });
+
+      menu.hidden = false;
+      menu.classList.remove('hidden');
+      menu.classList.add('is-open');
+      const rect = menu.getBoundingClientRect();
+      const maxX = Math.max(8, window.innerWidth - (rect.width || 240) - 10);
+      const maxY = Math.max(8, window.innerHeight - (rect.height || 300) - 10);
+      menu.style.left = `${Math.min(maxX, Math.max(8, e.clientX))}px`;
+      menu.style.top = `${Math.min(maxY, Math.max(8, e.clientY))}px`;
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     hideHoverPeekCard();
@@ -6987,6 +7776,13 @@ export function initCenterView(containerEl) {
               <span class="ctx-item-left"><span>📥</span><span>粘贴到此处</span></span>
             </button>
             <div class="context-menu-sep" role="separator"></div>
+            <button type="button" class="context-menu-item ${state.dragDefaultMode !== 'copy' ? 'is-active' : ''}" data-cap-act="set-drag-cut" role="menuitem">
+              <span class="ctx-item-left"><span>${state.dragDefaultMode !== 'copy' ? '✓' : '✂'}</span><span>拖动默认：剪切移动</span></span>
+            </button>
+            <button type="button" class="context-menu-item ${state.dragDefaultMode === 'copy' ? 'is-active' : ''}" data-cap-act="set-drag-copy" role="menuitem">
+              <span class="ctx-item-left"><span>${state.dragDefaultMode === 'copy' ? '✓' : '📋'}</span><span>拖动默认：复制插入</span></span>
+            </button>
+            <div class="context-menu-sep" role="separator"></div>
             <button type="button" class="context-menu-item" data-cap-act="remove" role="menuitem" style="color:var(--danger);">
               <span class="ctx-item-left"><span>🗑</span><span>从笔记移除此模块</span></span>
             </button>
@@ -6998,7 +7794,18 @@ export function initCenterView(containerEl) {
     menu.querySelectorAll('[data-cap-act]').forEach((btn) => {
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        handleCapsuleMenuAction(btn.dataset.capAct);
+        const act = btn.dataset.capAct;
+        if (act === 'set-drag-cut') {
+          hideCapsuleContextMenu();
+          setDragDefaultMode('cut');
+          return;
+        }
+        if (act === 'set-drag-copy') {
+          hideCapsuleContextMenu();
+          setDragDefaultMode('copy');
+          return;
+        }
+        handleCapsuleMenuAction(act);
       });
     });
 
@@ -7993,16 +8800,33 @@ export function initCenterView(containerEl) {
 
   async function renderSplitPane(splitDoc = store.state.splitDoc) {
     const layout = ensureSplitLayoutEl();
+    const mainPane = ensureMainPaneEl();
+    const existingResizer = layout.querySelector(':scope > [data-role="center-split-resizer"]');
     const existingPane = layout.querySelector(':scope > .center-split-pane');
 
     if (!splitDoc || !splitDoc.path) {
       containerEl.classList.remove('has-split-pane');
+      if (existingResizer) existingResizer.remove();
       if (existingPane) existingPane.remove();
+      mainPane.style.flex = '1 1 100%';
       return;
     }
 
     const seq = ++state.splitSeq;
     containerEl.classList.add('has-split-pane');
+    let resizerEl = existingResizer;
+    if (!resizerEl) {
+      resizerEl = document.createElement('div');
+      resizerEl.className = 'center-split-resizer';
+      resizerEl.dataset.role = 'center-split-resizer';
+      resizerEl.title = '拖动调节左右分屏宽度比例（双击恢复 50:50）';
+      if (existingPane) {
+        layout.insertBefore(resizerEl, existingPane);
+      } else {
+        layout.appendChild(resizerEl);
+      }
+    }
+
     let splitPane = existingPane;
     if (!splitPane) {
       splitPane = document.createElement('aside');
@@ -8010,6 +8834,12 @@ export function initCenterView(containerEl) {
       splitPane.setAttribute('aria-label', '右侧分屏预览');
       layout.appendChild(splitPane);
     }
+
+    const ratio = Math.min(0.8, Math.max(0.2, Number(state.splitRatio) || 0.5));
+    const leftPct = ((1 - ratio) * 100).toFixed(1);
+    const rightPct = (ratio * 100).toFixed(1);
+    mainPane.style.flex = `0 0 calc(${leftPct}% - 4px)`;
+    splitPane.style.flex = `1 1 calc(${rightPct}% - 4px)`;
 
     const ext = String(splitDoc.ext || getExtLower(splitDoc.path)).toLowerCase();
     const extra = splitExtraMeta.get(normalizePath(splitDoc.path)) || {};
@@ -8400,14 +9230,15 @@ export function initCenterView(containerEl) {
       return;
     }
 
-    // 2b. PDF HD / Native Iframe segmented pill
-    const pdfViewBtn = e.target.closest('[data-pdf-view]');
-    if (pdfViewBtn && state.activeDoc?.type === 'pdf') {
-      const nextView = pdfViewBtn.dataset.pdfView === 'hd' ? 'hd' : 'iframe';
-      if (nextView !== state.pdf.viewMode) {
-        state.pdf.viewMode = nextView;
-        renderPdfMode();
-      }
+    // 2b. PDF inline annotation color pill
+    const pdfAnnotColorBtn = e.target.closest('[data-pdf-annot-color]');
+    if (pdfAnnotColorBtn && state.activeDoc?.type === 'pdf') {
+      const nextColor = pdfAnnotColorBtn.dataset.pdfAnnotColor || 'yellow';
+      state.pdf.annotColor = nextColor;
+      containerEl.querySelectorAll('[data-pdf-annot-color]').forEach((b) => {
+        b.classList.toggle('pill-btn-primary', b.dataset.pdfAnnotColor === nextColor);
+      });
+      containerEl.querySelector('[data-role="pdf-annot-input"]')?.focus();
       return;
     }
 
@@ -8543,6 +9374,31 @@ export function initCenterView(containerEl) {
           insertTextIntoCompanionNote(`[[${state.activeDoc.name}]]`, { toastMsg: '已插入文件锚点' });
         }
         return;
+      } else if (action === 'toggle-drag-mode') {
+        setDragDefaultMode(state.dragDefaultMode === 'copy' ? 'cut' : 'copy');
+        return;
+      } else if (action === 'companion-set-float') {
+        state.companionLayout = 'float';
+        state.companionOpen = true;
+        try {
+          localStorage.setItem('sln_companion_layout', 'float');
+        } catch {
+          // ignore
+        }
+        renderActiveView();
+        showToast('已切换伴生笔记为「浮窗模式」（可拖动顶栏移动、拖动边框调节大小）', 'info', { duration: 2000 });
+        return;
+      } else if (action === 'companion-set-split') {
+        state.companionLayout = 'split';
+        state.companionOpen = true;
+        try {
+          localStorage.setItem('sln_companion_layout', 'split');
+        } catch {
+          // ignore
+        }
+        renderActiveView();
+        showToast('已切换伴生笔记为「分屏模式」（可拖动中间分隔线调节左右间距）', 'info', { duration: 2000 });
+        return;
       } else if (action === 'toggle-companion') {
         state.companionOpen = !state.companionOpen;
         renderActiveView();
@@ -8656,28 +9512,6 @@ export function initCenterView(containerEl) {
         if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
         setPdfPage(state.pdf.currentPage + 1);
         return;
-      } else if (action === 'pdf-zoom-out') {
-        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-        const cur = Number(state.pdf.zoom || 1.6);
-        const prevStep = [...PDF_ZOOM_STEPS].reverse().find((z) => z < cur - 0.01);
-        if (prevStep) {
-          state.pdf.zoom = prevStep;
-          renderPdfViewerStage();
-        }
-        return;
-      } else if (action === 'pdf-zoom-in') {
-        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-        const cur = Number(state.pdf.zoom || 1.6);
-        const nextStep = PDF_ZOOM_STEPS.find((z) => z > cur + 0.01);
-        if (nextStep) {
-          state.pdf.zoom = nextStep;
-          renderPdfViewerStage();
-        }
-        return;
-      } else if (action === 'pdf-hd-retry') {
-        if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
-        updatePdfFrameAndControls({ forceReload: true });
-        return;
       } else if (action === 'pdf-copy-anchor') {
         if (!state.activeDoc || state.activeDoc.type !== 'pdf') return;
         const anchor = `[[${state.activeDoc.name}#page=${state.pdf.currentPage}]]`;
@@ -8685,6 +9519,12 @@ export function initCenterView(containerEl) {
         return;
       } else if (action === 'pdf-annotate') {
         openPdfAnnotateSheet();
+        return;
+      } else if (action === 'pdf-annot-submit') {
+        submitPdfInlineAnnotation();
+        return;
+      } else if (action === 'pdf-annot-close') {
+        openPdfAnnotateSheet(false);
         return;
       } else if (action === 'pdf-ai-mindmap') {
         openPdfMindMapSheet();
@@ -8731,6 +9571,40 @@ export function initCenterView(containerEl) {
   });
 
   containerEl.addEventListener('dblclick', (e) => {
+    if (e.target.closest('[data-role="center-split-resizer"]')) {
+      state.splitRatio = 0.5;
+      try {
+        localStorage.setItem('sln_split_ratio', '0.5');
+      } catch {
+        // ignore
+      }
+      const layout = ensureSplitLayoutEl();
+      const mainPane = layout.querySelector(':scope > [data-role="center-main-pane"]');
+      const splitPane = layout.querySelector(':scope > .center-split-pane');
+      if (mainPane && splitPane) {
+        mainPane.style.flex = '0 0 calc(50% - 4px)';
+        splitPane.style.flex = '1 1 calc(50% - 4px)';
+      }
+      showToast('已重置分屏比例为 50:50', 'info', { duration: 1400 });
+      return;
+    }
+
+    if (e.target.closest('[data-role="companion-split-resizer"]')) {
+      state.companionSplitRatio = 0.36;
+      try {
+        localStorage.setItem('sln_companion_split_ratio', '0.36');
+      } catch {
+        // ignore
+      }
+      const compPane = containerEl.querySelector('[data-role="companion-split-pane"]');
+      if (compPane) {
+        compPane.style.flex = '0 0 36%';
+        compPane.style.width = '36%';
+      }
+      showToast('已重置伴生笔记分屏宽度', 'info', { duration: 1400 });
+      return;
+    }
+
     // Excel cell double-click edit
     const td = e.target.closest('td[data-excel-row][data-excel-col]');
     if (td && state.activeDoc?.type === 'excel') {
@@ -9035,6 +9909,16 @@ export function initCenterView(containerEl) {
       e.preventDefault();
       const raw = Number.parseInt(e.target.value, 10) || 1;
       setPdfPage(raw);
+    }
+
+    if (e.target.matches('[data-role="pdf-annot-input"], [data-role="pdf-annot-page"]')) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitPdfInlineAnnotation();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        openPdfAnnotateSheet(false);
+      }
     }
   });
 

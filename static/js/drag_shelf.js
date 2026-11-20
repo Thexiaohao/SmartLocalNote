@@ -530,13 +530,20 @@ function bindShelfEvents() {
       const id = actionEl.dataset.shelfId;
       const item = getShelfItems().find((it) => it.id === id);
       if (!item) return;
+      let isCopyDefault = false;
+      try {
+        isCopyDefault = localStorage.getItem('sln_drag_default_mode') === 'copy';
+      } catch {
+        // ignore
+      }
+      const isCopyMode = isCopyDefault ? !e.shiftKey : Boolean(e.ctrlKey || e.metaKey);
       store.emit('shelf:insert-current', {
         markdown: item.markdown,
         label: item.label,
         sourceShelfId: item.id,
-        dragMode: e.ctrlKey ? 'copy' : 'move',
+        dragMode: isCopyMode ? 'copy' : 'move',
       });
-      if (!e.ctrlKey && getShelfItems().some((it) => it.id === item.id)) {
+      if (!isCopyMode && getShelfItems().some((it) => it.id === item.id)) {
         consumeShelfItemSafe(item.id);
       }
       return;
@@ -574,6 +581,13 @@ function bindShelfEvents() {
       e.preventDefault();
       return;
     }
+    let isCopyDefault = false;
+    try {
+      isCopyDefault = localStorage.getItem('sln_drag_default_mode') === 'copy';
+    } catch {
+      // ignore
+    }
+    const isCopyMode = isCopyDefault ? !e.shiftKey : Boolean(e.ctrlKey || e.metaKey);
     draggingShelfItemId = item.id;
     writePayloadSafe(e, {
       type: 'shelf-item',
@@ -581,7 +595,7 @@ function bindShelfEvents() {
       markdown: item.markdown,
       path: item.path || '',
       sourceShelfId: item.id,
-      dragMode: e.ctrlKey ? 'copy' : 'move',
+      dragMode: isCopyMode ? 'copy' : 'move',
     });
     card.classList.add('is-dragging');
     store.emit('drag:active', true);
