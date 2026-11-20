@@ -1245,11 +1245,21 @@ def delete_file_to_trash(path: str, mode: str = "") -> dict[str, Any]:
     res = trash_manager.trash_file(str(target), mode=mode or None)
 
     target_s = str(target)
+    target_prefix = f"{target_s.rstrip('/\\')}{os.sep}"
+    target_norm = _norm_path_for_compare(target_s).rstrip("/\\")
+    target_norm_prefix = f"{target_norm}/"
+
+    def _matches_deleted(entry: str) -> bool:
+        if entry == target_s or _norm_path_for_compare(entry).rstrip("/\\") == target_norm:
+            return True
+        norm_entry = _norm_path_for_compare(entry).replace("\\", "/")
+        return entry.startswith(target_prefix) or norm_entry.startswith(target_norm_prefix.replace("\\", "/"))
+
     idx = safe_io.load_files_index()
     orig_files = idx.get("files", [])
     orig_dirs = idx.get("dirs", [])
-    new_files = [f for f in orig_files if f != target_s and _norm_path_for_compare(f) != target_s]
-    new_dirs = [d for d in orig_dirs if d != target_s and _norm_path_for_compare(d) != target_s]
+    new_files = [f for f in orig_files if not _matches_deleted(f)]
+    new_dirs = [d for d in orig_dirs if not _matches_deleted(d)]
     if len(new_files) != len(orig_files) or len(new_dirs) != len(orig_dirs):
         safe_io.save_files_index({"files": new_files, "dirs": new_dirs})
 
@@ -1262,6 +1272,215 @@ def write_text_document(path_str: str, content: str) -> dict[str, Any]:
     if target.suffix.lower() not in safe_io.TEXT_EDIT_EXTS:
         raise ValueError(f"仅支持写入纯文本/代码类文件：{target.name}")
     return safe_io.atomic_write_text(str(target), content, snapshot=True)
+
+
+_MAX_EXTERNAL_UPLOAD_BYTES = 150 * 1024 * 1024
+
+
+def _sanitize_upload_filename(raw_name: str) -> str:
+    base = Path(str(raw_name or "").replace("\\", "/")).name.strip()
+    cleaned = _INVALID_FILENAME_RE.sub("_", base).strip(". ")
+    return cleaned or "imported_file"
+
+
+def _unique_dest_path(target_dir: Path, name: str, *, is_dir: bool = False) -> Path:
+    candidate = (target_dir / name).resolve()
+    if not candidate.exists():
+        return candidate
+    if is_dir:
+        stem, suffix = name, ""
+    else:
+        p = Path(name)
+        stem, suffix = (p.stem or name), p.suffix
+    counter = 1
+    while counter < 10000:
+        alt = (target_dir / f"{stem} ({counter}){suffix}").resolve()
+        if not alt.exists():
+            return alt
+        counter += 1
+    raise ValueError(f"目标位置同名文件过多：{name}")
+
+
+def import_uploaded_file(
+    filename: str,
+    raw_bytes: bytes,
+    *,
+    target_folder_rel: str = "",
+    rel_subpath: str = "",
+) -> dict[str, Any]:
+    """Import an externally dropped/uploaded file into `default_notes_dir / target_folder_rel`."""
+    if raw_bytes is None:
+        raw_bytes = b""
+    if len(raw_bytes) > _MAX_EXTERNAL_UPLOAD_BYTES:
+        raise ValueError("单文件大小超过 150 MB 限制")
+
+    notes_dir = get_default_notes_dir().resolve()
+    base_dir, clean_target_rel = _resolve_notes_subdir(notes_dir, target_folder_rel)
+
+    dest_dir = base_dir
+    clean_sub = str(rel_subpath or "").replace("\\", "/").strip("/")
+    if clean_sub:
+        for seg in clean_sub.split("/"):
+            part = seg.strip()
+            if not part or part in {".", ".."}:
+                raise PermissionError("安全拦截：导入子目录路径非法")
+            safe_seg = _INVALID_FILENAME_RE.sub("_", part).strip(". ")
+            if not safe_seg:
+                continue
+            dest_dir = (dest_dir / safe_seg).resolve()
+        try:
+            dest_dir.relative_to(notes_dir)
+        except ValueError as exc:
+            raise PermissionError("安全拦截：越权导入路径") from exc
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _sanitize_upload_filename(filename)
+    dest_path = _unique_dest_path(dest_dir, safe_name, is_dir=False)
+    safe_io.atomic_write_bytes(str(dest_path), raw_bytes, snapshot=False)
+
+    try:
+        final_rel_dir = dest_path.parent.relative_to(notes_dir).as_posix()
+        if final_rel_dir == ".":
+            final_rel_dir = ""
+    except ValueError:
+        final_rel_dir = clean_target_rel
+
+    return {
+        "ok": True,
+        "path": str(dest_path),
+        "name": dest_path.name,
+        "rel_dir": final_rel_dir,
+        "ext": dest_path.suffix.lower(),
+        "size": len(raw_bytes),
+    }
+
+
+def _read_windows_clipboard_file_paths() -> list[str]:
+    """Read CF_HDROP file/folder paths copied in Windows File Explorer via pure Win32 ctypes."""
+    if sys.platform != "win32":
+        return []
+
+    import ctypes
+    from ctypes import wintypes
+    import time
+
+    CF_HDROP = 15
+    user32 = ctypes.windll.user32
+    shell32 = ctypes.windll.shell32
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT, wintypes.LPWSTR, wintypes.UINT]
+    shell32.DragQueryFileW.restype = wintypes.UINT
+
+    if not user32.IsClipboardFormatAvailable(CF_HDROP):
+        return []
+
+    opened = False
+    for _ in range(4):
+        if user32.OpenClipboard(None):
+            opened = True
+            break
+        time.sleep(0.03)
+    if not opened:
+        return []
+
+    paths: list[str] = []
+    try:
+        hdrop = user32.GetClipboardData(CF_HDROP)
+        if not hdrop:
+            return []
+        count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+        for i in range(min(int(count), 500)):
+            length = shell32.DragQueryFileW(hdrop, i, None, 0)
+            if length <= 0:
+                continue
+            buf = ctypes.create_unicode_buffer(length + 2)
+            shell32.DragQueryFileW(hdrop, i, buf, length + 1)
+            if buf.value:
+                paths.append(buf.value)
+    finally:
+        user32.CloseClipboard()
+    return paths
+
+
+def get_clipboard_files_info() -> dict[str, Any]:
+    """Inspect whether Windows clipboard currently contains copied files/folders (CF_HDROP)."""
+    raw_paths = _read_windows_clipboard_file_paths()
+    items: list[dict[str, Any]] = []
+    for raw in raw_paths:
+        p = Path(raw)
+        if not p.exists():
+            continue
+        try:
+            is_dir = p.is_dir()
+            size = 0 if is_dir else int(p.stat().st_size)
+        except OSError:
+            continue
+        items.append({
+            "path": str(p),
+            "name": p.name,
+            "is_dir": is_dir,
+            "size": size,
+        })
+    return {
+        "has_files": len(items) > 0,
+        "count": len(items),
+        "items": items,
+    }
+
+
+def paste_clipboard_files(
+    target_folder_rel: str = "",
+    *,
+    source_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Copy files/folders from Windows clipboard (CF_HDROP) into `default_notes_dir / target_folder_rel`."""
+    notes_dir = get_default_notes_dir().resolve()
+    target_dir, clean_rel = _resolve_notes_subdir(notes_dir, target_folder_rel)
+
+    candidates = source_paths if source_paths is not None else _read_windows_clipboard_file_paths()
+    if not candidates:
+        raise ValueError("系统剪贴板中没有可粘贴的文件或文件夹（请在资源管理器中 Ctrl+C 复制后重试）")
+
+    pasted: list[dict[str, Any]] = []
+    for raw in candidates:
+        src = Path(os.path.abspath(str(raw or "").strip()))
+        if not src.exists():
+            continue
+        is_dir = src.is_dir()
+        if is_dir:
+            src_resolved = src.resolve()
+            if target_dir == src_resolved or target_dir.is_relative_to(src_resolved):
+                raise ValueError(f"不能将文件夹「{src.name}」粘贴到自身内部")
+        dest_name = _sanitize_upload_filename(src.name)
+        dest_path = _unique_dest_path(target_dir, dest_name, is_dir=is_dir)
+        if is_dir:
+            shutil.copytree(str(src), str(dest_path))
+        else:
+            shutil.copy2(str(src), str(dest_path))
+        pasted.append({
+            "path": str(dest_path),
+            "name": dest_path.name,
+            "is_dir": is_dir,
+            "ext": "" if is_dir else dest_path.suffix.lower(),
+            "rel_dir": clean_rel,
+        })
+
+    if not pasted:
+        raise ValueError("剪贴板中的文件路径已失效或不存在")
+
+    return {
+        "count": len(pasted),
+        "items": pasted,
+        "target_folder_rel": clean_rel,
+    }
 
 
 def _stdlib_extract_pdf_pages(target: Path) -> list[str]:

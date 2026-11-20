@@ -1668,6 +1668,214 @@ function bindPortableTrashDock() {
   });
 }
 
+function initExternalFileDropZone() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (document.documentElement.dataset.externalDropBound === '1') return;
+  document.documentElement.dataset.externalDropBound = '1';
+
+  let bannerEl = null;
+  let dragDepth = 0;
+
+  const ensureBanner = () => {
+    if (bannerEl && bannerEl.isConnected) return bannerEl;
+    bannerEl = document.createElement('div');
+    bannerEl.id = 'external-drop-banner';
+    bannerEl.className = 'external-drop-banner';
+    bannerEl.hidden = true;
+    bannerEl.innerHTML = `
+      <span style="font-size:18px;line-height:1;">📥</span>
+      <div style="display:flex;flex-direction:column;gap:2px;">
+        <span data-role="drop-title" style="font-size:13.5px;font-weight:700;color:var(--text-primary);">松手一键导入外部文件</span>
+        <span data-role="drop-sub" style="font-size:11.5px;color:var(--text-secondary);">支持拖入任意文档、PDF、表格、图片、音视频或整份文件夹</span>
+      </div>
+    `;
+    document.body.appendChild(bannerEl);
+    return bannerEl;
+  };
+
+  const isExternalFileDrag = (e) => {
+    const dt = e?.dataTransfer;
+    if (!dt) return false;
+    const types = Array.from(dt.types || []);
+    if (!types.includes('Files')) return false;
+    if (store.getGlobalDrag?.() || readDragPayload(e)) return false;
+    return true;
+  };
+
+  const resolveDropContext = (target) => {
+    const el = target instanceof Element ? target : null;
+    const expFolderCard = el?.closest?.('.explorer-folder-card[data-explorer-folder]');
+    if (expFolderCard) {
+      const rel = expFolderCard.dataset.explorerFolder || '';
+      return {
+        highlightEl: expFolderCard,
+        targetRelDir: rel,
+        insertIntoActiveDoc: false,
+        title: `松手导入到文件夹「${rel || '默认笔记'}」`,
+      };
+    }
+    const expCrumb = el?.closest?.('.explorer-crumb[data-crumb-rel]');
+    if (expCrumb) {
+      const rel = expCrumb.dataset.crumbRel || '';
+      return {
+        highlightEl: expCrumb,
+        targetRelDir: rel,
+        insertIntoActiveDoc: false,
+        title: `松手导入到「${rel || '默认笔记主目录'}」`,
+      };
+    }
+    const leftSubfolder = el?.closest?.('.tree-subfolder-row[data-rel-dir]');
+    if (leftSubfolder) {
+      const rel = leftSubfolder.dataset.relDir || '';
+      return {
+        highlightEl: leftSubfolder,
+        targetRelDir: rel,
+        insertIntoActiveDoc: false,
+        title: `松手导入到文件夹「${rel}」`,
+      };
+    }
+    if (el?.closest?.('#center-panel') && store.state.activeCenterView !== 'explorer' && store.state.activeFile?.path) {
+      return {
+        highlightEl: el.closest('#center-panel'),
+        targetRelDir: '',
+        insertIntoActiveDoc: true,
+        title: `松手导入文件并插入到当前笔记「${store.state.activeFile.name || '当前文档'}」`,
+      };
+    }
+    const curExplorerCrumb = document.querySelector('.explorer-home .explorer-crumb.is-active[data-crumb-rel]');
+    const curRel = store.state.activeCenterView === 'explorer' ? (curExplorerCrumb?.dataset?.crumbRel || '') : '';
+    return {
+      highlightEl: null,
+      targetRelDir: curRel,
+      insertIntoActiveDoc: false,
+      title: curRel ? `松手导入到「${curRel}」` : '松手一键导入到「默认笔记主目录」',
+    };
+  };
+
+  const clearExternalDragUi = () => {
+    dragDepth = 0;
+    document.body?.classList?.remove('is-external-file-drag');
+    document.querySelectorAll('.is-external-drop-target').forEach((node) => node.classList.remove('is-external-drop-target'));
+    if (bannerEl) {
+      bannerEl.hidden = true;
+      bannerEl.classList.remove('is-visible');
+    }
+  };
+
+  const collectEntriesFromDrop = async (dt) => {
+    const collected = [];
+    const MAX_FILES = 200;
+
+    const readEntry = async (entry, relParent) => {
+      if (!entry || collected.length >= MAX_FILES) return;
+      if (entry.isFile) {
+        await new Promise((resolve) => {
+          entry.file(
+            (file) => {
+              collected.push({ file, relSubpath: relParent });
+              resolve();
+            },
+            () => resolve()
+          );
+        });
+      } else if (entry.isDirectory) {
+        const nextParent = relParent ? `${relParent}/${entry.name}` : entry.name;
+        const reader = entry.createReader();
+        const readAll = async () => {
+          const batch = await new Promise((resolve) => {
+            reader.readEntries(
+              (entries) => resolve(Array.isArray(entries) ? entries : []),
+              () => resolve([])
+            );
+          });
+          if (batch.length === 0) return;
+          for (const child of batch) {
+            await readEntry(child, nextParent);
+            if (collected.length >= MAX_FILES) break;
+          }
+          if (batch.length > 0 && collected.length < MAX_FILES) {
+            await readAll();
+          }
+        };
+        await readAll();
+      }
+    };
+
+    const items = Array.from(dt?.items || []);
+    const entries = items.map((it) => it.webkitGetAsEntry?.()).filter(Boolean);
+    if (entries.length > 0) {
+      for (const entry of entries) {
+        await readEntry(entry, '');
+        if (collected.length >= MAX_FILES) break;
+      }
+    }
+
+    if (collected.length === 0 && dt?.files?.length) {
+      for (const file of Array.from(dt.files)) {
+        collected.push({ file, relSubpath: '' });
+        if (collected.length >= MAX_FILES) break;
+      }
+    }
+    return collected;
+  };
+
+  window.addEventListener('dragenter', (e) => {
+    if (!isExternalFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth += 1;
+    document.body?.classList?.add('is-external-file-drag');
+    const b = ensureBanner();
+    b.hidden = false;
+    b.classList.add('is-visible');
+  }, true);
+
+  window.addEventListener('dragover', (e) => {
+    if (!isExternalFileDrag(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+    document.body?.classList?.add('is-external-file-drag');
+    const ctx = resolveDropContext(e.target);
+    document.querySelectorAll('.is-external-drop-target').forEach((node) => {
+      if (node !== ctx.highlightEl) node.classList.remove('is-external-drop-target');
+    });
+    ctx.highlightEl?.classList?.add('is-external-drop-target');
+    const b = ensureBanner();
+    const titleEl = b.querySelector('[data-role="drop-title"]');
+    if (titleEl) titleEl.textContent = ctx.title;
+    b.hidden = false;
+    b.classList.add('is-visible');
+  }, true);
+
+  window.addEventListener('dragleave', (e) => {
+    if (!document.body?.classList?.contains('is-external-file-drag')) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0 || (e.clientX <= 0 && e.clientY <= 0)) {
+      clearExternalDragUi();
+    }
+  }, true);
+
+  window.addEventListener('drop', async (e) => {
+    if (!isExternalFileDrag(e)) {
+      clearExternalDragUi();
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const ctx = resolveDropContext(e.target);
+    const droppedItems = await collectEntriesFromDrop(e.dataTransfer);
+    clearExternalDragUi();
+    if (droppedItems.length === 0) return;
+    const uploaded = await store.uploadExternalFiles?.(droppedItems, ctx.targetRelDir);
+    if (ctx.insertIntoActiveDoc && Array.isArray(uploaded) && uploaded.length > 0) {
+      store.emit('editor:insert-imported-links', { items: uploaded });
+    }
+  }, true);
+
+  window.addEventListener('blur', clearExternalDragUi);
+}
+
 async function bootstrap() {
   window.__SLN_BOOTED__ = true;
   // 1. Apply saved theme, typography & pane widths immediately
@@ -1709,6 +1917,7 @@ async function bootstrap() {
   initStandaloneFloatingHubs();
   initModuleSizePopover();
   bindPortableTrashDock();
+  initExternalFileDropZone();
   window.addEventListener('dragend', () => {
     clearDragPayload();
     store.endGlobalDrag?.();

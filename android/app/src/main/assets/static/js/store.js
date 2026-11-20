@@ -669,6 +669,18 @@ export const store = {
     return moveFilesToFolder(paths, targetFolderRel);
   },
 
+  uploadExternalFiles(entries = [], targetFolderRel = '') {
+    return uploadExternalFiles(entries, targetFolderRel);
+  },
+
+  inspectClipboardFiles() {
+    return inspectClipboardFiles();
+  },
+
+  pasteClipboardFilesToFolder(targetFolderRel = '') {
+    return pasteClipboardFilesToFolder(targetFolderRel);
+  },
+
   refreshLinkGraph(activePath = '') {
     return refreshLinkGraph(activePath);
   },
@@ -3130,7 +3142,7 @@ export async function trashFile(path, mode = '') {
     body.mode = cleanMode;
   }
   const res = await api.post('/api/files/trash', body);
-  await Promise.allSettled([refreshFilesList(), refreshTrash()]);
+  await Promise.allSettled([refreshFilesList(), refreshTrash(), refreshAllTodos(), refreshLinkGraph()]);
 
   const usedMode = res?.mode || cleanMode || store.state.trash?.settings?.mode || 'system';
   const fileName = targetPath.split(/[\\/]/).pop() || targetPath;
@@ -3322,6 +3334,101 @@ export function endGlobalDrag() {
  */
 export function getGlobalDrag() {
   return store.state.globalDrag;
+}
+
+/**
+ * Upload one or more externally dropped OS files into `default_notes_dir / targetFolderRel`.
+ * @param {Array<{file: File, relSubpath?: string}|File>} entries
+ * @param {string} [targetFolderRel='']
+ */
+export async function uploadExternalFiles(entries = [], targetFolderRel = '') {
+  const normalized = (Array.isArray(entries) ? entries : Array.from(entries || []))
+    .map((entry) => (entry instanceof File ? { file: entry, relSubpath: '' } : entry))
+    .filter((entry) => entry && entry.file instanceof File);
+
+  if (normalized.length === 0) return [];
+
+  const cleanTargetRel = String(targetFolderRel || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  const total = normalized.length;
+  const results = [];
+  const failed = [];
+
+  setIsland('idle', { label: `📥 正在导入 ${total} 个文件…` });
+
+  for (let i = 0; i < normalized.length; i += 1) {
+    const { file, relSubpath = '' } = normalized[i];
+    if (total > 1) {
+      setIsland('idle', { label: `📥 导入中 (${i + 1}/${total})：${file.name}` });
+    }
+    const qs = new URLSearchParams({
+      filename: file.name || 'imported_file',
+      target_folder_rel: cleanTargetRel,
+      rel_subpath: String(relSubpath || ''),
+    });
+    try {
+      const res = await api.post(`/api/files/import-upload?${qs.toString()}`, file, {
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(file.name || 'imported_file'),
+        },
+      });
+      if (res) results.push(res);
+    } catch (err) {
+      failed.push(`${file.name}: ${err?.message || '上传失败'}`);
+    }
+  }
+
+  await Promise.allSettled([refreshFilesList(), refreshAllTodos(), refreshLinkGraph()]);
+  store.emit('files:updated', { imported: results });
+
+  setIsland('idle', { label: 'Local-First 工作台就绪' });
+
+  const destLabel = cleanTargetRel || '默认笔记主目录';
+  if (results.length > 0 && failed.length === 0) {
+    showToast(
+      results.length === 1
+        ? `已导入「${results[0].name}」到 ${destLabel}`
+        : `已成功导入 ${results.length} 个文件到「${destLabel}」`,
+      'success'
+    );
+  } else if (results.length > 0 && failed.length > 0) {
+    showToast(`已导入 ${results.length} 项，${failed.length} 项失败：${failed[0]}`, 'warning');
+  } else if (failed.length > 0) {
+    showToast(`导入失败：${failed[0]}`, 'error');
+  }
+
+  return results;
+}
+
+/**
+ * Inspect whether Windows system clipboard currently holds copied files/folders (CF_HDROP).
+ */
+export async function inspectClipboardFiles() {
+  try {
+    const data = await api.get('/api/files/clipboard-files');
+    return {
+      has_files: Boolean(data?.has_files),
+      count: Number(data?.count) || 0,
+      items: Array.isArray(data?.items) ? data.items : [],
+    };
+  } catch {
+    return { has_files: false, count: 0, items: [] };
+  }
+}
+
+/**
+ * Paste files/folders from Windows system clipboard into `default_notes_dir / targetFolderRel`.
+ * @param {string} [targetFolderRel='']
+ */
+export async function pasteClipboardFilesToFolder(targetFolderRel = '') {
+  const cleanRel = String(targetFolderRel || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  const res = await api.post('/api/files/paste-clipboard', { target_folder_rel: cleanRel });
+  await Promise.allSettled([refreshFilesList(), refreshAllTodos(), refreshLinkGraph()]);
+  store.emit('files:updated', { pasted: res });
+  const count = Number(res?.count) || (Array.isArray(res?.items) ? res.items.length : 0);
+  const destLabel = cleanRel || '默认笔记主目录';
+  showToast(`已从剪贴板粘贴 ${count} 项到「${destLabel}」`, 'success');
+  return res;
 }
 
 const MODULE_SIZE_PRESET_PX = {

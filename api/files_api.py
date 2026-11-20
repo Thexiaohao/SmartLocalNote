@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+import base64
+from urllib.parse import unquote
+
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from api import ok
-from core import doc_engine, safe_io, search_engine, todo_indexer
+from core import doc_engine, safe_io, scheduler, search_engine, todo_indexer
 
 router = APIRouter()
 files_router = APIRouter(prefix="/api/files", tags=["files"])
@@ -95,6 +98,18 @@ class RemoveFileBody(BaseModel):
 class MoveFilesBody(BaseModel):
     paths: list[str] = Field(default_factory=list)
     target_folder_rel: str = ""
+
+
+class UploadB64Body(BaseModel):
+    filename: str
+    content_base64: str
+    target_folder_rel: str = ""
+    rel_subpath: str = ""
+
+
+class PasteClipboardBody(BaseModel):
+    target_folder_rel: str = ""
+    paths: list[str] | None = None
 
 
 @files_router.get("/list")
@@ -223,6 +238,59 @@ def remove_file(body: RemoveFileBody) -> dict:
 @files_router.post("/move")
 def move_files(body: MoveFilesBody) -> dict:
     return ok(doc_engine.move_files(body.paths, body.target_folder_rel))
+
+
+@files_router.post("/import-upload")
+async def import_upload_raw(
+    request: Request,
+    filename: str = Query(default=""),
+    target_folder_rel: str = Query(default=""),
+    rel_subpath: str = Query(default=""),
+) -> dict:
+    raw_bytes = await request.body()
+    hdr_name = unquote(request.headers.get("X-File-Name", ""))
+    final_name = (filename or hdr_name).strip()
+    if not final_name:
+        raise ValueError("缺少上传文件名")
+    res = doc_engine.import_uploaded_file(
+        final_name,
+        raw_bytes,
+        target_folder_rel=target_folder_rel,
+        rel_subpath=rel_subpath,
+    )
+    scheduler.publish_event("files:updated", res)
+    return ok(res, message=f"已导入 {res['name']}")
+
+
+@files_router.post("/import-upload-b64")
+def import_upload_b64(body: UploadB64Body) -> dict:
+    try:
+        raw_bytes = base64.b64decode(body.content_base64 or "", validate=True)
+    except Exception as exc:
+        raise ValueError("文件编码内容无效") from exc
+    res = doc_engine.import_uploaded_file(
+        body.filename,
+        raw_bytes,
+        target_folder_rel=body.target_folder_rel,
+        rel_subpath=body.rel_subpath,
+    )
+    scheduler.publish_event("files:updated", res)
+    return ok(res, message=f"已导入 {res['name']}")
+
+
+@files_router.get("/clipboard-files")
+def get_clipboard_files() -> dict:
+    return ok(doc_engine.get_clipboard_files_info())
+
+
+@files_router.post("/paste-clipboard")
+def paste_clipboard(body: PasteClipboardBody) -> dict:
+    res = doc_engine.paste_clipboard_files(
+        target_folder_rel=body.target_folder_rel,
+        source_paths=body.paths,
+    )
+    scheduler.publish_event("files:updated", res)
+    return ok(res, message=f"已粘贴 {res['count']} 项至目标文件夹")
 
 
 @todos_router.get("/all")

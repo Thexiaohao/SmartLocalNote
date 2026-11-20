@@ -1,6 +1,7 @@
 package com.smartlocalnote.android.local
 
 import android.content.Context
+import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -484,6 +485,31 @@ class LocalSlnServer private constructor(context: Context) {
         val list = (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
         ok(dataEngine.moveFiles(list, b.optString("target_folder_rel", "")))
       }
+      m == "POST" && p == "/api/files/import-upload" -> {
+        val filename = (req.query["filename"] ?: req.headers["x-file-name"]?.let(::urlDecode)).orEmpty().trim()
+        val targetRel = req.query["target_folder_rel"].orEmpty()
+        val relSub = req.query["rel_subpath"].orEmpty().trim('/')
+        val combinedTarget = listOf(targetRel.trim('/'), relSub).filter { it.isNotEmpty() }.joinToString("/")
+        val b64 = Base64.encodeToString(req.bodyBytes, Base64.NO_WRAP)
+        val res = dataEngine.uploadBase64(filename = filename, contentBase64 = b64, targetDir = combinedTarget)
+        publishEvent("files:updated", res)
+        ok(res, "文件已导入")
+      }
+      m == "POST" && p == "/api/files/import-upload-b64" -> {
+        val b = req.bodyJson()
+        val targetRel = b.optString("target_folder_rel", "")
+        val relSub = b.optString("rel_subpath", "").trim('/')
+        val combinedTarget = listOf(targetRel.trim('/'), relSub).filter { it.isNotEmpty() }.joinToString("/")
+        val res = dataEngine.uploadBase64(
+          filename = b.optString("filename"),
+          contentBase64 = b.optString("content_base64"),
+          targetDir = combinedTarget,
+        )
+        publishEvent("files:updated", res)
+        ok(res, "文件已导入")
+      }
+      m == "GET" && p == "/api/files/clipboard-files" ->
+        ok(JSONObject().put("has_files", false).put("count", 0).put("items", JSONArray()))
       m == "POST" && p == "/api/files/trash" -> {
         val b = req.bodyJson()
         ok(dataEngine.trashFile(b.optString("path"), b.optString("mode", "app")))

@@ -14,7 +14,15 @@ export async function apiRequest(path, options = {}) {
   const headers = new Headers(customHeaders || {});
 
   let finalBody = body;
-  if (body !== undefined && body !== null && !(body instanceof FormData) && typeof body === 'object') {
+  if (
+    body !== undefined &&
+    body !== null &&
+    !(body instanceof FormData) &&
+    !(body instanceof Blob) &&
+    !(body instanceof ArrayBuffer) &&
+    !ArrayBuffer.isView(body) &&
+    typeof body === 'object'
+  ) {
     if (!headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
     }

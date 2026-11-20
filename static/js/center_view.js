@@ -1894,12 +1894,13 @@ export function initCenterView(containerEl) {
 
   function openExplorerRenameSheet(fileItem) {
     if (!fileItem?.path) return;
+    const isFolder = Boolean(fileItem.isDir || fileItem.rel_dir !== undefined);
     const oldName = fileItem.name || getBaseName(fileItem.path);
     openSheet({
-      title: '重命名文件',
+      title: isFolder ? '重命名文件夹' : '重命名文件',
       bodyHtml: `
         <form id="explorer-rename-form" style="display:flex;flex-direction:column;gap:8px;">
-          <label for="explorer-rename-input" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);">新文件名（含扩展名）</label>
+          <label for="explorer-rename-input" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);">${isFolder ? '新文件夹名称' : '新文件名（含扩展名）'}</label>
           <input id="explorer-rename-input" type="text" class="apple-input" value="${escapeHtml(oldName)}" autocomplete="off" />
         </form>
       `,
@@ -1977,6 +1978,103 @@ export function initCenterView(containerEl) {
     }
   }
 
+  function isPathInsideFolder(candidatePath, folderPath) {
+    if (!candidatePath || !folderPath) return false;
+    const normCand = normalizePath(candidatePath).replace(/\/+$/, '');
+    const normFold = normalizePath(folderPath).replace(/\/+$/, '');
+    return normCand === normFold || normCand.startsWith(`${normFold}/`);
+  }
+
+  function pickAndUploadFilesToExplorer(targetRelDir = '') {
+    if (typeof document === 'undefined') return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', async () => {
+      const files = Array.from(input.files || []);
+      input.remove();
+      if (files.length > 0) {
+        await store.uploadExternalFiles?.(files, targetRelDir);
+        renderExplorerHome({ refresh: false });
+      }
+    });
+    input.click();
+  }
+
+  function positionCapsuleMenuAtPoint(menu, clientX, clientY) {
+    menu.hidden = false;
+    menu.classList.remove('hidden');
+    menu.classList.add('is-open');
+    const rect = menu.getBoundingClientRect();
+    const maxX = Math.max(8, window.innerWidth - (rect.width || 220) - 10);
+    const maxY = Math.max(8, window.innerHeight - (rect.height || 240) - 10);
+    menu.style.left = `${Math.min(maxX, Math.max(8, clientX))}px`;
+    menu.style.top = `${Math.min(maxY, Math.max(8, clientY))}px`;
+  }
+
+  function enrichClipboardMenuButton(btnEl) {
+    if (!btnEl || typeof store.inspectClipboardFiles !== 'function') return;
+    store.inspectClipboardFiles().then((info) => {
+      if (!btnEl.isConnected) return;
+      const badge = btnEl.querySelector('[data-clip-badge]');
+      if (!badge) return;
+      badge.textContent = info.has_files ? `(${info.count} 项)` : '(空)';
+      badge.style.color = info.has_files ? 'var(--accent)' : 'var(--text-tertiary)';
+    });
+  }
+
+  function showExplorerBlankContextMenu(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    hideHoverPeekCard();
+    const menu = ensureCapsuleMenuEl();
+    const targetRelDir = state.explorer.scope === 'notes' ? state.explorer.relDir || '' : '';
+    const folderLabel = targetRelDir || '默认笔记主目录';
+    menu.innerHTML = `
+      <button type="button" class="context-menu-item" data-exp-blank-ctx="paste-clipboard" role="menuitem">
+        <span class="ctx-item-left"><span>📋</span><span>粘贴文件到这里</span></span>
+        <span data-clip-badge style="font-size:11px;color:var(--text-tertiary);margin-left:8px;"></span>
+      </button>
+      <button type="button" class="context-menu-item" data-exp-blank-ctx="import-picker" role="menuitem">
+        <span class="ctx-item-left"><span>📥</span><span>导入外部文件到「${escapeHtml(folderLabel)}」…</span></span>
+      </button>
+      <div class="context-menu-sep" role="separator"></div>
+      <button type="button" class="context-menu-item" data-exp-blank-ctx="new-note" role="menuitem">
+        <span class="ctx-item-left"><span>📝</span><span>在此新建笔记</span></span>
+      </button>
+      <button type="button" class="context-menu-item" data-exp-blank-ctx="new-folder" role="menuitem">
+        <span class="ctx-item-left"><span>📁</span><span>在此新建文件夹</span></span>
+      </button>
+    `;
+    enrichClipboardMenuButton(menu.querySelector('[data-exp-blank-ctx="paste-clipboard"]'));
+    menu.querySelectorAll('[data-exp-blank-ctx]').forEach((btn) => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const act = btn.dataset.expBlankCtx;
+        hideCapsuleContextMenu();
+        if (act === 'paste-clipboard') {
+          try {
+            await store.pasteClipboardFilesToFolder?.(targetRelDir);
+            renderExplorerHome({ refresh: false });
+          } catch (err) {
+            showToast(getErrorMsg(err, '粘贴文件失败'), 'warning');
+          }
+        } else if (act === 'import-picker') {
+          pickAndUploadFilesToExplorer(targetRelDir);
+        } else if (act === 'new-note') {
+          state.explorer.inlineCreateMode = 'note';
+          renderExplorerHome({ refresh: false });
+        } else if (act === 'new-folder') {
+          state.explorer.inlineCreateMode = 'folder';
+          renderExplorerHome({ refresh: false });
+        }
+      });
+    });
+    positionCapsuleMenuAtPoint(menu, e.clientX, e.clientY);
+  }
+
   function showExplorerItemContextMenu(e, kind, item) {
     e.preventDefault();
     e.stopPropagation();
@@ -1987,6 +2085,13 @@ export function initCenterView(containerEl) {
         <button type="button" class="context-menu-item" data-exp-ctx="open-folder" role="menuitem">
           <span class="ctx-item-left"><span>📂</span><span>打开文件夹</span></span>
         </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="paste-folder" role="menuitem">
+          <span class="ctx-item-left"><span>📋</span><span>粘贴系统剪贴板文件到此文件夹</span></span>
+          <span data-clip-badge style="font-size:11px;color:var(--text-tertiary);margin-left:8px;"></span>
+        </button>
+        <button type="button" class="context-menu-item" data-exp-ctx="rename-folder" role="menuitem">
+          <span class="ctx-item-left"><span>✏</span><span>重命名文件夹</span></span>
+        </button>
         <div class="context-menu-sep" role="separator"></div>
         <button type="button" class="context-menu-item" data-exp-ctx="trash-folder-app" role="menuitem">
           <span class="ctx-item-left"><span>📦</span><span>移入内置回收站</span></span>
@@ -1994,10 +2099,15 @@ export function initCenterView(containerEl) {
         <button type="button" class="context-menu-item" data-exp-ctx="trash-folder-system" role="menuitem" style="color:var(--danger);">
           <span class="ctx-item-left"><span>🖥</span><span>扔进系统回收站</span></span>
         </button>
-        <button type="button" class="context-menu-item" data-exp-ctx="remove-doc" role="menuitem">
-          <span class="ctx-item-left"><span>✕</span><span>从工作台列表移除</span></span>
-        </button>
+        ${
+          item?.isMounted
+            ? `<button type="button" class="context-menu-item" data-exp-ctx="remove-doc" role="menuitem">
+                <span class="ctx-item-left"><span>✕</span><span>从工作台列表移除</span></span>
+              </button>`
+            : ''
+        }
       `;
+      enrichClipboardMenuButton(menu.querySelector('[data-exp-ctx="paste-folder"]'));
     } else {
       menu.innerHTML = `
         <button type="button" class="context-menu-item" data-exp-ctx="open-doc" role="menuitem">
@@ -2031,16 +2141,30 @@ export function initCenterView(containerEl) {
           state.explorer.scope = 'notes';
           state.explorer.relDir = item.rel_dir || '';
           renderExplorerHome({ refresh: false });
+        } else if (act === 'paste-folder') {
+          try {
+            await store.pasteClipboardFilesToFolder?.(item.rel_dir || '');
+            renderExplorerHome({ refresh: false });
+          } catch (err) {
+            showToast(getErrorMsg(err, '粘贴文件失败'), 'warning');
+          }
+        } else if (act === 'rename-folder') {
+          openExplorerRenameSheet({ ...item, isDir: true });
         } else if (act === 'trash-folder' || act === 'trash-folder-app' || act === 'trash-folder-system') {
           const trashMode = act === 'trash-folder-system' ? 'system' : 'app';
           try {
             await store.trashFile?.(item.path, trashMode);
+            if (state.activeDoc && isPathInsideFolder(state.activeDoc.path, item.path)) {
+              state.activeDoc = null;
+              state.dirty = false;
+              syncActiveFileStore();
+            }
             if (state.explorer.relDir && (state.explorer.relDir === item.rel_dir || state.explorer.relDir.startsWith(`${item.rel_dir}/`))) {
               state.explorer.relDir = item.parent_rel || '';
             }
             renderExplorerHome({ refresh: false });
           } catch (err) {
-            showToast(getErrorMsg(err, '移入回收站失败'), 'error');
+            showToast(getErrorMsg(err, '删除文件夹失败'), 'error');
           }
         } else if (act === 'open-doc') {
           openFile(item.path);
@@ -2088,14 +2212,7 @@ export function initCenterView(containerEl) {
       });
     });
 
-    menu.hidden = false;
-    menu.classList.remove('hidden');
-    menu.classList.add('is-open');
-    const rect = menu.getBoundingClientRect();
-    const maxX = Math.max(8, window.innerWidth - (rect.width || 220) - 10);
-    const maxY = Math.max(8, window.innerHeight - (rect.height || 240) - 10);
-    menu.style.left = `${Math.min(maxX, Math.max(8, e.clientX))}px`;
-    menu.style.top = `${Math.min(maxY, Math.max(8, e.clientY))}px`;
+    positionCapsuleMenuAtPoint(menu, e.clientX, e.clientY);
   }
 
   function buildExplorerFilesSectionData() {
@@ -2213,6 +2330,14 @@ export function initCenterView(containerEl) {
                           ${escapeHtml(fld.rel_dir || '子目录')}
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        class="explorer-folder-more-btn"
+                        data-explorer-folder-more="${escapeHtml(fld.path)}"
+                        data-explorer-folder-rel="${escapeHtml(fld.rel_dir)}"
+                        title="文件夹操作（粘贴 / 重命名 / 删除）"
+                        aria-label="文件夹操作 ${escapeHtml(fld.name)}"
+                      >⋯</button>
                     </div>
                   `;
                 })
@@ -3223,6 +3348,31 @@ export function initCenterView(containerEl) {
         }
       }
 
+      const folderMoreBtn = e.target.closest('[data-explorer-folder-more]');
+      if (folderMoreBtn) {
+        e.stopPropagation();
+        const folderPath = folderMoreBtn.dataset.explorerFolderMore || '';
+        const relDir = folderMoreBtn.dataset.explorerFolderRel || '';
+        const folder =
+          getWorkspaceFoldersList().find((f) => f.rel_dir === relDir || isSamePath(f.path, folderPath)) || {
+            rel_dir: relDir,
+            path: folderPath,
+            name: getBaseName(folderPath || relDir),
+          };
+        const r = folderMoreBtn.getBoundingClientRect();
+        showExplorerItemContextMenu(
+          {
+            preventDefault() {},
+            stopPropagation() {},
+            clientX: Math.round(r.left),
+            clientY: Math.round(r.bottom + 4),
+          },
+          'folder',
+          folder
+        );
+        return;
+      }
+
       const folderCard = e.target.closest('[data-explorer-folder]');
       if (folderCard) {
         state.explorer.scope = 'notes';
@@ -3278,6 +3428,13 @@ export function initCenterView(containerEl) {
           ext: getExtLower(p),
         };
         showExplorerItemContextMenu(e, 'file', item);
+        return;
+      }
+
+      if (e.target.closest('[data-explorer-role="files-pane"], .explorer-topbar')) {
+        if (!e.target.closest('input, textarea')) {
+          showExplorerBlankContextMenu(e);
+        }
       }
     });
 
@@ -7649,6 +7806,23 @@ export function initCenterView(containerEl) {
     }
   });
 
+  store.on('explorer:open-folder', ({ relDir = '', scope = 'notes', mountedDir = '' } = {}) => {
+    commitActiveBlock({ reRender: false });
+    state.explorer.scope = scope || 'notes';
+    state.explorer.relDir = String(relDir || '');
+    state.explorer.mountedDir = String(mountedDir || '');
+    state.explorer.mobileSection = 'files';
+    if (store.state.activeCenterView !== 'explorer') {
+      if (typeof setCenterView === 'function') {
+        setCenterView('explorer');
+      } else {
+        store.setState({ activeCenterView: 'explorer' }, 'center-view:change');
+      }
+    } else {
+      renderExplorerHome({ refresh: false });
+    }
+  });
+
   store.on('layout:changed', () => {
     if (!isMobileViewport()) return;
     const tab = store.state.mobileTab || 'doc';
@@ -7680,6 +7854,66 @@ export function initCenterView(containerEl) {
         store.emit('android:image-picked', srcOrPayload);
       }
     };
+  }
+
+  store.on('editor:insert-imported-links', ({ items } = {}) => {
+    const list = Array.isArray(items) ? items : [];
+    const doc = state.activeDoc;
+    if (list.length === 0 || !doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+    const imgExts = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg']);
+    const snippets = list
+      .filter((it) => it && it.name)
+      .map((it) => {
+        const ext = String(it.ext || '').toLowerCase();
+        if (imgExts.has(ext) && it.path) {
+          return `![${it.name}](/api/files/raw-stream?path=${encodeURIComponent(it.path)})`;
+        }
+        return `[[${it.name}]]`;
+      });
+    if (snippets.length === 0) return;
+    const joined = snippets.join('\n');
+    if (state.mdMode === 'source') {
+      const ta = containerEl.querySelector('.md-editor:not([data-role])');
+      if (ta) {
+        const start = Number.isFinite(ta.selectionStart) ? ta.selectionStart : ta.value.length;
+        const end = Number.isFinite(ta.selectionEnd) ? ta.selectionEnd : start;
+        const before = ta.value.slice(0, start);
+        const after = ta.value.slice(end);
+        const sep = before && !before.endsWith('\n') ? '\n' : '';
+        doc.content = `${before}${sep}${joined}${after}`;
+        ta.value = doc.content;
+        state.dirty = true;
+        store.state.activeDocumentText = doc.content;
+        return;
+      }
+    }
+    const base = String(doc.content || '');
+    const sep = base && !base.endsWith('\n') ? '\n' : '';
+    doc.content = `${base}${sep}${joined}\n`;
+    state.dirty = true;
+    store.state.activeDocumentText = doc.content;
+    renderMarkdownMode();
+  });
+
+  if (typeof document !== 'undefined' && document.documentElement.dataset.explorerPasteBound !== '1') {
+    document.documentElement.dataset.explorerPasteBound = '1';
+    document.addEventListener('keydown', async (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      if (String(e.key || '').toLowerCase() !== 'v') return;
+      if (store.state.activeCenterView !== 'explorer') return;
+      const active = document.activeElement;
+      if (active && active.matches('input, textarea, [contenteditable="true"], [contenteditable=""]')) return;
+      const info = await store.inspectClipboardFiles?.();
+      if (!info?.has_files) return;
+      e.preventDefault();
+      const targetRelDir = state.explorer.scope === 'notes' ? state.explorer.relDir || '' : '';
+      try {
+        await store.pasteClipboardFilesToFolder?.(targetRelDir);
+        renderExplorerHome({ refresh: false });
+      } catch (err) {
+        showToast(getErrorMsg(err, '粘贴剪贴板文件失败'), 'warning');
+      }
+    });
   }
 
   store.on('todos:updated', () => {

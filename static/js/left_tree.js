@@ -468,11 +468,13 @@ function getLeftModules() {
 
 function groupFiles(items, sortCfg = getLeftFileSort()) {
   const groups = new Map();
+  const mountedDirs = Array.isArray(store.state.files?.dirs) ? store.state.files.dirs : [];
 
   for (const item of items) {
     const source = item.source || '';
     let key = '';
     let label = '';
+    let dirPath = '';
 
     if (source === 'notes') {
       key = 'source:notes';
@@ -484,10 +486,14 @@ function groupFiles(items, sortCfg = getLeftFileSort()) {
       const folderName = item.group || '挂载目录';
       key = `dir:${folderName}`;
       label = folderName;
+      dirPath =
+        mountedDirs.find((d) => getBasename(d) === folderName) ||
+        item.root_dir ||
+        '';
     }
 
     if (!groups.has(key)) {
-      groups.set(key, { key, label, items: [] });
+      groups.set(key, { key, label, source, dirPath, items: [] });
     }
     groups.get(key).items.push(item);
   }
@@ -631,13 +637,44 @@ function renderFilesSection(items, selectedSet, activePath) {
   const groups = groupFiles(visibleItems, sortCfg);
   const forceExpand = Boolean(trimmedQuery);
   const pinnedSet = new Set(getPinnedFilesList());
+  const allFolders = Array.isArray(store.state.files?.folders) ? store.state.files.folders : [];
+  const visibleFolders = trimmedQuery
+    ? allFolders.filter((f) => `${f?.name || ''} ${f?.rel_dir || ''}`.toLowerCase().includes(trimmedQuery.toLowerCase()))
+    : allFolders;
 
   return groups
     .map((grp) => {
       const isCollapsed = !forceExpand && collapsedGroups.has(grp.key);
+      const subfoldersHtml =
+        grp.key === 'source:notes' && visibleFolders.length > 0
+          ? visibleFolders
+              .map(
+                (fld) => `
+                  <div
+                    class="tree-subfolder-row"
+                    data-action="open-subfolder"
+                    data-path="${escapeHtml(fld.path)}"
+                    data-rel-dir="${escapeHtml(fld.rel_dir)}"
+                    data-name="${escapeHtml(fld.name)}"
+                    draggable="true"
+                    role="button"
+                    tabindex="0"
+                    title="${escapeHtml(fld.path)}"
+                  >
+                    ${icon('folder', 13)}
+                    <span class="tree-subfolder-name">${escapeHtml(fld.rel_dir || fld.name)}</span>
+                    <span class="tree-subfolder-actions">
+                      <button type="button" class="left-item-action-btn" data-action="subfolder-menu" title="文件夹操作（粘贴/重命名/删除）" aria-label="文件夹菜单">⋯</button>
+                      <button type="button" class="left-item-action-btn is-danger" data-action="subfolder-trash" title="移入回收站删除文件夹" aria-label="删除文件夹">🗑</button>
+                    </span>
+                  </div>
+                `
+              )
+              .join('')
+          : '';
       return `
         <div class="tree-group" data-group-key="${escapeHtml(grp.key)}">
-          <div class="tree-folder-row" data-action="toggle-group" data-group-key="${escapeHtml(grp.key)}" role="button" tabindex="0" aria-expanded="${!isCollapsed}">
+          <div class="tree-folder-row" data-action="toggle-group" data-group-key="${escapeHtml(grp.key)}" data-dir-path="${escapeHtml(grp.dirPath || '')}" data-group-label="${escapeHtml(grp.label)}" role="button" tabindex="0" aria-expanded="${!isCollapsed}">
             ${icon(isCollapsed ? 'chevron-right' : 'chevron-down', 13)}
             ${icon(isCollapsed ? 'folder' : 'folder-open', 14)}
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(grp.label)}</span>
@@ -646,7 +683,7 @@ function renderFilesSection(items, selectedSet, activePath) {
           ${
             isCollapsed
               ? ''
-              : grp.items
+              : `${subfoldersHtml}${grp.items
                   .map((item) => {
                     const path = item.path || '';
                     const name = item.name || getBasename(path);
@@ -702,7 +739,7 @@ function renderFilesSection(items, selectedSet, activePath) {
                       </div>
                     `;
                   })
-                  .join('')
+                  .join('')}`
           }
         </div>
       `;
@@ -3444,6 +3481,118 @@ function openFileContextMenu(clientX, clientY, rowEl) {
   });
 }
 
+function openFolderRenameModal(folderPath, oldName) {
+  openSheet({
+    title: '重命名文件夹',
+    bodyHtml: `
+      <form id="left-folder-rename-form" style="display:flex;flex-direction:column;gap:8px;">
+        <label for="left-folder-rename-input" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);">新文件夹名称</label>
+        <input id="left-folder-rename-input" type="text" class="apple-input" value="${escapeHtml(oldName || '')}" autocomplete="off" />
+      </form>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn" id="left-folder-rename-cancel">取消</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="left-folder-rename-submit">确认重命名</button>
+    `,
+    onMount(card) {
+      const inp = card.querySelector('#left-folder-rename-input');
+      const btn = card.querySelector('#left-folder-rename-submit');
+      card.querySelector('#left-folder-rename-cancel')?.addEventListener('click', closeSheet);
+      const submit = async () => {
+        const nextName = String(inp?.value || '').trim();
+        if (!nextName || nextName === oldName) {
+          closeSheet();
+          return;
+        }
+        if (btn) btn.disabled = true;
+        try {
+          await api.post('/api/files/rename', { path: folderPath, new_name: nextName });
+          closeSheet();
+          await Promise.allSettled([loadFiles(), store.refreshAllTodos?.()]);
+          renderPanelBody(containerRef);
+          showToast(`已重命名为「${nextName}」`, 'success');
+        } catch (err) {
+          if (btn) btn.disabled = false;
+          showToast(`重命名失败：${err?.message || '未知错误'}`, 'error');
+        }
+      };
+      btn?.addEventListener('click', submit);
+      card.querySelector('#left-folder-rename-form')?.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        submit();
+      });
+      window.requestAnimationFrame(() => inp?.focus());
+    },
+  });
+}
+
+function openFolderContextMenu(clientX, clientY, folderInfo) {
+  const { path = '', relDir = '', name = '文件夹', isNotesRoot = false, isMountedDir = false } = folderInfo || {};
+  const menuItems = [];
+
+  if (isNotesRoot) {
+    menuItems.push(
+      { id: 'open-explorer', icon: '📂', label: '在主面板打开默认目录' },
+      { id: 'new-note', icon: '📝', label: '新建笔记' },
+      { id: 'new-folder', icon: '📁', label: '新建文件夹' },
+      { sep: true },
+      { id: 'paste-here', icon: '📋', label: '粘贴剪贴板文件到根目录' },
+    );
+  } else if (isMountedDir) {
+    menuItems.push(
+      { id: 'open-explorer', icon: '📂', label: '在主面板查看' },
+      { id: 'remove-dir', icon: '➖', label: '从工作台列表移除（不删原文件夹）' },
+      { sep: true },
+      { id: 'trash-app', icon: '📦', label: '移入内置回收站' },
+      { id: 'trash-system', icon: '🖥', label: '扔进系统回收站', danger: true },
+    );
+  } else {
+    menuItems.push(
+      { id: 'open-explorer', icon: '📂', label: '在主面板打开文件夹' },
+      { id: 'paste-here', icon: '📋', label: '粘贴剪贴板文件到此文件夹' },
+      { id: 'rename-folder', icon: '✏', label: '重命名文件夹' },
+      { sep: true },
+      { id: 'trash-app', icon: '📦', label: '移入内置回收站' },
+      { id: 'trash-system', icon: '🖥', label: '扔进系统回收站', danger: true },
+    );
+  }
+
+  showLeftContextMenu(clientX, clientY, name, menuItems, async (actionId) => {
+    if (actionId === 'open-explorer') {
+      store.emit('explorer:open-folder', {
+        scope: isMountedDir ? 'mounted' : 'notes',
+        relDir: isNotesRoot ? '' : relDir,
+        mountedDir: isMountedDir ? path : '',
+      });
+      if (typeof window !== 'undefined' && window.innerWidth <= 768) {
+        store.setState({ mobileTab: 'doc' });
+        store.emit('layout:changed');
+      }
+    } else if (actionId === 'new-note') {
+      startInlineNewNote();
+    } else if (actionId === 'new-folder') {
+      startInlineNewFolder();
+    } else if (actionId === 'paste-here') {
+      try {
+        await store.pasteClipboardFilesToFolder?.(isNotesRoot ? '' : relDir);
+        renderPanelBody(containerRef);
+      } catch (err) {
+        showToast(err?.message || '粘贴剪贴板文件失败', 'warning');
+      }
+    } else if (actionId === 'rename-folder') {
+      if (path) openFolderRenameModal(path, name);
+    } else if (actionId === 'remove-dir') {
+      if (path) {
+        await handleRemoveFileFromWorkspace({ path, name });
+      }
+    } else if (actionId === 'trash-app' || actionId === 'trash-system') {
+      if (path) {
+        await handleTrashFile({ path, name }, actionId === 'trash-system' ? 'system' : 'app');
+      }
+    }
+  });
+}
+
 function getOrCreateModuleContextMenuEl() {
   if (typeof document === 'undefined') return null;
   let el = document.getElementById('module-context-menu');
@@ -4151,6 +4300,35 @@ export function initLeftTree(containerEl) {
 
   // Dedicated Left-Panel Right-Click Context Menu (#8 & #11)
   containerEl.addEventListener('contextmenu', (e) => {
+    const subfolderRow = e.target.closest('.tree-subfolder-row[data-path]');
+    if (subfolderRow) {
+      e.preventDefault();
+      e.stopPropagation();
+      openFolderContextMenu(e.clientX, e.clientY, {
+        path: subfolderRow.dataset.path || '',
+        relDir: subfolderRow.dataset.relDir || '',
+        name: subfolderRow.dataset.name || getBasename(subfolderRow.dataset.path || ''),
+      });
+      return;
+    }
+    const groupRow = e.target.closest('.tree-folder-row[data-group-key]');
+    if (groupRow) {
+      const gKey = groupRow.dataset.groupKey || '';
+      const gLabel = groupRow.dataset.groupLabel || '文件夹';
+      const dirPath = groupRow.dataset.dirPath || '';
+      if (gKey === 'source:notes' || (gKey.startsWith('dir:') && dirPath)) {
+        e.preventDefault();
+        e.stopPropagation();
+        openFolderContextMenu(e.clientX, e.clientY, {
+          path: dirPath,
+          relDir: '',
+          name: gLabel,
+          isNotesRoot: gKey === 'source:notes',
+          isMountedDir: gKey.startsWith('dir:'),
+        });
+        return;
+      }
+    }
     const fileRow = e.target.closest('.tree-file-item[data-path]');
     if (fileRow) {
       e.preventDefault();
@@ -4276,6 +4454,25 @@ export function initLeftTree(containerEl) {
           file_paths: Array.isArray(ws.file_paths) ? ws.file_paths : [],
         },
         markdown: parts.join('\n'),
+      });
+      store.emit('drag:active', true);
+      return;
+    }
+
+    const subfolderRow = e.target.closest('.tree-subfolder-row[data-path]');
+    if (subfolderRow) {
+      if (e.target.closest('button')) {
+        e.preventDefault();
+        return;
+      }
+      const path = subfolderRow.dataset.path || '';
+      const name = subfolderRow.dataset.name || getBasename(path);
+      setDragPayload(e, {
+        type: 'folder',
+        kind: 'folder',
+        path,
+        name,
+        label: name,
       });
       store.emit('drag:active', true);
       return;
@@ -4664,6 +4861,38 @@ export function initLeftTree(containerEl) {
     if (action === 'toggle-privacy') {
       e.stopPropagation();
       handleTogglePrivacy(actionEl.dataset.path);
+      return;
+    }
+
+    if (action === 'subfolder-menu') {
+      e.stopPropagation();
+      const row = actionEl.closest('.tree-subfolder-row[data-path]');
+      if (!row) return;
+      const r = actionEl.getBoundingClientRect();
+      openFolderContextMenu(Math.round(r.left), Math.round(r.bottom + 4), {
+        path: row.dataset.path || '',
+        relDir: row.dataset.relDir || '',
+        name: row.dataset.name || getBasename(row.dataset.path || ''),
+      });
+      return;
+    }
+
+    if (action === 'subfolder-trash') {
+      e.stopPropagation();
+      const row = actionEl.closest('.tree-subfolder-row[data-path]');
+      if (!row) return;
+      handleTrashFile({ path: row.dataset.path, name: row.dataset.name || getBasename(row.dataset.path) });
+      return;
+    }
+
+    if (action === 'open-subfolder') {
+      if (e.target.closest('button')) return;
+      const relDir = actionEl.dataset.relDir || '';
+      store.emit('explorer:open-folder', { scope: 'notes', relDir });
+      if (typeof window !== 'undefined' && window.innerWidth <= 768) {
+        store.setState({ mobileTab: 'doc' });
+        store.emit('layout:changed');
+      }
       return;
     }
 

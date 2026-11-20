@@ -190,6 +190,35 @@ def _compute_path_size(target: Path) -> int:
     return 0
 
 
+def _handle_remove_readonly(func, path, _exc_info) -> None:
+    try:
+        os.chmod(path, 0o700)
+        func(path)
+    except OSError:
+        pass
+
+
+def _move_path_with_retry(src: Path, dst: Path, retries: int = 4) -> None:
+    import time
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            shutil.move(str(src), str(dst))
+            return
+        except OSError as exc:
+            last_err = exc
+            if src.is_dir() and attempt + 1 >= retries:
+                # Fallback copy + recursive delete for Windows folder handles/readonly attributes
+                shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+                shutil.rmtree(str(src), onerror=_handle_remove_readonly)
+                if not src.exists():
+                    return
+            time.sleep(0.05 * (attempt + 1))
+    if last_err is not None:
+        raise last_err
+
+
 def _delete_stored_path(stored_path_str: str) -> None:
     if not stored_path_str:
         return
@@ -198,7 +227,7 @@ def _delete_stored_path(stored_path_str: str) -> None:
         return
     try:
         if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
+            shutil.rmtree(p, onerror=_handle_remove_readonly)
         else:
             p.unlink(missing_ok=True)
     except OSError:
@@ -239,7 +268,7 @@ def trash_file(path: str, mode: str | None = None) -> dict[str, Any]:
         ext = "" if kind == "folder" else target.suffix.lower()
         size_bytes = _compute_path_size(target)
         stored_path = (TRASH_FILES_DIR / f"{trash_id}__{target.name}").resolve()
-        shutil.move(str(target), str(stored_path))
+        _move_path_with_retry(target, stored_path)
 
         item = {
             "id": trash_id,

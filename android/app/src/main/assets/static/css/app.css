@@ -9702,6 +9702,129 @@ body.is-android-app #portable-trash-dock {
   }
 }
 
+/* ==========================================================================
+   23. Folder Action Triggers, Left Subfolder Rows & External File Drop HUD
+   ========================================================================== */
+.explorer-folder-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  font-weight: 700;
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: opacity var(--dur-fast) var(--ease-apple),
+              background-color var(--dur-fast) var(--ease-apple),
+              color var(--dur-fast) var(--ease-apple);
+}
+
+.explorer-folder-card:hover .explorer-folder-more-btn,
+.explorer-folder-more-btn:focus-visible {
+  opacity: 1;
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+@media (max-width: 768px) {
+  .explorer-folder-more-btn {
+    opacity: 1;
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    background: var(--bg-island);
+    border: 1px solid var(--border-hairline);
+    color: var(--text-secondary);
+  }
+}
+
+.tree-subfolder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 6px 4px 18px;
+  border-radius: 9px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--dur-fast) var(--ease-apple),
+              color var(--dur-fast) var(--ease-apple);
+}
+
+.tree-subfolder-row:hover,
+.tree-subfolder-row.is-external-drop-target {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tree-subfolder-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-subfolder-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity var(--dur-fast) var(--ease-apple);
+}
+
+.tree-subfolder-row:hover .tree-subfolder-actions,
+.tree-subfolder-row:focus-within .tree-subfolder-actions {
+  opacity: 1;
+}
+
+@media (max-width: 768px) {
+  .tree-subfolder-row {
+    min-height: 44px;
+    padding: 8px 10px 8px 20px;
+    font-size: 14.5px;
+  }
+  .tree-subfolder-actions {
+    opacity: 1;
+  }
+}
+
+.is-external-drop-target {
+  outline: 2px dashed var(--accent) !important;
+  outline-offset: 2px;
+  background: var(--accent-soft) !important;
+}
+
+body.is-external-file-drag .app-shell {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.external-drop-banner {
+  position: fixed;
+  top: 62px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2500;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(92vw, 480px);
+  padding: 10px 18px;
+  border-radius: 16px;
+  background: var(--bg-island);
+  border: 1.5px solid var(--accent);
+  box-shadow: 0 14px 36px rgba(0, 122, 255, 0.24), 0 4px 12px rgba(0, 0, 0, 0.14);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mindmap-card-box,
   .mindmap-group-frame,

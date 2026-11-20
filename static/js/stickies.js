@@ -2617,7 +2617,7 @@ export function initStickies() {
 
     if (
       target.closest(
-        '#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .spark-card, .anchor-pill, .media-embed-card, #capsule-context-menu, #drag-shelf, #island-shelf-drawer, #module-context-menu, #slash-command-menu, #hover-peek-card'
+        '#left-panel, #right-panel, #top-bar, #mindmap-canvas, .mindmap-stage, .mindmap-node, .explorer-home, .spark-card, .anchor-pill, .media-embed-card, #capsule-context-menu, #drag-shelf, #island-shelf-drawer, #module-context-menu, #slash-command-menu, #hover-peek-card'
       )
     ) {
       hideContextMenu();
