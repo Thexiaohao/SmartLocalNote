@@ -406,11 +406,403 @@ export function bindPaneResizers() {
   attachResizer(document.getElementById('resizer-right'), 'right');
 }
 
+function ensureV75MobileStyles() {
+  if (typeof document === 'undefined' || document.getElementById('sln-v75-mobile-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'sln-v75-mobile-styles';
+  style.textContent = `
+    @media (max-width: 767px) {
+      .app-shell[data-mobile-tab="todos"] .center-panel {
+        display: flex;
+      }
+      .mobile-bottom-nav {
+        gap: 8px;
+      }
+      .mobile-nav-pills {
+        max-width: calc(100vw - 84px);
+      }
+      .mobile-nav-item {
+        padding: 0 10px;
+        gap: 4px;
+        font-size: 12px;
+      }
+    }
+    @media (max-width: 390px) {
+      .mobile-nav-item {
+        padding: 0 8px;
+        font-size: 11.5px;
+      }
+    }
+    .mobile-quick-action-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .mobile-quick-action-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+      padding: 13px 14px;
+      border-radius: 14px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-hairline);
+      text-align: left;
+      cursor: pointer;
+      transition: transform 0.14s ease, opacity 0.14s ease, background-color 0.14s ease;
+    }
+    .mobile-quick-action-card:hover {
+      background: var(--bg-hover);
+    }
+    .mobile-quick-action-card:active {
+      transform: scale(0.97);
+    }
+    .mobile-quick-action-card.is-wide {
+      grid-column: 1 / -1;
+      flex-direction: row;
+      align-items: center;
+      gap: 12px;
+    }
+    .mobile-quick-action-icon {
+      font-size: 20px;
+      line-height: 1;
+    }
+    .mobile-quick-action-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .mobile-quick-action-desc {
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function initMobileEnvironmentAndBackBridge() {
+  const syncEnvClasses = () => {
+    const ua = navigator.userAgent || '';
+    const isAndroidApp = Boolean(window.SmartLocalNoteAndroid) || /SmartLocalNoteAndroid/i.test(ua);
+    const isAndroidDevice = isAndroidApp || /Android/i.test(ua);
+    const isMobileViewport = window.innerWidth <= 768 || isAndroidDevice;
+    document.body?.classList.toggle('is-android-app', isAndroidApp || isAndroidDevice);
+    document.body?.classList.toggle('is-mobile-ui', isMobileViewport);
+  };
+  syncEnvClasses();
+  window.addEventListener('resize', syncEnvClasses);
+
+  // Hardware back gesture bridge for Android native shell (returns true if consumed, false to exit)
+  window.__SLN_HANDLE_BACK__ = () => {
+    // 1. Dismiss open context menus / popovers
+    const popIds = [
+      'context-menu',
+      'capsule-context-menu',
+      'module-context-menu',
+      'slash-command-menu',
+      'focus-duration-popover',
+      'module-size-popover',
+      'hover-peek-card',
+    ];
+    for (const id of popIds) {
+      const el = document.getElementById(id);
+      if (el && !el.hidden && !el.classList.contains('hidden')) {
+        el.hidden = true;
+        el.classList.remove('is-open');
+        return true;
+      }
+    }
+
+    // 2. Dismiss Spotlight search overlay
+    const spotlightOverlay = document.getElementById('spotlight-overlay');
+    if (spotlightOverlay && !spotlightOverlay.hidden && !spotlightOverlay.classList.contains('hidden')) {
+      spotlightOverlay.hidden = true;
+      spotlightOverlay.classList.remove('is-open');
+      spotlightOverlay.setAttribute('aria-hidden', 'true');
+      return true;
+    }
+
+    // 3. Dismiss modal / bottom sheet
+    const sheetOverlay = document.getElementById('sheet-overlay');
+    if (sheetOverlay && !sheetOverlay.hidden && !sheetOverlay.classList.contains('hidden')) {
+      closeSheet();
+      return true;
+    }
+
+    // 4. Collapse Dynamic Island staging shelf drawer
+    const shelfDrawer = document.getElementById('island-shelf-drawer');
+    if (shelfDrawer && shelfDrawer.classList.contains('is-open')) {
+      store.emit('island:close-drawer');
+      return true;
+    }
+
+    // 5. Close standalone floating hubs
+    for (const winId of ['floating-stickies-win', 'floating-trash-win']) {
+      const winEl = document.getElementById(winId);
+      if (winEl && !winEl.hidden) {
+        winEl.hidden = true;
+        winEl.classList.remove('is-open');
+        return true;
+      }
+    }
+
+    // 6. Close tablet drawer
+    if (store.state.tabletDrawerOpen) {
+      store.setState({ tabletDrawerOpen: false });
+      syncLayoutClasses();
+      return true;
+    }
+
+    // 7. Return from secondary mobile tabs / explorer back to doc view
+    if (store.state.mobileTab && store.state.mobileTab !== 'doc') {
+      store.setState({ mobileTab: 'doc' });
+      if (store.state.activeCenterView === 'explorer') {
+        store.setCenterView?.('doc');
+      }
+      syncLayoutClasses();
+      return true;
+    }
+    if (store.state.activeCenterView === 'explorer') {
+      store.setCenterView?.('doc');
+      return true;
+    }
+
+    return false;
+  };
+}
+
+function openMobileClipboardQuickSheet() {
+  openSheet({
+    title: '📋 粘贴剪贴板速记',
+    bodyHtml: `
+      <div class="sheet-form" style="display:flex;flex-direction:column;gap:10px;">
+        <label class="field-label" style="font-size:12.5px;color:var(--text-secondary);">输入或粘贴学习笔记 / 待办想法</label>
+        <textarea class="apple-textarea" id="mobile-quick-text" rows="4" placeholder="例如：今晚8点复习高数第三章，记得打开讲义..."></textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" id="mobile-paste-btn">
+            ${icon('clipboard', 14)} 读取剪贴板
+          </button>
+          <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" id="mobile-voice-btn">
+            ${icon('mic', 14)} 语音速记
+          </button>
+        </div>
+      </div>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-ghost" id="mobile-quick-cancel">取消</button>
+      <button type="button" class="pill-btn" id="mobile-quick-ai">${icon('sparkles', 14)} AI 提取待办</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="mobile-quick-save">存为笔记</button>
+    `,
+    onMount(card) {
+      const ta = card.querySelector('#mobile-quick-text');
+      card.querySelector('#mobile-quick-cancel')?.addEventListener('click', closeSheet);
+      card.querySelector('#mobile-paste-btn')?.addEventListener('click', async () => {
+        try {
+          const clip = await navigator.clipboard.readText();
+          if (ta && clip) ta.value = clip;
+        } catch {
+          showToast('浏览器未授权剪贴板读取，请长按粘贴', 'warning');
+        }
+      });
+      card.querySelector('#mobile-voice-btn')?.addEventListener('click', () => {
+        closeSheet();
+        store.emit('voice:open');
+      });
+      card.querySelector('#mobile-quick-ai')?.addEventListener('click', () => {
+        const text = ta?.value?.trim();
+        if (!text) {
+          showToast('请先输入内容', 'warning');
+          return;
+        }
+        closeSheet();
+        store.setState({ mobileTab: 'ai' });
+        syncLayoutClasses();
+        store.emit('ai:summarize-request', { text, autoRun: true });
+      });
+      card.querySelector('#mobile-quick-save')?.addEventListener('click', async () => {
+        const text = ta?.value?.trim();
+        if (!text) {
+          showToast('请先输入内容', 'warning');
+          return;
+        }
+        try {
+          const title = `随手速记_${text.replace(/[\r\n#>*`]/g, '').slice(0, 14) || '笔记'}`;
+          const created = await api.post('/api/files/create-note', { title, content: text });
+          closeSheet();
+          store.emit('files:updated');
+          if (created?.path) {
+            store.emit('file:open', created);
+          }
+          showToast('已保存至本地笔记目录', 'success');
+        } catch (err) {
+          showToast(err?.message || '保存笔记失败', 'error');
+        }
+      });
+    },
+  });
+}
+
+function openMobileQuickStickySheet() {
+  openSheet({
+    title: '⚡ 发一条闪念',
+    bodyHtml: `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <textarea id="mobile-sticky-input" class="apple-textarea" rows="4" placeholder="记录此刻一闪而过的灵感，实时同步至桌面闪念卡…"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--text-secondary);">卡片配色：</span>
+          <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" data-msticky-color="yellow">琥珀黄</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-msticky-color="blue">苹果蓝</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-msticky-color="green">翡翠绿</button>
+          <button type="button" class="pill-btn pill-btn-sm" data-msticky-color="pink">珊瑚粉</button>
+        </div>
+      </div>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-ghost" id="mobile-sticky-cancel">取消</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="mobile-sticky-send">⚡ 立即发送</button>
+    `,
+    onMount(card) {
+      let chosenColor = 'yellow';
+      const ta = card.querySelector('#mobile-sticky-input');
+      window.requestAnimationFrame(() => ta?.focus());
+      card.querySelectorAll('[data-msticky-color]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          chosenColor = btn.dataset.mstickyColor || 'yellow';
+          card.querySelectorAll('[data-msticky-color]').forEach((b) => {
+            b.classList.toggle('pill-btn-primary', b === btn);
+          });
+        });
+      });
+      card.querySelector('#mobile-sticky-cancel')?.addEventListener('click', closeSheet);
+      card.querySelector('#mobile-sticky-send')?.addEventListener('click', async () => {
+        const text = ta?.value?.trim();
+        if (!text) {
+          showToast('请先输入闪念内容', 'warning');
+          return;
+        }
+        try {
+          const token = (() => {
+            try { return localStorage.getItem('sln_mobile_token') || ''; } catch { return ''; }
+          })();
+          await api.post('/api/mobile/quick-sticky', {
+            text,
+            color: chosenColor,
+            device_name: '移动端',
+            token,
+          });
+          closeSheet();
+          showToast('⚡ 闪念已发送到工作台', 'success');
+        } catch {
+          // Fallback to local sticky spawn if unauthenticated remote session
+          closeSheet();
+          store.emit('sticky:spawn', { content: text, color: chosenColor });
+          showToast('⚡ 已创建本地闪念卡', 'success');
+        }
+      });
+    },
+  });
+}
+
+function openMobileNewFolderSheet() {
+  openSheet({
+    title: '📁 新建文件夹',
+    bodyHtml: `
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <label for="mobile-folder-name" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);">文件夹名称</label>
+        <input id="mobile-folder-name" class="apple-input" type="text" placeholder="例如：高数错题 / 会议纪要" autocomplete="off" />
+      </div>
+    `,
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-ghost" id="mobile-folder-cancel">取消</button>
+      <button type="button" class="pill-btn pill-btn-primary" id="mobile-folder-submit">创建文件夹</button>
+    `,
+    onMount(card) {
+      const inp = card.querySelector('#mobile-folder-name');
+      const submitBtn = card.querySelector('#mobile-folder-submit');
+      window.requestAnimationFrame(() => inp?.focus());
+      card.querySelector('#mobile-folder-cancel')?.addEventListener('click', closeSheet);
+      const doCreate = async () => {
+        const name = inp?.value?.trim() || '';
+        if (submitBtn) submitBtn.disabled = true;
+        try {
+          await store.createFolder?.('', name);
+          closeSheet();
+          store.setState({ mobileTab: 'files' });
+          syncLayoutClasses();
+          showToast(`已新建文件夹${name ? `：${name}` : ''}`, 'success');
+        } catch (err) {
+          showToast(`新建文件夹失败：${err?.message || '未知错误'}`, 'error');
+        } finally {
+          if (submitBtn) submitBtn.disabled = false;
+        }
+      };
+      submitBtn?.addEventListener('click', doCreate);
+      inp?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          doCreate();
+        }
+      });
+    },
+  });
+}
+
+function triggerMobileFileUpload() {
+  let input = document.getElementById('mobile-hidden-upload-input');
+  if (!input) {
+    input = document.createElement('input');
+    input.id = 'mobile-hidden-upload-input';
+    input.type = 'file';
+    input.accept = 'image/*,.pdf,.md,.txt,.docx,.xlsx,.zip,*/*';
+    input.hidden = true;
+    document.body.appendChild(input);
+  }
+  input.value = '';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    showToast(`正在上传「${file.name}」…`, 'info', { duration: 2000 });
+    try {
+      const base64Data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('读取文件失败'));
+        reader.readAsDataURL(file);
+      });
+      const token = (() => {
+        try { return localStorage.getItem('sln_mobile_token') || ''; } catch { return ''; }
+      })();
+      await api.post('/api/mobile/upload', {
+        filename: file.name,
+        content_base64: base64Data,
+        target_dir: '手机直传',
+        add_to_shelf: true,
+        token,
+      });
+      await store.refreshFilesList?.().catch(() => {});
+      showToast(`📷 已直传至「手机直传/${file.name}」`, 'success');
+    } catch (err) {
+      showToast(`上传附件失败：${err?.message || '未知错误'}`, 'error');
+    }
+  };
+  input.click();
+}
+
 function bindMobileControls() {
   document.querySelectorAll('#mobile-nav .mobile-nav-item[data-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const nextTab = btn.dataset.tab || 'doc';
       store.setState({ mobileTab: nextTab, tabletDrawerOpen: false });
+      if (nextTab === 'todos') {
+        store.setCenterView?.('explorer');
+        store.emit('explorer:focus-todos');
+        window.requestAnimationFrame(() => {
+          document.querySelector('[data-explorer-role="todo-pane"]')?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+        });
+      } else if (nextTab === 'doc') {
+        store.setCenterView?.('doc');
+      }
       syncLayoutClasses();
     });
   });
@@ -418,70 +810,59 @@ function bindMobileControls() {
   const btnQuickAdd = document.getElementById('btn-mobile-quick-add');
   btnQuickAdd?.addEventListener('click', () => {
     openSheet({
-      title: '随时速记 / 剪贴板汇入',
+      title: '快捷创建',
       bodyHtml: `
-        <div class="sheet-form" style="display:flex;flex-direction:column;gap:10px;">
-          <label class="field-label" style="font-size:12.5px;color:var(--text-secondary);">输入或粘贴学习笔记 / 待办想法</label>
-          <textarea class="apple-textarea" id="mobile-quick-text" rows="4" placeholder="例如：今晚8点复习高数第三章，记得打开 WPS 查看讲义..."></textarea>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" id="mobile-paste-btn">
-              ${icon('clipboard', 14)} 读取剪贴板
-            </button>
-            <button type="button" class="pill-btn pill-btn-ghost pill-btn-sm" id="mobile-voice-btn">
-              ${icon('mic', 14)} 语音速记
-            </button>
-          </div>
+        <div class="mobile-quick-action-grid">
+          <button type="button" class="mobile-quick-action-card" data-mquick="sticky">
+            <span class="mobile-quick-action-icon">⚡</span>
+            <span class="mobile-quick-action-title">发一条闪念</span>
+            <span class="mobile-quick-action-desc">实时弹出桌面闪念便签</span>
+          </button>
+          <button type="button" class="mobile-quick-action-card" data-mquick="note">
+            <span class="mobile-quick-action-icon">📝</span>
+            <span class="mobile-quick-action-title">新建笔记</span>
+            <span class="mobile-quick-action-desc">创建 Markdown 本地文档</span>
+          </button>
+          <button type="button" class="mobile-quick-action-card" data-mquick="upload">
+            <span class="mobile-quick-action-icon">📷</span>
+            <span class="mobile-quick-action-title">拍照 / 上传附件</span>
+            <span class="mobile-quick-action-desc">直传图片或文档至笔记库</span>
+          </button>
+          <button type="button" class="mobile-quick-action-card" data-mquick="clipboard">
+            <span class="mobile-quick-action-icon">📋</span>
+            <span class="mobile-quick-action-title">粘贴剪贴板速记</span>
+            <span class="mobile-quick-action-desc">支持 AI 一键提取待办</span>
+          </button>
+          <button type="button" class="mobile-quick-action-card is-wide" data-mquick="folder">
+            <span class="mobile-quick-action-icon">📁</span>
+            <div style="display:flex;flex-direction:column;gap:2px;">
+              <span class="mobile-quick-action-title">新建文件夹</span>
+              <span class="mobile-quick-action-desc">在默认笔记目录创建新的分类文件夹</span>
+            </div>
+          </button>
         </div>
       `,
       footerHtml: `
-        <button type="button" class="pill-btn pill-btn-ghost" id="mobile-quick-cancel">取消</button>
-        <button type="button" class="pill-btn" id="mobile-quick-ai">${icon('sparkles', 14)} AI 提取待办</button>
-        <button type="button" class="pill-btn pill-btn-primary" id="mobile-quick-save">存为笔记</button>
+        <button type="button" class="pill-btn pill-btn-ghost" id="mobile-quick-hub-close">取消</button>
       `,
       onMount(card) {
-        const ta = card.querySelector('#mobile-quick-text');
-        card.querySelector('#mobile-quick-cancel')?.addEventListener('click', closeSheet);
-        card.querySelector('#mobile-paste-btn')?.addEventListener('click', async () => {
-          try {
-            const clip = await navigator.clipboard.readText();
-            if (ta && clip) ta.value = clip;
-          } catch {
-            showToast('浏览器未授权剪贴板读取，请长按粘贴', 'warning');
-          }
-        });
-        card.querySelector('#mobile-voice-btn')?.addEventListener('click', () => {
-          closeSheet();
-          store.emit('voice:open');
-        });
-        card.querySelector('#mobile-quick-ai')?.addEventListener('click', () => {
-          const text = ta?.value?.trim();
-          if (!text) {
-            showToast('请先输入内容', 'warning');
-            return;
-          }
-          closeSheet();
-          store.setState({ mobileTab: 'ai' });
-          syncLayoutClasses();
-          store.emit('ai:summarize-request', { text, autoRun: true });
-        });
-        card.querySelector('#mobile-quick-save')?.addEventListener('click', async () => {
-          const text = ta?.value?.trim();
-          if (!text) {
-            showToast('请先输入内容', 'warning');
-            return;
-          }
-          try {
-            const title = `随手速记_${text.replace(/[\r\n#>*`]/g, '').slice(0, 14) || '笔记'}`;
-            const created = await api.post('/api/files/create-note', { title, content: text });
+        card.querySelector('#mobile-quick-hub-close')?.addEventListener('click', closeSheet);
+        card.querySelectorAll('[data-mquick]').forEach((itemBtn) => {
+          itemBtn.addEventListener('click', () => {
+            const action = itemBtn.dataset.mquick;
             closeSheet();
-            store.emit('files:updated');
-            if (created?.path) {
-              store.emit('file:open', created);
+            if (action === 'sticky') {
+              openMobileQuickStickySheet();
+            } else if (action === 'note') {
+              openQuickNewNoteSheet();
+            } else if (action === 'upload') {
+              triggerMobileFileUpload();
+            } else if (action === 'clipboard') {
+              openMobileClipboardQuickSheet();
+            } else if (action === 'folder') {
+              openMobileNewFolderSheet();
             }
-            showToast('已保存至本地笔记目录', 'success');
-          } catch (err) {
-            showToast(err?.message || '保存笔记失败', 'error');
-          }
+          });
         });
       },
     });
@@ -1336,6 +1717,8 @@ async function bootstrap() {
   safeMount('drag_shelf', () => initDragShelf());
 
   // 3. Bind shell controls, pane resizers, floating hosts, trash dock, drag cleanup & responsive state
+  ensureV75MobileStyles();
+  initMobileEnvironmentAndBackBridge();
   bindTopBarControls();
   bindGlobalShortcuts();
   bindPaneResizers();
@@ -1363,14 +1746,62 @@ async function bootstrap() {
     store.refreshLinkGraph?.().catch(() => {}),
     (!store.state.folders?.length ? store.refreshFilesList?.().catch(() => {}) : Promise.resolve()),
   ]);
+
+  const seenMobileEventIds = new Set();
   connectEventStream((evt) => {
     if (!evt) return;
-    if (evt.type === 'reminder:fired') {
-      setIsland('alert', evt.data || {});
-    } else if (evt.type === 'snapshot:created') {
-      showToast('已自动创建写前安全快照', 'info', { duration: 2000 });
+    const rawData = evt.data && typeof evt.data === 'object' ? evt.data : {};
+    const effectiveType =
+      evt.type === 'message' && typeof rawData._event === 'string' && rawData._event.startsWith('mobile:')
+        ? rawData._event
+        : evt.type;
+
+    if (effectiveType.startsWith('mobile:') && rawData.event_id) {
+      if (seenMobileEventIds.has(rawData.event_id)) return;
+      seenMobileEventIds.add(rawData.event_id);
+      if (seenMobileEventIds.size > 60) {
+        const first = seenMobileEventIds.values().next().value;
+        seenMobileEventIds.delete(first);
+      }
     }
-    store.emit(`sse:${evt.type}`, evt.data);
+
+    if (effectiveType === 'reminder:fired') {
+      setIsland('alert', rawData);
+    } else if (effectiveType === 'snapshot:created') {
+      showToast('已自动创建写前安全快照', 'info', { duration: 2000 });
+    } else if (effectiveType === 'mobile:sticky') {
+      store.emit('sticky:spawn', {
+        content: String(rawData.text || ''),
+        color: String(rawData.color || 'yellow'),
+      });
+      showToast('📱 收到手机发来的闪念', 'success');
+    } else if (effectiveType === 'mobile:clipboard') {
+      const clipText = String(rawData.text || '').trim();
+      if (clipText) {
+        if (typeof store.pushClipboardHistory === 'function') {
+          store.pushClipboardHistory(clipText, '手机快传');
+        } else if (typeof storeMod.pushClipboardHistory === 'function') {
+          storeMod.pushClipboardHistory(clipText, '手机快传');
+        }
+        setIsland('sniff', { text: clipText });
+        showToast('📱 收到手机剪贴板', 'info');
+      }
+    } else if (effectiveType === 'mobile:upload') {
+      store.refreshFilesList?.().catch(() => {});
+      const uploadName = String(rawData.name || '手机直传文件');
+      const uploadPath = String(rawData.path || '');
+      if (rawData.add_to_shelf && uploadPath) {
+        store.emit('shelf:add-item', {
+          type: 'file',
+          label: uploadName,
+          path: uploadPath,
+          markdown: `[[${uploadName}]]`,
+          silentToast: true,
+        });
+      }
+      showToast(`📱 收到手机直传文件：${uploadName}`, 'success');
+    }
+    store.emit(`sse:${effectiveType}`, rawData);
   });
 }
 

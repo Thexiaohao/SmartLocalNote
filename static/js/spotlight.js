@@ -2583,6 +2583,491 @@ async function openSettingsSheet() {
 }
 
 /* --------------------------------------------------------------------------
+ * 7.5. Pure Offline QR Code SVG Encoder (ISO/IEC 18004, Byte Mode, ECC-L v1-v8)
+ *      & Windows <-> Android Mobile Pairing Modal (V7.5)
+ * -------------------------------------------------------------------------- */
+
+const QR_VERSIONS_L = [
+  null,
+  { size: 21, total: 26, data: 19, ecPerBlock: 7, blocks: 1, align: [], verBits: 0 },
+  { size: 25, total: 44, data: 34, ecPerBlock: 10, blocks: 1, align: [6, 18], verBits: 0 },
+  { size: 29, total: 70, data: 55, ecPerBlock: 15, blocks: 1, align: [6, 22], verBits: 0 },
+  { size: 33, total: 100, data: 80, ecPerBlock: 20, blocks: 1, align: [6, 26], verBits: 0 },
+  { size: 37, total: 134, data: 108, ecPerBlock: 26, blocks: 1, align: [6, 30], verBits: 0 },
+  { size: 41, total: 172, data: 136, ecPerBlock: 18, blocks: 2, align: [6, 34], verBits: 0 },
+  { size: 45, total: 196, data: 156, ecPerBlock: 20, blocks: 2, align: [6, 22, 38], verBits: 0x07c94 },
+  { size: 49, total: 242, data: 194, ecPerBlock: 24, blocks: 2, align: [6, 24, 42], verBits: 0x085bc },
+];
+
+const QR_GF_EXP = new Uint8Array(512);
+const QR_GF_LOG = new Uint8Array(256);
+(() => {
+  let x = 1;
+  for (let i = 0; i < 255; i += 1) {
+    QR_GF_EXP[i] = x;
+    QR_GF_LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i += 1) {
+    QR_GF_EXP[i] = QR_GF_EXP[i - 255];
+  }
+})();
+
+function qrGfMul(a, b) {
+  if (a === 0 || b === 0) return 0;
+  return QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]];
+}
+
+function qrRsGenerator(ecLen) {
+  let poly = [1];
+  for (let i = 0; i < ecLen; i += 1) {
+    const next = new Array(poly.length + 1).fill(0);
+    const factor = QR_GF_EXP[i];
+    for (let j = 0; j < poly.length; j += 1) {
+      next[j] ^= poly[j];
+      next[j + 1] ^= qrGfMul(poly[j], factor);
+    }
+    poly = next;
+  }
+  return poly;
+}
+
+function qrRsRemainder(dataBytes, ecLen) {
+  const gen = qrRsGenerator(ecLen);
+  const rem = new Uint8Array(ecLen);
+  for (let i = 0; i < dataBytes.length; i += 1) {
+    const factor = dataBytes[i] ^ rem[0];
+    rem.copyWithin(0, 1);
+    rem[ecLen - 1] = 0;
+    if (factor !== 0) {
+      for (let j = 0; j < ecLen; j += 1) {
+        rem[j] ^= qrGfMul(gen[j + 1], factor);
+      }
+    }
+  }
+  return rem;
+}
+
+function qrFormatBitsL(mask) {
+  const data = (0b01 << 3) | (mask & 7);
+  let rem = data << 10;
+  for (let i = 14; i >= 10; i -= 1) {
+    if ((rem >> i) & 1) {
+      rem ^= 0x537 << (i - 10);
+    }
+  }
+  return ((data << 10) | rem) ^ 0x5412;
+}
+
+function qrMaskFn(mask, r, c) {
+  switch (mask) {
+    case 0: return (r + c) % 2 === 0;
+    case 1: return r % 2 === 0;
+    case 2: return c % 3 === 0;
+    case 3: return (r + c) % 3 === 0;
+    case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+    case 5: return ((r * c) % 2) + ((r * c) % 3) === 0;
+    case 6: return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
+    default: return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
+  }
+}
+
+function encodeQrMatrix(text) {
+  const utf8 = typeof TextEncoder !== 'undefined'
+    ? Array.from(new TextEncoder().encode(String(text || '')))
+    : Array.from(unescape(encodeURIComponent(String(text || ''))), (ch) => ch.charCodeAt(0));
+
+  let ver = 1;
+  while (ver < QR_VERSIONS_L.length && utf8.length > QR_VERSIONS_L[ver].data - 2) {
+    ver += 1;
+  }
+  const spec = QR_VERSIONS_L[Math.min(ver, QR_VERSIONS_L.length - 1)];
+  const bytes = utf8.slice(0, spec.data - 2);
+
+  // Build Byte-mode bit stream
+  const bits = [];
+  const pushBits = (val, len) => {
+    for (let i = len - 1; i >= 0; i -= 1) bits.push((val >> i) & 1);
+  };
+  pushBits(0b0100, 4); // Byte mode
+  pushBits(bytes.length, 8);
+  for (const b of bytes) pushBits(b, 8);
+  const maxBits = spec.data * 8;
+  for (let i = 0; i < 4 && bits.length < maxBits; i += 1) bits.push(0);
+  while (bits.length % 8 !== 0) bits.push(0);
+
+  const dataCw = [];
+  for (let i = 0; i < bits.length; i += 8) {
+    let v = 0;
+    for (let j = 0; j < 8; j += 1) v = (v << 1) | bits[i + j];
+    dataCw.push(v);
+  }
+  const padBytes = [0xec, 0x11];
+  let padIdx = 0;
+  while (dataCw.length < spec.data) {
+    dataCw.push(padBytes[padIdx % 2]);
+    padIdx += 1;
+  }
+
+  // Split blocks & compute RS ECC
+  const blockSize = Math.floor(spec.data / spec.blocks);
+  const dataBlocks = [];
+  const ecBlocks = [];
+  for (let b = 0; b < spec.blocks; b += 1) {
+    const slice = dataCw.slice(b * blockSize, (b + 1) * blockSize);
+    dataBlocks.push(slice);
+    ecBlocks.push(qrRsRemainder(slice, spec.ecPerBlock));
+  }
+
+  const allCw = [];
+  for (let i = 0; i < blockSize; i += 1) {
+    for (let b = 0; b < spec.blocks; b += 1) allCw.push(dataBlocks[b][i]);
+  }
+  for (let i = 0; i < spec.ecPerBlock; i += 1) {
+    for (let b = 0; b < spec.blocks; b += 1) allCw.push(ecBlocks[b][i]);
+  }
+
+  const n = spec.size;
+  const grid = Array.from({ length: n }, () => new Uint8Array(n));
+  const isFunc = Array.from({ length: n }, () => new Uint8Array(n));
+
+  const setFunc = (r, c, dark) => {
+    if (r < 0 || r >= n || c < 0 || c >= n) return;
+    grid[r][c] = dark ? 1 : 0;
+    isFunc[r][c] = 1;
+  };
+
+  const drawFinder = (r0, c0) => {
+    for (let dr = -1; dr <= 7; dr += 1) {
+      for (let dc = -1; dc <= 7; dc += 1) {
+        const r = r0 + dr;
+        const c = c0 + dc;
+        if (r < 0 || r >= n || c < 0 || c >= n) continue;
+        const dist = Math.max(Math.abs(dr - 3), Math.abs(dc - 3));
+        setFunc(r, c, dist !== 2 && dist !== 4);
+      }
+    }
+  };
+
+  drawFinder(0, 0);
+  drawFinder(0, n - 7);
+  drawFinder(n - 7, 0);
+
+  // Timing patterns
+  for (let i = 8; i < n - 8; i += 1) {
+    setFunc(6, i, i % 2 === 0);
+    setFunc(i, 6, i % 2 === 0);
+  }
+
+  // Alignment patterns
+  const align = spec.align;
+  for (let i = 0; i < align.length; i += 1) {
+    for (let j = 0; j < align.length; j += 1) {
+      const r0 = align[i];
+      const c0 = align[j];
+      if ((r0 === 6 && c0 === 6) || (r0 === 6 && c0 === n - 7) || (r0 === n - 7 && c0 === 6)) continue;
+      for (let dr = -2; dr <= 2; dr += 1) {
+        for (let dc = -2; dc <= 2; dc += 1) {
+          setFunc(r0 + dr, c0 + dc, Math.max(Math.abs(dr), Math.abs(dc)) !== 1);
+        }
+      }
+    }
+  }
+
+  // Reserve format info & dark module
+  for (let i = 0; i <= 8; i += 1) {
+    if (i !== 6) {
+      setFunc(8, i, false);
+      setFunc(i, 8, false);
+    }
+  }
+  for (let i = n - 8; i < n; i += 1) {
+    setFunc(8, i, false);
+    setFunc(i, 8, false);
+  }
+  setFunc(n - 8, 8, true);
+
+  // Version info (v7+)
+  if (spec.verBits) {
+    for (let i = 0; i < 18; i += 1) {
+      const bit = Boolean((spec.verBits >> i) & 1);
+      const a = Math.floor(i / 3);
+      const b = n - 11 + (i % 3);
+      setFunc(a, b, bit);
+      setFunc(b, a, bit);
+    }
+  }
+
+  // Place data bits in zigzag
+  let bitIdx = 0;
+  const totalBits = allCw.length * 8;
+  let upward = true;
+  for (let col = n - 1; col > 0; col -= 2) {
+    if (col === 6) col -= 1;
+    for (let step = 0; step < n; step += 1) {
+      const row = upward ? n - 1 - step : step;
+      for (let dx = 0; dx < 2; dx += 1) {
+        const c = col - dx;
+        if (isFunc[row][c]) continue;
+        let bit = 0;
+        if (bitIdx < totalBits) {
+          bit = (allCw[bitIdx >> 3] >> (7 - (bitIdx & 7))) & 1;
+          bitIdx += 1;
+        }
+        grid[row][c] = bit;
+      }
+    }
+    upward = !upward;
+  }
+
+  const writeFormat = (mat, mask) => {
+    const f = qrFormatBitsL(mask);
+    for (let i = 0; i <= 5; i += 1) mat[8][i] = (f >> (14 - i)) & 1;
+    mat[8][7] = (f >> 8) & 1;
+    mat[8][8] = (f >> 7) & 1;
+    mat[7][8] = (f >> 6) & 1;
+    for (let i = 0; i <= 5; i += 1) mat[5 - i][8] = (f >> (5 - i)) & 1;
+    for (let i = 0; i <= 7; i += 1) mat[8][n - 1 - i] = (f >> i) & 1;
+    for (let i = 0; i <= 6; i += 1) mat[n - 1 - i][8] = (f >> (14 - i)) & 1;
+  };
+
+  // Pick lowest-penalty mask (0..7)
+  let bestMat = null;
+  let bestPenalty = Infinity;
+  for (let m = 0; m < 8; m += 1) {
+    const cand = grid.map((row, r) => {
+      const out = new Uint8Array(n);
+      for (let c = 0; c < n; c += 1) {
+        out[c] = isFunc[r][c] ? row[c] : (row[c] ^ (qrMaskFn(m, r, c) ? 1 : 0));
+      }
+      return out;
+    });
+    writeFormat(cand, m);
+
+    let penalty = 0;
+    let darkCount = 0;
+    for (let r = 0; r < n; r += 1) {
+      let runLen = 1;
+      for (let c = 0; c < n; c += 1) {
+        darkCount += cand[r][c];
+        if (c > 0) {
+          if (cand[r][c] === cand[r][c - 1]) {
+            runLen += 1;
+            if (runLen === 5) penalty += 3;
+            else if (runLen > 5) penalty += 1;
+          } else {
+            runLen = 1;
+          }
+        }
+        if (r > 0 && c > 0) {
+          const v = cand[r][c];
+          if (v === cand[r - 1][c] && v === cand[r][c - 1] && v === cand[r - 1][c - 1]) {
+            penalty += 3;
+          }
+        }
+      }
+    }
+    for (let c = 0; c < n; c += 1) {
+      let runLen = 1;
+      for (let r = 1; r < n; r += 1) {
+        if (cand[r][c] === cand[r - 1][c]) {
+          runLen += 1;
+          if (runLen === 5) penalty += 3;
+          else if (runLen > 5) penalty += 1;
+        } else {
+          runLen = 1;
+        }
+      }
+    }
+    const pct = Math.abs(Math.round((darkCount * 100) / (n * n)) - 50);
+    penalty += Math.floor(pct / 5) * 10;
+
+    if (penalty < bestPenalty) {
+      bestPenalty = penalty;
+      bestMat = cand;
+    }
+  }
+
+  return bestMat || grid;
+}
+
+function renderQrCodeSvg(text, displayPx = 188) {
+  const mat = encodeQrMatrix(text);
+  const n = mat.length;
+  const quiet = 3;
+  const vb = n + quiet * 2;
+  const parts = [];
+  for (let r = 0; r < n; r += 1) {
+    for (let c = 0; c < n; c += 1) {
+      if (mat[r][c]) {
+        parts.push(`M${c + quiet},${r + quiet}h1v1h-1z`);
+      }
+    }
+  }
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg"
+         width="${displayPx}" height="${displayPx}"
+         viewBox="0 0 ${vb} ${vb}"
+         shape-rendering="crispEdges"
+         role="img"
+         aria-label="手机扫码配对二维码"
+         style="display:block;border-radius:12px;background:#FFFFFF;box-shadow:0 4px 16px rgba(0,0,0,0.08);">
+      <rect width="${vb}" height="${vb}" fill="#FFFFFF"/>
+      <path d="${parts.join('')}" fill="#111827"/>
+    </svg>
+  `;
+}
+
+function formatPinDisplay(pin) {
+  const s = String(pin || '').replace(/\D/g, '').slice(0, 6);
+  if (s.length === 6) return `${s.slice(0, 3)} ${s.slice(3)}`;
+  return s || '------';
+}
+
+export async function openMobileConnectSheet() {
+  let pairInfo = null;
+  try {
+    pairInfo = await api.get('/api/mobile/pair-info');
+  } catch (err) {
+    showToast(`获取手机连接信息失败：${err?.message || '未知错误'}`, 'error');
+    return;
+  }
+
+  const buildBodyHtml = (info) => {
+    const ip = info?.ip || '127.0.0.1';
+    const port = info?.port || 8765;
+    const lanUrl = info?.url || `http://${ip}:${port}`;
+    const hostname = info?.hostname || 'Windows PC';
+    const pin = info?.pin || '000000';
+    const uri = info?.uri || `sln://pair?host=${ip}&port=${port}&pin=${pin}&name=${encodeURIComponent(hostname)}`;
+    const discoveryActive = Boolean(info?.discovery_active);
+    const udpPort = info?.udp_port || 8766;
+    const devices = Array.isArray(info?.paired_devices) ? info.paired_devices : [];
+
+    const qrSvg = renderQrCodeSvg(uri, 184);
+    const devicesHtml = devices.length > 0
+      ? devices
+          .map(
+            (d) => `
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:10px;background:var(--bg-island);border:1px solid var(--border-hairline);">
+                <div style="min-width:0;flex:1;">
+                  <div style="font-size:12.5px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📱 ${escapeHtml(d.name || 'Android 手机')}</div>
+                  <div style="font-size:11px;color:var(--text-tertiary);">配对于 ${escapeHtml(String(d.paired_at || '').replace('T', ' '))}</div>
+                </div>
+                <span style="font-size:11px;color:var(--success, #30D158);font-weight:600;flex-shrink:0;">已授权</span>
+              </div>
+            `
+          )
+          .join('')
+      : `<div style="font-size:12px;color:var(--text-tertiary);text-align:center;padding:10px 6px;">暂无已配对 Android 设备，用手机端扫码或输入上方 6 位配对码即可绑定</div>`;
+
+    return `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:600;background:${discoveryActive ? 'rgba(48,209,88,0.14)' : 'rgba(255,159,10,0.14)'};color:${discoveryActive ? '#22A846' : '#D97706'};">
+            <span style="width:7px;height:7px;border-radius:50%;background:${discoveryActive ? '#30D158' : '#FF9F0A'};"></span>
+            ${discoveryActive ? `局域网自动发现已开启 (UDP ${udpPort})` : `局域网自动发现待机（可手动扫码直连）`}
+          </span>
+          <span style="font-size:11.5px;color:var(--text-tertiary);">主机：${escapeHtml(hostname)}</span>
+        </div>
+
+        <div class="glass-card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;justify-content:center;padding:14px;">
+          <div id="mobile-pair-qr" style="flex-shrink:0;padding:6px;background:#FFFFFF;border-radius:14px;border:1px solid rgba(0,0,0,0.06);">
+            ${qrSvg}
+          </div>
+          <div style="flex:1;min-width:210px;display:flex;flex-direction:column;gap:10px;">
+            <div>
+              <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">局域网连接地址</div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <code id="mobile-pair-url" style="padding:5px 10px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-family:var(--font-mono);font-size:12.5px;font-weight:600;user-select:all;">${escapeHtml(lanUrl)}</code>
+                <button type="button" class="pill-btn pill-btn-sm" id="mobile-copy-url">${icon('copy', 12)} 复制地址</button>
+              </div>
+            </div>
+
+            <div>
+              <div style="font-size:11.5px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;">6 位配对码（Android 端扫码或手动输入）</div>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span id="mobile-pair-pin" style="font-family:var(--font-mono);font-size:26px;font-weight:700;letter-spacing:0.14em;color:var(--text-primary);padding:4px 12px;border-radius:12px;background:var(--bg-island);border:1px solid var(--border-hairline);user-select:all;">${escapeHtml(formatPinDisplay(pin))}</span>
+                <button type="button" class="pill-btn pill-btn-sm" id="mobile-rotate-pin">↻ 刷新配对码</button>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="pill-btn pill-btn-sm pill-btn-primary" id="mobile-copy-all">${icon('copy', 12)} 复制连接信息</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card" style="display:flex;flex-direction:column;gap:8px;padding:12px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:12.5px;font-weight:600;color:var(--text-primary);">已配对 Android 设备 (${devices.length})</span>
+            <span style="font-size:11px;color:var(--text-tertiary);">刷新配对码不影响已配对设备</span>
+          </div>
+          <div id="mobile-paired-list" style="display:flex;flex-direction:column;gap:6px;max-height:150px;overflow-y:auto;">
+            ${devicesHtml}
+          </div>
+        </div>
+
+        <div class="glass-card" style="padding:10px 12px;font-size:12px;line-height:1.55;color:var(--text-secondary);border-color:rgba(10,132,255,0.28);background:var(--accent-soft);">
+          <strong style="color:var(--accent);">🌐 异地 / 4G / 5G 远程直连（Tailscale 推荐）</strong><br/>
+          同一 Wi-Fi 下 Android 端打开即自动发现本机；若外出离开局域网，只需在电脑与手机均安装免费的 <strong>Tailscale</strong>（点对点加密组网），在 Android 端填入本机 Tailscale IP（如 <code>100.x.x.x:${escapeHtml(String(port))}</code>）与配对码，即可安全远程同步笔记、秒发闪念与直传文件。
+        </div>
+      </div>
+    `;
+  };
+
+  openSheet({
+    title: '📱 连接 Android 手机（局域网直连 / 扫码配对）',
+    bodyHtml: buildBodyHtml(pairInfo),
+    footerHtml: `
+      <button type="button" class="pill-btn pill-btn-primary" id="mobile-pair-done">完成</button>
+    `,
+    onMount(card) {
+      let currentInfo = pairInfo;
+
+      const bindDynamicActions = () => {
+        card.querySelector('#mobile-copy-url')?.addEventListener('click', () => {
+          const url = currentInfo?.url || `http://${currentInfo?.ip}:${currentInfo?.port}`;
+          copyInternal(url, `已复制局域网地址：${url}`);
+        });
+
+        card.querySelector('#mobile-copy-all')?.addEventListener('click', () => {
+          const url = currentInfo?.url || `http://${currentInfo?.ip}:${currentInfo?.port}`;
+          const pin = currentInfo?.pin || '';
+          const summary = `SmartLocalNote 连接地址：${url}\n配对码：${pin}\n配对链接：${currentInfo?.uri || ''}`;
+          copyInternal(summary, '已复制完整连接地址与配对码');
+        });
+
+        const rotateBtn = card.querySelector('#mobile-rotate-pin');
+        rotateBtn?.addEventListener('click', async () => {
+          rotateBtn.disabled = true;
+          try {
+            const refreshed = await api.post('/api/mobile/rotate-pin', {});
+            if (refreshed && typeof refreshed === 'object') {
+              currentInfo = refreshed;
+              const bodyEl = card.querySelector('#sheet-body') || document.getElementById('sheet-body');
+              if (bodyEl) {
+                bodyEl.innerHTML = buildBodyHtml(currentInfo);
+                bindDynamicActions();
+              }
+              showToast(`配对码已刷新：${formatPinDisplay(currentInfo.pin)}`, 'success');
+            }
+          } catch (err) {
+            showToast(`刷新配对码失败：${err?.message || '未知错误'}`, 'error');
+          } finally {
+            if (rotateBtn.isConnected) rotateBtn.disabled = false;
+          }
+        });
+      };
+
+      bindDynamicActions();
+      card.querySelector('#mobile-pair-done')?.addEventListener('click', closeSheet);
+    },
+  });
+}
+
+/* --------------------------------------------------------------------------
  * 8. Public Init
  * -------------------------------------------------------------------------- */
 
@@ -2749,6 +3234,7 @@ export function initSpotlight() {
 
   document.getElementById('btn-spotlight')?.addEventListener('click', () => openSpotlight());
   document.getElementById('btn-voice-quick')?.addEventListener('click', openVoiceSheet);
+  document.getElementById('btn-mobile-connect')?.addEventListener('click', openMobileConnectSheet);
   document.getElementById('btn-settings')?.addEventListener('click', openSettingsSheet);
 
   const btnZenMode = document.getElementById('btn-zen-mode');
@@ -2768,6 +3254,7 @@ export function initSpotlight() {
 
   store.on('spotlight:open', (opts) => openSpotlight(opts?.mode || opts));
   store.on('voice:open', openVoiceSheet);
+  store.on('mobile:connect-open', openMobileConnectSheet);
   store.on('settings:open', openSettingsSheet);
 
   // Innovation 3: Focus-only clipboard sniffing (zero polling)

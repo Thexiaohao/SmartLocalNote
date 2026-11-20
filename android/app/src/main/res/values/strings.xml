@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">SmartLocalNote</string>
+    <string name="share_receiver_label">发送到 SmartLocalNote</string>
+    <string name="widget_name">SmartLocalNote 速记</string>
+    <string name="widget_description">一键记录闪念、推送剪贴板或打开待办清单</string>
+</resources>

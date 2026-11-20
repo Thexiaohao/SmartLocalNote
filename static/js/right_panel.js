@@ -350,18 +350,25 @@ function setModuleHeightSafe(moduleKey, px) {
   return nextLayout;
 }
 
+function isMobileRightViewport() {
+  if (typeof window === 'undefined') return false;
+  return window.innerWidth <= 768 || Boolean(document.body?.classList?.contains('is-android-app'));
+}
+
 function renderModuleResizerHtml(id) {
+  if (isMobileRightViewport()) return '';
   return `<div class="module-height-resizer" data-resize-module="right_${escapeHtml(id)}" title="上下拖动调节卡片高度（双击恢复自动）" role="separator" aria-orientation="horizontal"></div>`;
 }
 
 function buildScrollBodyStyle(id, isEmpty = false) {
+  if (isMobileRightViewport()) return isEmpty ? 'min-height:0;' : '';
   const savedH = getModuleHeight(`right_${id}`);
   if (savedH) return `height:${savedH}px;max-height:${savedH}px;overflow-y:auto;`;
   return isEmpty ? 'min-height:0;' : '';
 }
 
 function buildScrollBodyClasses(id, isEmpty = false, baseClass = 'module-scroll-body') {
-  const savedH = getModuleHeight(`right_${id}`);
+  const savedH = isMobileRightViewport() ? null : getModuleHeight(`right_${id}`);
   const parts = [baseClass];
   if (!savedH) parts.push('is-auto-height');
   if (isEmpty) parts.push('is-empty-compact');
@@ -386,6 +393,7 @@ function isRightModuleFloating(modId) {
 }
 
 function renderRightModuleControlsHtml(modId, title) {
+  if (isMobileRightViewport()) return '';
   const curPreset = getRightModuleSizePreset(modId);
   const floated = isRightModuleFloating(modId);
   const labelMap = { s: 'S', m: 'M', l: 'L', auto: 'Auto' };
@@ -1052,7 +1060,7 @@ export function initRightPanel(containerEl) {
   function ensureVisibleOnMobileOrCollapsed() {
     let changed = false;
     const patch = {};
-    if (typeof window !== 'undefined' && window.innerWidth <= 767 && store.state.mobileTab !== 'ai') {
+    if (isMobileRightViewport() && store.state.mobileTab !== 'ai') {
       patch.mobileTab = 'ai';
       changed = true;
     }
@@ -4748,8 +4756,9 @@ export function initRightPanel(containerEl) {
       } else {
         store.setCenterView?.('explorer');
       }
-      if (typeof window !== 'undefined' && window.innerWidth <= 767) {
+      if (isMobileRightViewport()) {
         store.setState({ mobileTab: 'doc' }, 'layout:changed');
+        store.emit('mobile:focus-todos');
       }
       return;
     }
@@ -5753,6 +5762,20 @@ export function initRightPanel(containerEl) {
   }
 
   // Initial Render + Lazy Initial Loads
+  let lastMobileRightState = isMobileRightViewport();
+  const syncMobileRightClass = () => {
+    const nowMobile = isMobileRightViewport();
+    containerEl.classList.toggle('is-mobile-right', nowMobile);
+    if (nowMobile !== lastMobileRightState) {
+      lastMobileRightState = nowMobile;
+      renderSummaryMode();
+      renderChatMode();
+      renderToolsMode();
+    }
+  };
+  containerEl.classList.toggle('is-mobile-right', lastMobileRightState);
+  window.addEventListener('resize', syncMobileRightClass);
+
   renderTabsHeader();
   syncModeHeader();
   renderSummaryMode();

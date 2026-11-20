@@ -60,11 +60,12 @@ from core.daemon_bridge import (
 )
 
 # Explicit router imports so PyInstaller static analysis always bundles all API & core modules
-from api import ai_api, excel_api, files_api, system_api, tools_api  # noqa: F401
+from api import ai_api, excel_api, files_api, mobile_api, system_api, tools_api  # noqa: F401
 try:
     from api import search_api  # noqa: F401
 except ImportError:
     search_api = None  # type: ignore[assignment]
+from core import mobile_bridge as _core_mobile_bridge  # noqa: F401
 from core import scheduler as _core_scheduler  # noqa: F401
 
 STATIC_DIR = RESOURCE_DIR / "static"
@@ -80,6 +81,7 @@ _ROUTER_MODULES = (
     "api.tools_api",
     "api.ai_api",
     "api.search_api",
+    "api.mobile_api",
 )
 
 
@@ -319,8 +321,8 @@ def main() -> None:
             daemon_hwnd = 0
 
     port = _pick_available_port(args.port)
-    if port != cfg.get("port"):
-        os.environ["SMARTLOCALNOTE_ACTIVE_PORT"] = str(port)
+    os.environ["SMARTLOCALNOTE_ACTIVE_PORT"] = str(port)
+    _core_mobile_bridge.start_lan_discovery(port)
 
     webview = None
     if not args.web_only and not _is_headless_linux():
@@ -333,7 +335,10 @@ def main() -> None:
     _print_banner(port, get_local_ip(), use_web_only)
 
     if use_web_only:
-        _run_uvicorn(args.host, port, quiet=False)
+        try:
+            _run_uvicorn(args.host, port, quiet=False)
+        finally:
+            _core_mobile_bridge.stop_lan_discovery()
         return
 
     server_thread = threading.Thread(
@@ -388,6 +393,7 @@ def main() -> None:
             save_window_state(win, bridge.main_hwnd if bridge is not None else 0)
         if bridge is not None:
             bridge.close()
+        _core_mobile_bridge.stop_lan_discovery()
         _try_scheduler_hook("stop_scheduler")
         if daemon_hwnd:
             os._exit(0)

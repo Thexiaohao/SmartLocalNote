@@ -1226,6 +1226,7 @@ export function initCenterView(containerEl) {
       typeFilter: 'all',
       viewMode: 'grid', // 'grid' | 'list'
       todoPaneMode: 'side', // 'side' | 'collapsed' | 'full'
+      mobileSection: 'files', // 'files' | 'todos' (<= 768px single-column switcher)
       todoFilter: 'open', // 'open' | 'all' | 'done'
       collapsedTodoFiles: new Set(),
       inlineCreateMode: '', // '' | 'note' | 'folder'
@@ -1596,8 +1597,27 @@ export function initCenterView(containerEl) {
     setIsland('idle', { label: doc.name });
   }
 
+  function isMobileViewport() {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth <= 768 || Boolean(document.body?.classList?.contains('is-android-app'));
+  }
+
+  function syncMobileTopbarTitle(title) {
+    const island = document.getElementById('dynamic-island');
+    if (island) {
+      const clean = String(title || '').trim() || 'SmartLocalNote';
+      island.setAttribute('data-mobile-title', clean.slice(0, 22));
+    }
+  }
+
+  function syncMobileMdBarBodyClass(active) {
+    if (typeof document !== 'undefined' && document.body) {
+      document.body.classList.toggle('has-mobile-md-bar', Boolean(active));
+    }
+  }
+
   function ensureDocTabOnMobile() {
-    if (typeof window !== 'undefined' && window.innerWidth <= 767 && store.state.mobileTab !== 'doc') {
+    if (isMobileViewport() && store.state.mobileTab !== 'doc') {
       store.setState({ mobileTab: 'doc' });
       store.emit('layout:changed');
     }
@@ -2270,6 +2290,7 @@ export function initCenterView(containerEl) {
                           <button type="button" class="explorer-pin-btn ${isPinned ? 'is-pinned' : ''}" data-explorer-pin="${escapeHtml(file.path)}" title="${isPinned ? '取消置顶' : '置顶文件'}">
                             ${isPinned ? '★' : '☆'}
                           </button>
+                          <button type="button" class="explorer-mobile-more-btn" data-explorer-mobile-more="${escapeHtml(file.path)}" aria-label="更多操作" title="更多操作">⋯</button>
                         </div>
                       </div>
                     `;
@@ -2281,7 +2302,7 @@ export function initCenterView(containerEl) {
                       data-explorer-file="${escapeHtml(file.path)}"
                       title="${escapeHtml(file.path)}"
                     >
-                      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                      <div class="explorer-card-head" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
                         <div style="display:flex; align-items:center; gap:8px; min-width:0;">
                           <input
                             type="checkbox"
@@ -2303,16 +2324,17 @@ export function initCenterView(containerEl) {
                           ${isPinned ? '★' : '☆'}
                         </button>
                       </div>
-                      <div style="font-size:13.5px; font-weight:600; color:var(--text-primary); line-height:1.35; word-break:break-word;">
+                      <div class="explorer-card-title" style="font-size:13.5px; font-weight:600; color:var(--text-primary); line-height:1.35; word-break:break-word;">
                         ${escapeHtml(file.name)}
                       </div>
-                      <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; margin-top:auto;">
-                        <span style="font-size:11px; color:var(--text-tertiary); padding:1px 7px; border-radius:var(--radius-pill); background:var(--bg-subtle); max-width:130px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                      <div class="explorer-card-meta" style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; margin-top:auto;">
+                        <span class="explorer-card-dir" style="font-size:11px; color:var(--text-tertiary); padding:1px 7px; border-radius:var(--radius-pill); background:var(--bg-subtle); max-width:130px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                           ${escapeHtml(dirText)}
                         </span>
-                        <div style="display:inline-flex; align-items:center; gap:6px;">
+                        <div class="explorer-card-right" style="display:inline-flex; align-items:center; gap:6px;">
                           ${todoHtml}
-                          ${mtimeStr ? `<span style="font-size:10.5px; color:var(--text-tertiary);">${escapeHtml(mtimeStr)}</span>` : ''}
+                          ${mtimeStr ? `<span class="explorer-card-time" style="font-size:10.5px; color:var(--text-tertiary);">${escapeHtml(mtimeStr)}</span>` : ''}
+                          <button type="button" class="explorer-mobile-more-btn" data-explorer-mobile-more="${escapeHtml(file.path)}" aria-label="更多操作" title="更多操作">⋯</button>
                         </div>
                       </div>
                     </div>
@@ -2542,14 +2564,23 @@ export function initCenterView(containerEl) {
   function renderExplorerHome({ refresh = false } = {}) {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
 
     const mainPane = ensureMainPaneEl();
     const prevFilesScroll = mainPane.querySelector('.explorer-files-pane')?.scrollTop || 0;
     const prevTodosScroll = mainPane.querySelector('[data-explorer-role="todo-list"]')?.scrollTop || 0;
 
     const exp = state.explorer;
+    const mobileSec = exp.mobileSection === 'todos' ? 'todos' : 'files';
+    syncMobileTopbarTitle(mobileSec === 'todos' ? '全局待办' : '全部笔记');
+
     const filesData = buildExplorerFilesSectionData();
     const { mountedDirs, allItems, allFolders } = filesData;
+    const todoStats = store.state.todos?.stats || {};
+    const openTodoCount =
+      todoStats.open != null
+        ? Number(todoStats.open)
+        : (store.state.todos?.items || []).filter((it) => !it?.checked).length;
 
     const currentRelSegments = exp.scope === 'notes' && exp.relDir ? exp.relDir.split('/').filter(Boolean) : [];
     const targetFolderNames = allFolders
@@ -2575,8 +2606,24 @@ export function initCenterView(containerEl) {
       filesData.files.length > 0 && filesData.files.every((f) => isExplorerFileSelected(f.path));
 
     mainPane.innerHTML = `
-      <div class="explorer-home ${todoPaneModeClass}">
-        <div class="explorer-topbar">
+      <div class="explorer-home ${todoPaneModeClass}" data-mobile-section="${mobileSec}">
+        <div class="explorer-mobile-seg" role="tablist" aria-label="主面板切换">
+          <button
+            type="button"
+            class="explorer-mobile-seg-btn ${mobileSec === 'files' ? 'is-active' : ''}"
+            data-explorer-mobile-sec="files"
+            role="tab"
+            aria-selected="${mobileSec === 'files'}"
+          >📁 全部文件</button>
+          <button
+            type="button"
+            class="explorer-mobile-seg-btn ${mobileSec === 'todos' ? 'is-active' : ''}"
+            data-explorer-mobile-sec="todos"
+            role="tab"
+            aria-selected="${mobileSec === 'todos'}"
+          >✅ 全局待办${openTodoCount > 0 ? ` (${openTodoCount})` : ''}</button>
+        </div>
+        <div class="explorer-topbar explorer-topbar-files-only">
           <div class="explorer-topbar-row">
             <div class="explorer-breadcrumbs" role="navigation" aria-label="工作区面包屑">
               <button type="button" class="explorer-crumb ${exp.scope === 'all' ? 'is-active' : ''}" data-explorer-scope="all">
@@ -2908,6 +2955,73 @@ export function initCenterView(containerEl) {
           state.explorer.lastClickedPath = p;
         }
         renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const mobileSecBtn = e.target.closest('[data-explorer-mobile-sec]');
+      if (mobileSecBtn) {
+        state.explorer.mobileSection = mobileSecBtn.dataset.explorerMobileSec === 'todos' ? 'todos' : 'files';
+        renderExplorerHome({ refresh: false });
+        return;
+      }
+
+      const mobileMoreBtn = e.target.closest('[data-explorer-mobile-more]');
+      if (mobileMoreBtn) {
+        e.stopPropagation();
+        const filePath = mobileMoreBtn.dataset.explorerMobileMore;
+        if (!filePath) return;
+        const item = getWorkspaceFilesList().find((f) => isSamePath(f.path, filePath)) || {
+          path: filePath,
+          name: getBaseName(filePath),
+        };
+        const pinnedSet = new Set((store.state.pinnedFiles || []).map((p) => normalizePath(p)));
+        const isPinned = pinnedSet.has(normalizePath(item.path));
+        openSheet({
+          title: item.name,
+          bodyHtml: `
+            <div class="mobile-action-sheet-list">
+              <button type="button" class="mobile-sheet-action-btn" data-mfile-act="open">📄 打开文档</button>
+              <button type="button" class="mobile-sheet-action-btn" data-mfile-act="pin">${isPinned ? '☆ 取消置顶' : '★ 置顶到顶部'}</button>
+              <button type="button" class="mobile-sheet-action-btn" data-mfile-act="ai-sum">✨ AI 提炼摘要与待办</button>
+              <button type="button" class="mobile-sheet-action-btn" data-mfile-act="copy-anchor">🔗 复制 [[双链]] 锚点</button>
+              <button type="button" class="mobile-sheet-action-btn is-danger" data-mfile-act="trash">🗑 移入内置回收站</button>
+            </div>
+          `,
+          footerHtml: `<button type="button" class="pill-btn pill-btn-ghost" data-mfile-act="close" style="width:100%;justify-content:center;">取消</button>`,
+          onMount(card) {
+            card.addEventListener('click', async (ev) => {
+              const btn = ev.target.closest('[data-mfile-act]');
+              if (!btn) return;
+              const act = btn.dataset.mfileAct;
+              closeSheet();
+              if (act === 'open') {
+                openFile(item.path);
+              } else if (act === 'pin') {
+                togglePinFile?.(item.path);
+                renderExplorerHome({ refresh: false });
+              } else if (act === 'ai-sum') {
+                store.setState({ mobileTab: 'ai', rightMode: 'summary', rightCollapsed: false }, 'rightMode:changed');
+                store.emit('layout:changed');
+                store.emit('ai:summarize-request', { file_path: item.path, autoRun: true });
+              } else if (act === 'copy-anchor') {
+                copyInternal(`[[${item.name}]]`, '已复制双链锚点');
+              } else if (act === 'trash') {
+                try {
+                  await store.trashFile?.(item.path, 'app');
+                  if (state.activeDoc && isSamePath(state.activeDoc.path, item.path)) {
+                    state.activeDoc = null;
+                    state.dirty = false;
+                    syncActiveFileStore();
+                  }
+                  await store.refreshAllTodos?.().catch(() => {});
+                  renderExplorerHome({ refresh: false });
+                } catch (err) {
+                  showToast(getErrorMsg(err, '移入回收站失败'), 'error');
+                }
+              }
+            });
+          },
+        });
         return;
       }
 
@@ -3299,6 +3413,18 @@ export function initCenterView(containerEl) {
   // Shared Companion Note Panel (PDF / Audio / Video / Archive / Image / Office)
   // Supports Floating Resizable Window ('float') & Resizable Split-Pane ('split')
   // =========================================================================
+  function renderMobileCompanionTriggerHtml(doc) {
+    if (!hasCompanionNote(doc) || state.companionOpen) return '';
+    return `
+      <div class="mobile-companion-bar">
+        <button type="button" class="mobile-companion-trigger-btn" data-action="toggle-companion">
+          <span>📝 伴生笔记${state.pdf.companionDirty ? ' · 未保存' : ''}</span>
+          <span class="mobile-companion-trigger-hint">点击展开</span>
+        </button>
+      </div>
+    `;
+  }
+
   function renderCompanionPaneHtml(doc, { placeholderText = '', extraActionHtml = '' } = {}) {
     if (!state.companionOpen) return '';
     const isCompPreview = state.pdf.companionMode === 'preview';
@@ -3306,6 +3432,7 @@ export function initCenterView(containerEl) {
     const isFloat = state.companionLayout !== 'split';
 
     const headerControlsHtml = `
+      <div class="sheet-grabber companion-mobile-grabber" aria-hidden="true"></div>
       <div class="companion-float-header" data-role="companion-float-header" title="${isFloat ? '按住拖动伴生笔记浮窗位置' : '伴生笔记分屏栏'}">
         <div style="display:flex; align-items:center; gap:6px; min-width:0; overflow:hidden;">
           <span style="font-size:12.5px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${isFloat ? '❐ 伴生笔记' : '◫ 伴生笔记'}</span>
@@ -3317,9 +3444,9 @@ export function initCenterView(containerEl) {
         </div>
 
         <div style="display:inline-flex; align-items:center; gap:4px; flex-shrink:0;">
-          <button type="button" class="pill-btn pill-btn-sm ${isFloat ? 'pill-btn-primary' : ''}" data-action="companion-set-float" title="切换为可自由拖动与调节大小的浮窗模块" style="height:22px;padding:0 7px;font-size:11px;">浮窗</button>
-          <button type="button" class="pill-btn pill-btn-sm ${!isFloat ? 'pill-btn-primary' : ''}" data-action="companion-set-split" title="切换为可拖动分隔条调节左右间距的分屏模式" style="height:22px;padding:0 7px;font-size:11px;">分屏</button>
-          <button type="button" class="pill-btn pill-btn-sm" data-action="toggle-companion" title="收起伴生笔记" style="height:22px;width:22px;padding:0;">✕</button>
+          <button type="button" class="pill-btn pill-btn-sm desktop-only-inline ${isFloat ? 'pill-btn-primary' : ''}" data-action="companion-set-float" title="切换为可自由拖动与调节大小的浮窗模块" style="height:22px;padding:0 7px;font-size:11px;">浮窗</button>
+          <button type="button" class="pill-btn pill-btn-sm desktop-only-inline ${!isFloat ? 'pill-btn-primary' : ''}" data-action="companion-set-split" title="切换为可拖动分隔条调节左右间距的分屏模式" style="height:22px;padding:0 7px;font-size:11px;">分屏</button>
+          <button type="button" class="pill-btn pill-btn-sm companion-close-btn" data-action="toggle-companion" title="收起伴生笔记" style="height:22px;width:22px;padding:0;">✕</button>
         </div>
       </div>
     `;
@@ -4283,6 +4410,326 @@ export function initCenterView(containerEl) {
     `;
   }
 
+  function renderMobileMdKbdBarHtml(canUndo) {
+    return `
+      <div class="mobile-md-kbd-bar" data-role="mobile-md-kbd-bar" role="toolbar" aria-label="手机端 Markdown 快捷工具栏">
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="h1" aria-label="一级标题">H1</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="h2" aria-label="二级标题">H2</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="bold" aria-label="加粗"><strong>B</strong> 加粗</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="todo" aria-label="待办">☑ 待办</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="ul" aria-label="列表">• 列表</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="mark" aria-label="高亮">== 高亮</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="wikilink" aria-label="双链">[[ 双链</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="tag" aria-label="标签"># 标签</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="insert-image" aria-label="插入图片">📷 插图</button>
+        <button type="button" class="mobile-md-kbd-btn" data-mobile-kbd="undo" aria-label="撤回" ${canUndo ? '' : 'disabled'}>↩ 撤回</button>
+        <button type="button" class="mobile-md-kbd-btn ${state.dirty ? 'is-primary' : ''}" data-mobile-kbd="save" aria-label="保存">💾 保存</button>
+      </div>
+    `;
+  }
+
+  function insertRawSnippetAtActiveCursor(snippet, backOffset = 0) {
+    const doc = state.activeDoc;
+    if (!doc || (doc.type !== 'markdown' && doc.type !== 'text')) return;
+
+    if (state.mdMode === 'source') {
+      const ta = ensureMainPaneEl().querySelector('.md-editor:not([data-role])');
+      if (!ta) return;
+      ta.focus();
+      pushUndoSnapshot(doc.content, { immediate: true });
+      const start = ta.selectionStart ?? ta.value.length;
+      const end = ta.selectionEnd ?? start;
+      const nextVal = `${ta.value.slice(0, start)}${snippet}${ta.value.slice(end)}`;
+      const caret = Math.max(start, start + snippet.length - backOffset);
+      ta.value = nextVal;
+      ta.setSelectionRange(caret, caret);
+      doc.content = nextVal;
+      state.dirty = true;
+      store.state.activeDocumentText = nextVal;
+      updateMdDirtyIndicators();
+      return;
+    }
+
+    if (state.mdMode !== 'live') return;
+    let editorEl = containerEl.querySelector('.lp-block-wysiwyg');
+    if (!editorEl) {
+      const targetBlk = containerEl.querySelector('.lp-block[data-block-idx]');
+      if (targetBlk) {
+        const bIdx = Number.parseInt(targetBlk.dataset.blockIdx, 10);
+        if (Number.isFinite(bIdx)) {
+          state.editingBlockIdx = bIdx;
+          state.editingDraftNewBlock = false;
+          state.editingDraftInsert = null;
+          renderMarkdownMode();
+          editorEl = containerEl.querySelector('.lp-block-wysiwyg');
+          if (editorEl) {
+            editorEl.focus({ preventScroll: true });
+            placeCaretInsideWysiwyg(editorEl, 'end');
+          }
+        }
+      } else {
+        appendNewBlockAndFocus();
+        window.requestAnimationFrame(() => {
+          const ed = containerEl.querySelector('.lp-block-wysiwyg');
+          if (ed) {
+            ed.focus({ preventScroll: true });
+            if (typeof document.execCommand === 'function') {
+              document.execCommand('insertText', false, snippet);
+            } else {
+              ed.textContent = `${ed.textContent || ''}${snippet}`;
+            }
+            syncWysiwygBlockInput(ed);
+          }
+        });
+        return;
+      }
+    }
+    if (!editorEl) return;
+    pushUndoSnapshot(doc.content, { immediate: true });
+    editorEl.focus({ preventScroll: true });
+    if (typeof document.execCommand === 'function') {
+      document.execCommand('insertText', false, snippet);
+    } else {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        const node = document.createTextNode(snippet);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+      } else {
+        editorEl.appendChild(document.createTextNode(snippet));
+      }
+    }
+    syncWysiwygBlockInput(editorEl, { immediateUndoAlreadyPushed: true });
+  }
+
+  function insertImageMarkdownToActiveDoc(src, altName = '图片') {
+    const doc = state.activeDoc;
+    if (!doc || !src) return;
+    const cleanAlt = String(altName || '图片').replace(/[\[\]()\r\n]/g, '').slice(0, 32) || '图片';
+    const md = `![${cleanAlt}](${src})`;
+    if (doc.type === 'markdown' || doc.type === 'text') {
+      commitActiveBlock({ reRender: false });
+      pushUndoSnapshot(doc.content, { immediate: true });
+      const lines = getMdLines();
+      const targetLine = Number.isFinite(state.editingBlockRange?.endLine)
+        ? state.editingBlockRange.endLine + 1
+        : lines.length;
+      doc.content = insertMarkdownWithPadding(doc.content || '', targetLine, md);
+      state.dirty = true;
+      state.editingBlockIdx = null;
+      state.editingBlockRange = null;
+      state.editingDraftInsert = null;
+      store.state.activeDocumentText = doc.content;
+      renderMarkdownMode();
+      showToast('已插入图片到当前笔记', 'success');
+    } else if (hasCompanionNote(doc)) {
+      insertTextIntoCompanionNote(md, { toastMsg: '已插入图片到伴生笔记' });
+    }
+  }
+
+  function compressImageFileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('读取图片失败'));
+      reader.onload = () => {
+        const rawUrl = String(reader.result || '');
+        const img = new Image();
+        img.onerror = () => resolve(rawUrl);
+        img.onload = () => {
+          const maxDim = 1280;
+          let w = img.naturalWidth || img.width || 800;
+          let h = img.naturalHeight || img.height || 600;
+          if (w > maxDim || h > maxDim) {
+            const scale = maxDim / Math.max(w, h);
+            w = Math.max(1, Math.round(w * scale));
+            h = Math.max(1, Math.round(h * scale));
+          }
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              resolve(rawUrl);
+              return;
+            }
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve(canvas.toDataURL('image/jpeg', 0.82));
+          } catch {
+            resolve(rawUrl);
+          }
+        };
+        img.src = rawUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function triggerMobileImageInsert() {
+    const bridge = typeof window !== 'undefined' ? window.SmartLocalNoteAndroid : null;
+    if (bridge && typeof bridge === 'object') {
+      const fn =
+        bridge.pickImage ||
+        bridge.openCameraOrGallery ||
+        bridge.captureImage ||
+        bridge.selectImage ||
+        bridge.pickPhoto ||
+        bridge.openCamera;
+      if (typeof fn === 'function') {
+        try {
+          fn.call(bridge);
+          return;
+        } catch {
+          // fallback to standard file input below
+        }
+      }
+    }
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      const altName = (file.name || '图片').replace(/\.[^.]+$/, '');
+      try {
+        // Try backend upload endpoint if available, else embed compressed image cleanly
+        let uploadedUrl = '';
+        try {
+          const form = new FormData();
+          form.append('file', file);
+          const resp = await fetch('/api/files/upload', { method: 'POST', body: form });
+          if (resp.ok) {
+            const json = await resp.json().catch(() => null);
+            const payload = json?.data || json || {};
+            if (payload.url) {
+              uploadedUrl = payload.url;
+            } else if (payload.path) {
+              uploadedUrl = `/api/files/raw-stream?path=${encodeURIComponent(payload.path)}`;
+            }
+          }
+        } catch {
+          // fallback to local data URL
+        }
+        const finalSrc = uploadedUrl || (await compressImageFileToDataUrl(file));
+        insertImageMarkdownToActiveDoc(finalSrc, altName);
+      } catch (err) {
+        showToast(getErrorMsg(err, '插入图片失败'), 'error');
+      }
+    }, { once: true });
+    input.click();
+  }
+
+  function handleMobileKbdAction(kind) {
+    if (!kind) return;
+    if (kind === 'undo') {
+      performUndo();
+      return;
+    }
+    if (kind === 'save') {
+      saveMarkdownDoc();
+      return;
+    }
+    if (kind === 'insert-image') {
+      triggerMobileImageInsert();
+      return;
+    }
+    if (kind === 'wikilink') {
+      insertRawSnippetAtActiveCursor(state.mdMode === 'source' ? '[[]]' : '[[', state.mdMode === 'source' ? 2 : 0);
+      return;
+    }
+    if (kind === 'tag') {
+      insertRawSnippetAtActiveCursor('#', 0);
+      return;
+    }
+    applyWysiwygBarAction(kind);
+  }
+
+  function openMobileDocMoreSheet() {
+    const doc = state.activeDoc;
+    if (!doc) return;
+    const isMd = doc.type === 'markdown';
+    const curFontSize = Number(store.state.docFontSize || 15);
+    const blCount = Number(state.backlinks?.count || 0);
+    openSheet({
+      title: doc.name,
+      bodyHtml: `
+        <div class="mobile-action-sheet-list">
+          <div class="mobile-sheet-section-row">
+            <span class="mobile-sheet-section-label">编辑视图</span>
+            <div style="display:inline-flex;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="pill-btn pill-btn-sm ${state.mdMode === 'live' ? 'pill-btn-primary' : ''}" data-mdoc-act="mode-live">实时编辑</button>
+              <button type="button" class="pill-btn pill-btn-sm ${state.mdMode === 'source' ? 'pill-btn-primary' : ''}" data-mdoc-act="mode-source">纯源码</button>
+              ${isMd ? `<button type="button" class="pill-btn pill-btn-sm ${state.mdMode === 'mindmap' ? 'pill-btn-primary' : ''}" data-mdoc-act="mode-mindmap">🧠 脑图</button>` : ''}
+            </div>
+          </div>
+          <div class="mobile-sheet-section-row">
+            <span class="mobile-sheet-section-label">字号 (${curFontSize}px)</span>
+            <div style="display:inline-flex;gap:8px;align-items:center;">
+              <button type="button" class="pill-btn pill-btn-sm" data-mdoc-act="font-dec">A-</button>
+              <button type="button" class="pill-btn pill-btn-sm" data-mdoc-act="font-inc">A+</button>
+            </div>
+          </div>
+          <button type="button" class="mobile-sheet-action-btn" data-mdoc-act="find">🔍 文档内查找与替换</button>
+          <button type="button" class="mobile-sheet-action-btn" data-mdoc-act="ai-polish">🪄 AI 润色排版</button>
+          <button type="button" class="mobile-sheet-action-btn" data-mdoc-act="ai-summarize">✨ AI 提炼摘要与待办</button>
+          <button type="button" class="mobile-sheet-action-btn" data-mdoc-act="snapshots">↺ 历史写前快照</button>
+          ${blCount > 0 ? `<button type="button" class="mobile-sheet-action-btn" data-mdoc-act="backlinks">🔗 查看反向链接 (${blCount})</button>` : ''}
+        </div>
+      `,
+      footerHtml: `<button type="button" class="pill-btn pill-btn-ghost" data-mdoc-act="close" style="width:100%;justify-content:center;">完成</button>`,
+      onMount(card) {
+        card.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('[data-mdoc-act]');
+          if (!btn) return;
+          const act = btn.dataset.mdocAct;
+          if (act === 'font-dec') {
+            updateTypographyAndPersist((store.state.docFontSize || 15) - 1, store.state.docFontFamily);
+            const lbl = card.querySelector('.mobile-sheet-section-label:nth-of-type(1)');
+            const allLbls = card.querySelectorAll('.mobile-sheet-section-label');
+            if (allLbls[1]) allLbls[1].textContent = `字号 (${store.state.docFontSize || 15}px)`;
+            return;
+          }
+          if (act === 'font-inc') {
+            updateTypographyAndPersist((store.state.docFontSize || 15) + 1, store.state.docFontFamily);
+            const allLbls = card.querySelectorAll('.mobile-sheet-section-label');
+            if (allLbls[1]) allLbls[1].textContent = `字号 (${store.state.docFontSize || 15}px)`;
+            return;
+          }
+          closeSheet();
+          if (act === 'mode-live' || act === 'mode-source' || act === 'mode-mindmap') {
+            const nextMode = act.replace('mode-', '');
+            commitActiveBlock({ reRender: false });
+            state.mdMode = nextMode;
+            renderMarkdownMode();
+          } else if (act === 'find') {
+            openFindBar();
+          } else if (act === 'ai-polish') {
+            triggerAiPolish();
+          } else if (act === 'ai-summarize') {
+            store.setState({ mobileTab: 'ai', rightMode: 'summary', rightCollapsed: false }, 'rightMode:changed');
+            store.emit('layout:changed');
+            store.emit('ai:summarize-request', {
+              file_path: doc.path,
+              text: store.state.activeDocumentText || doc.content || '',
+              autoRun: true,
+            });
+          } else if (act === 'snapshots') {
+            openSnapshotsSheet();
+          } else if (act === 'backlinks') {
+            openBacklinksSheet();
+          }
+        });
+      },
+    });
+  }
+
   function renderMarkdownMode() {
     hideFormatBar();
     removeDropInsertLine();
@@ -4302,15 +4749,42 @@ export function initCenterView(containerEl) {
     const segIdx = isMd ? (isLive ? 0 : isSource ? 1 : 2) : (isLive ? 0 : 1);
     const thumbWidth = isMd ? 'calc(33.333% - 3px)' : 'calc(50% - 3px)';
 
+    syncMobileTopbarTitle(doc.name.replace(/\.md$/i, ''));
+    syncMobileMdBarBodyClass(isLive || isSource);
+
     const mainPane = ensureMainPaneEl();
     const prevScrollEl = mainPane.querySelector('.md-scroll-area') || mainPane.querySelector('.md-editor:not([data-role])');
     const prevScrollTop = prevScrollEl ? prevScrollEl.scrollTop : 0;
 
     const canUndo = state.history.undoStack.length > 0 || state.history.typingBaseline !== null;
     const canRedo = state.history.redoStack.length > 0;
+    const shortTitle = doc.name.replace(/\.md$/i, '');
 
     mainPane.innerHTML = `
-      <div class="center-toolbar">
+      <div class="mobile-md-toolbar" role="toolbar" aria-label="手机端文档工具栏">
+        <button type="button" class="mobile-tb-back-btn" data-action="open-explorer-home" aria-label="返回主面板">
+          ← 主面板
+        </button>
+        <div class="mobile-tb-title-wrap">
+          <span class="mobile-tb-title" title="${escapeHtml(doc.path)}">${escapeHtml(shortTitle)}</span>
+          <span
+            data-role="md-dirty-dot"
+            title="有未保存修改"
+            style="width:7px; height:7px; border-radius:9999px; background:var(--warning); display:${state.dirty ? 'inline-block' : 'none'}; flex-shrink:0;"
+          ></span>
+        </div>
+        <div class="mobile-tb-actions">
+          ${
+            isMd
+              ? `<button type="button" class="mobile-tb-chip ${isMindmap ? 'is-active' : ''}" data-md-mode="${isMindmap ? 'live' : 'mindmap'}" title="${isMindmap ? '返回正文' : '脑图视图'}">🧠</button>`
+              : ''
+          }
+          <button type="button" class="mobile-tb-chip ${state.dirty ? 'is-primary' : ''}" data-action="md-save" title="保存文档">💾</button>
+          <button type="button" class="mobile-tb-chip" data-action="mobile-doc-more" aria-label="更多操作" title="更多操作">⋯</button>
+        </div>
+      </div>
+
+      <div class="center-toolbar desktop-center-toolbar">
         <div class="center-toolbar-group">
           ${renderNavButtonsHtml()}
           <span style="color:var(--accent); display:inline-flex; align-items:center;">${icon(docIconName(doc.type, doc.ext), 16)}</span>
@@ -4379,6 +4853,8 @@ export function initCenterView(containerEl) {
           ? renderLiveBlocksHtml(doc)
           : `<div style="flex:1 1 auto; min-height:0; min-width:0; display:flex; flex-direction:column; overflow:hidden;"><textarea class="md-editor" spellcheck="false" placeholder="随时记录想法、笔记或输入 [[文件名.pdf#page=1]] / [[表格.xlsx#Sheet1!C4]] / [[app:应用名]]...">${escapeHtml(doc.content || '')}</textarea></div>`
       }
+
+      ${isLive || isSource ? renderMobileMdKbdBarHtml(canUndo) : ''}
     `;
     ensureDropOverlay();
 
@@ -4386,6 +4862,15 @@ export function initCenterView(containerEl) {
     if (fmtBar) {
       fmtBar.addEventListener('mousedown', (ev) => {
         if (ev.target.closest('[data-fmt-bar]')) {
+          ev.preventDefault();
+        }
+      });
+    }
+
+    const mobileKbdBar = mainPane.querySelector('[data-role="mobile-md-kbd-bar"]');
+    if (mobileKbdBar) {
+      mobileKbdBar.addEventListener('mousedown', (ev) => {
+        if (ev.target.closest('[data-mobile-kbd]')) {
           ev.preventDefault();
         }
       });
@@ -4431,13 +4916,21 @@ export function initCenterView(containerEl) {
   }
 
   function updateMdDirtyIndicators() {
-    const dot = containerEl.querySelector('[data-role="md-dirty-dot"]');
-    if (dot) {
+    containerEl.querySelectorAll('[data-role="md-dirty-dot"]').forEach((dot) => {
       dot.style.display = state.dirty ? 'inline-block' : 'none';
-    }
-    const saveBtn = containerEl.querySelector('[data-action="md-save"]');
-    if (saveBtn) {
+    });
+    containerEl.querySelectorAll('[data-action="md-save"]').forEach((saveBtn) => {
       saveBtn.classList.toggle('pill-btn-primary', Boolean(state.dirty));
+      saveBtn.classList.toggle('is-primary', Boolean(state.dirty));
+    });
+    const kbdSave = containerEl.querySelector('[data-mobile-kbd="save"]');
+    if (kbdSave) {
+      kbdSave.classList.toggle('is-primary', Boolean(state.dirty));
+    }
+    const kbdUndo = containerEl.querySelector('[data-mobile-kbd="undo"]');
+    if (kbdUndo) {
+      const canUndo = state.history.undoStack.length > 0 || state.history.typingBaseline !== null;
+      kbdUndo.disabled = !canUndo;
     }
     updateMdUndoRedoButtons();
   }
@@ -5089,7 +5582,9 @@ export function initCenterView(containerEl) {
   function renderExcelMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
     const ex = state.excel;
     const pendingCount = ex.pendingChanges.size;
 
@@ -5519,7 +6014,9 @@ export function initCenterView(containerEl) {
   function renderPdfMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
     const pdf = state.pdf;
     const compModeCls = state.companionLayout === 'split' ? 'is-comp-split' : 'is-comp-float';
 
@@ -5637,6 +6134,7 @@ export function initCenterView(containerEl) {
             extraActionHtml: `<button type="button" class="pill-btn pill-btn-sm" data-action="pdf-insert-anchor">${icon('pin', 12)} 插入当前页锚点</button>`,
           })}
         </div>
+        ${renderMobileCompanionTriggerHtml(doc)}
       </div>
     `;
     renderPdfViewerStage();
@@ -5907,7 +6405,9 @@ export function initCenterView(containerEl) {
   function renderArchiveMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
     const ar = state.archive;
     const treeW = Math.min(460, Math.max(150, Number(state.archiveTreeWidth) || 230));
 
@@ -5980,6 +6480,7 @@ export function initCenterView(containerEl) {
               })
             : ''
         }
+        ${renderMobileCompanionTriggerHtml(doc)}
       </div>
     `;
 
@@ -5993,7 +6494,9 @@ export function initCenterView(containerEl) {
   function renderImageMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
     const imgState = state.image;
     const src = `/api/files/raw-stream?path=${encodeURIComponent(doc.path)}&_t=${imgState.cacheBust}`;
     const zoomPct = imgState.fit ? '适应' : `${Math.round(imgState.zoom * 100)}%`;
@@ -6057,6 +6560,7 @@ export function initCenterView(containerEl) {
               : ''
           }
         </div>
+        ${renderMobileCompanionTriggerHtml(doc)}
       </div>
     `;
     ensureDropOverlay();
@@ -6090,7 +6594,9 @@ export function initCenterView(containerEl) {
   function renderMediaMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
     const isVideo = doc.type === 'video';
     const src = `/api/files/raw-stream?path=${encodeURIComponent(doc.path)}`;
 
@@ -6152,6 +6658,7 @@ export function initCenterView(containerEl) {
             extraActionHtml: `<button type="button" class="pill-btn pill-btn-sm" data-action="media-insert-timestamp">${icon('clock', 12)} 插入时间戳</button>`,
           })}
         </div>
+        ${renderMobileCompanionTriggerHtml(doc)}
       </div>
     `;
 
@@ -6169,7 +6676,9 @@ export function initCenterView(containerEl) {
   function renderOfficePreviewMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
     const previewMd = doc.previewMarkdown || doc.content || '*暂无可预览文本内容，可点击上方按钮用 WPS / Office 打开*';
 
     ensureMainPaneEl().innerHTML = `
@@ -6217,6 +6726,7 @@ export function initCenterView(containerEl) {
               : ''
           }
         </div>
+        ${renderMobileCompanionTriggerHtml(doc)}
       </div>
     `;
     ensureDropOverlay();
@@ -6225,7 +6735,9 @@ export function initCenterView(containerEl) {
   function renderGenericMode() {
     hideFormatBar();
     removeDropInsertLine();
+    syncMobileMdBarBodyClass(false);
     const doc = state.activeDoc;
+    syncMobileTopbarTitle(doc?.name);
 
     ensureMainPaneEl().innerHTML = `
       <div class="center-toolbar">
@@ -6289,6 +6801,7 @@ export function initCenterView(containerEl) {
               : ''
           }
         </div>
+        ${renderMobileCompanionTriggerHtml(doc)}
       </div>
     `;
     ensureDropOverlay();
@@ -7102,6 +7615,53 @@ export function initCenterView(containerEl) {
       renderExplorerHome({ refresh: false });
     }
   });
+
+  store.on('mobile:focus-todos', () => {
+    commitActiveBlock({ reRender: false });
+    state.explorer.mobileSection = 'todos';
+    if (store.state.activeCenterView !== 'explorer') {
+      if (typeof setCenterView === 'function') {
+        setCenterView('explorer');
+      } else {
+        store.setState({ activeCenterView: 'explorer' }, 'center-view:change');
+      }
+    } else {
+      renderExplorerHome({ refresh: true });
+    }
+  });
+
+  store.on('layout:changed', () => {
+    if (!isMobileViewport()) return;
+    const tab = store.state.mobileTab || 'doc';
+    if (tab === 'files') {
+      syncMobileTopbarTitle('笔记目录');
+    } else if (tab === 'ai') {
+      syncMobileTopbarTitle('AI 与工具');
+    } else if (tab === 'todos') {
+      syncMobileTopbarTitle('全局待办');
+    } else if (store.state.activeCenterView === 'explorer') {
+      syncMobileTopbarTitle(state.explorer.mobileSection === 'todos' ? '全局待办' : '全部笔记');
+    } else if (state.activeDoc?.name) {
+      syncMobileTopbarTitle(state.activeDoc.name.replace(/\.md$/i, ''));
+    }
+  });
+
+  store.on('android:image-picked', (payload = {}) => {
+    const src = payload.url || payload.dataUrl || payload.data_url || (payload.path ? `/api/files/raw-stream?path=${encodeURIComponent(payload.path)}` : '');
+    if (src) {
+      insertImageMarkdownToActiveDoc(src, payload.name || '相册图片');
+    }
+  });
+
+  if (typeof window !== 'undefined') {
+    window.__slnOnAndroidImagePicked = (srcOrPayload, altName = '相册图片') => {
+      if (typeof srcOrPayload === 'string' && srcOrPayload.trim()) {
+        insertImageMarkdownToActiveDoc(srcOrPayload.trim(), altName);
+      } else if (srcOrPayload && typeof srcOrPayload === 'object') {
+        store.emit('android:image-picked', srcOrPayload);
+      }
+    };
+  }
 
   store.on('todos:updated', () => {
     refreshExplorerUiIfVisible();
@@ -11378,12 +11938,20 @@ export function initCenterView(containerEl) {
       return;
     }
 
-    // 0b. Word-style Icon Format Toolbar (.wysiwyg-format-bar)
+    // 0b. Word-style Icon Format Toolbar (.wysiwyg-format-bar) & Mobile Keyboard Format Bar (.mobile-md-kbd-bar)
     const fmtBarBtn = e.target.closest('[data-fmt-bar]');
     if (fmtBarBtn) {
       e.preventDefault();
       e.stopPropagation();
       applyWysiwygBarAction(fmtBarBtn.dataset.fmtBar);
+      return;
+    }
+
+    const mobileKbdBtn = e.target.closest('[data-mobile-kbd]');
+    if (mobileKbdBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleMobileKbdAction(mobileKbdBtn.dataset.mobileKbd);
       return;
     }
 
@@ -11682,6 +12250,9 @@ export function initCenterView(containerEl) {
         return;
       } else if (action === 'md-save') {
         saveMarkdownDoc();
+        return;
+      } else if (action === 'mobile-doc-more') {
+        openMobileDocMoreSheet();
         return;
       } else if (action === 'ai-polish') {
         triggerAiPolish();
@@ -12401,6 +12972,64 @@ export function initCenterView(containerEl) {
 
   containerEl.addEventListener('scroll', schedulePersistLastSession, true);
   window.addEventListener('beforeunload', persistLastSessionNow);
+
+  // Mobile soft-keyboard & Android visualViewport tracking (hides #mobile-nav & docks .mobile-md-kbd-bar above keyboard)
+  (function bindMobileSoftKeyboardAdaptation() {
+    if (typeof document === 'undefined' || document.documentElement.dataset.mobileKbdBound === '1') return;
+    document.documentElement.dataset.mobileKbdBound = '1';
+
+    let blurTimer = 0;
+    const isEditableTarget = (el) => {
+      if (!(el instanceof Element)) return false;
+      if (el.matches('textarea, [contenteditable="true"], [contenteditable=""]')) return true;
+      if (el.matches('input')) {
+        const t = String(el.getAttribute('type') || 'text').toLowerCase();
+        return !['checkbox', 'radio', 'file', 'color', 'button', 'submit', 'reset', 'range'].includes(t);
+      }
+      return Boolean(el.closest?.('[contenteditable="true"]'));
+    };
+
+    const updateKbdBottom = () => {
+      if (!isMobileViewport()) {
+        document.body?.classList.remove('is-mobile-kbd-open');
+        document.documentElement.style.removeProperty('--mobile-kbd-bottom');
+        return;
+      }
+      const vv = window.visualViewport;
+      const kbdInset = vv ? Math.max(0, Math.round(window.innerHeight - (vv.height + vv.offsetTop))) : 0;
+      const focusedEditable = isEditableTarget(document.activeElement);
+      const kbdOpen = kbdInset > 90 || focusedEditable;
+      document.body?.classList.toggle('is-mobile-kbd-open', kbdOpen);
+      if (kbdInset > 90) {
+        document.documentElement.style.setProperty('--mobile-kbd-bottom', `${kbdInset}px`);
+      } else if (focusedEditable) {
+        document.documentElement.style.setProperty('--mobile-kbd-bottom', '0px');
+      } else {
+        document.documentElement.style.removeProperty('--mobile-kbd-bottom');
+      }
+    };
+
+    document.addEventListener('focusin', (e) => {
+      if (!isMobileViewport()) return;
+      if (isEditableTarget(e.target)) {
+        if (blurTimer) window.clearTimeout(blurTimer);
+        updateKbdBottom();
+      }
+    }, true);
+
+    document.addEventListener('focusout', () => {
+      if (blurTimer) window.clearTimeout(blurTimer);
+      blurTimer = window.setTimeout(updateKbdBottom, 130);
+    }, true);
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', updateKbdBottom);
+      window.visualViewport.addEventListener('scroll', updateKbdBottom);
+    }
+    window.addEventListener('resize', updateKbdBottom);
+  })();
+
+  syncMobileTopbarTitle('工作区');
 
   // Initial render (restore last session file+scroll or open Explorer Home)
   if (store.state.splitDoc) {

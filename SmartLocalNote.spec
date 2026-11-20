@@ -29,6 +29,7 @@ hiddenimports = [
     "api.tools_api",
     "api.ai_api",
     "api.search_api",
+    "api.mobile_api",
     "core",
     "core.safe_io",
     "core.doc_engine",
@@ -42,6 +43,7 @@ hiddenimports = [
     "core.trash_manager",
     "core.todo_indexer",
     "core.link_graph",
+    "core.mobile_bridge",
     # Uvicorn / FastAPI / Starlette dynamic imports
     "uvicorn.logging",
     "uvicorn.loops",

@@ -167,6 +167,24 @@ function getViewportSize() {
   };
 }
 
+function isMobileStickyViewport() {
+  if (typeof window === 'undefined') return false;
+  return window.innerWidth <= 768 || Boolean(document.body?.classList?.contains('is-android-app'));
+}
+
+function getMobileStickyRect(visibleIdx = 0) {
+  const { vw, vh } = getViewportSize();
+  const w = Math.max(240, Math.min(380, Math.round(vw * 0.92)));
+  const h = Math.max(200, Math.min(320, Math.round(vh * 0.36)));
+  const x = Math.max(8, Math.round((vw - w) / 2));
+  const topSafe = 58;
+  const bottomSafe = 86;
+  const maxY = Math.max(topSafe, vh - h - bottomSafe);
+  const rawY = topSafe + (visibleIdx % 4) * 34;
+  const y = Math.max(topSafe, Math.min(maxY, rawY));
+  return { x, y, w, h };
+}
+
 function migrateColor(raw) {
   if (STICKY_COLORS.includes(raw)) return raw;
   if (raw === 'amber') return 'yellow';
@@ -811,6 +829,16 @@ function focusOrRestoreSticky(stickyId) {
   if (!sticky) return;
   if (sticky.minimized) {
     sticky.minimized = false;
+  }
+  if (isMobileStickyViewport()) {
+    const visibleIdx = stickies.filter((s) => !s.minimized && s.id !== sticky.id).length;
+    const rect = getMobileStickyRect(visibleIdx);
+    sticky.w = rect.w;
+    sticky.h = rect.h;
+    sticky.x = rect.x;
+    sticky.y = rect.y;
+    sticky.stackId = null;
+    sticky.stackExpanded = false;
   }
   bringStickyForward(sticky);
   saveStickies();
@@ -2209,12 +2237,32 @@ function bindCardInteractions(card, stickyId) {
   }
 }
 
-function updateCardElement(card, sticky, stackInfo) {
+function updateCardElement(card, sticky, stackInfo, visibleIdx = 0) {
   const color = migrateColor(sticky.color);
   const customColor = normalizeCustomColor(sticky.customColor);
   const accentHex = customColor || STICKY_COLOR_SWATCHES[color];
-  const w = clampWidth(sticky.w, sticky.x);
-  const h = clampHeight(sticky.h, sticky.y);
+  const mobileMode = isMobileStickyViewport();
+  let w;
+  let h;
+  let renderX;
+  let renderY;
+  if (mobileMode) {
+    const { vw, vh } = getViewportSize();
+    w = Math.max(240, Math.min(380, Math.round(vw * 0.92)));
+    const maxMobileH = Math.max(200, vh - 164);
+    h = Math.max(200, Math.min(maxMobileH, Math.round(sticky.h || DEFAULT_H)));
+    renderX = Math.max(8, Math.round((vw - w) / 2));
+    const topSafe = 58;
+    const maxY = Math.max(topSafe, vh - h - 84);
+    const fallbackY = topSafe + (visibleIdx % 4) * 34;
+    const rawY = Number.isFinite(Number(sticky.y)) ? Number(sticky.y) : fallbackY;
+    renderY = Math.max(topSafe, Math.min(maxY, Math.round(rawY)));
+  } else {
+    w = clampWidth(sticky.w, sticky.x);
+    h = clampHeight(sticky.h, sticky.y);
+    renderX = sticky.x;
+    renderY = sticky.y;
+  }
 
   card.classList.remove(
     'sticky-yellow',
@@ -2225,15 +2273,16 @@ function updateCardElement(card, sticky, stackInfo) {
     'sticky-slate'
   );
   card.classList.add(`sticky-${color}`);
+  card.classList.toggle('is-mobile-card', mobileMode);
   card.classList.toggle('has-custom-color', Boolean(customColor));
   card.classList.toggle('is-pinned', Boolean(sticky.pinned));
-  card.classList.toggle('is-stacked', Boolean(stackInfo));
-  card.classList.toggle('is-stack-expanded', Boolean(stackInfo?.expanded));
+  card.classList.toggle('is-stacked', !mobileMode && Boolean(stackInfo));
+  card.classList.toggle('is-stack-expanded', !mobileMode && Boolean(stackInfo?.expanded));
 
   card.style.setProperty('--sticky-accent', accentHex);
   card.style.width = `${w}px`;
   card.style.height = `${h}px`;
-  card.style.transform = `translate3d(${sticky.x}px, ${sticky.y}px, 0)`;
+  card.style.transform = `translate3d(${renderX}px, ${renderY}px, 0)`;
   card.style.zIndex = String(computeZIndex(sticky));
 
   // Sync textarea ONLY when not actively focused so cursor/scrollTop stay untouched
@@ -2307,7 +2356,7 @@ function renderStickies() {
   });
 
   // Update existing cards in-place or create missing ones
-  for (const sticky of visibleStickies) {
+  visibleStickies.forEach((sticky, visibleIdx) => {
     let stackInfo = null;
     if (sticky.stackId && stackGroups.has(sticky.stackId)) {
       const group = stackGroups.get(sticky.stackId);
@@ -2323,8 +2372,8 @@ function renderStickies() {
       card = createCardElement(sticky.id);
       layer.appendChild(card);
     }
-    updateCardElement(card, sticky, stackInfo);
-  }
+    updateCardElement(card, sticky, stackInfo, visibleIdx);
+  });
 
   renderStickiesControlPanel();
   syncStickiesCount();
@@ -2342,10 +2391,21 @@ export function spawnStickyAt(x, y, opts = {}) {
 export function spawnStickyNote({ x, y, text, content, title = '', color, accent, customColor = '', pinned = false } = {}) {
   const { vw, vh } = getViewportSize();
   const offset = (stickies.length % 5) * 22;
-  const w = DEFAULT_W;
-  const h = DEFAULT_H;
-  const targetX = clampPosX(Number.isFinite(Number(x)) ? Number(x) : Math.round(vw * 0.56 + offset), w);
-  const targetY = clampPosY(Number.isFinite(Number(y)) ? Number(y) : Math.round(vh * 0.22 + offset), h);
+  let w = DEFAULT_W;
+  let h = DEFAULT_H;
+  let targetX;
+  let targetY;
+  if (isMobileStickyViewport()) {
+    const visibleCount = stickies.filter((s) => !s.minimized).length;
+    const rect = getMobileStickyRect(visibleCount);
+    w = rect.w;
+    h = rect.h;
+    targetX = rect.x;
+    targetY = rect.y;
+  } else {
+    targetX = clampPosX(Number.isFinite(Number(x)) ? Number(x) : Math.round(vw * 0.56 + offset), w);
+    targetY = clampPosY(Number.isFinite(Number(y)) ? Number(y) : Math.round(vh * 0.22 + offset), h);
+  }
   const pickedColor = color || accent
     ? migrateColor(color || accent)
     : STICKY_COLORS[stickies.length % STICKY_COLORS.length];
@@ -2400,7 +2460,7 @@ function handleContextMenuAction(action) {
       return;
     }
     const patch = { rightMode: 'summary', rightCollapsed: false };
-    if (typeof window !== 'undefined' && window.innerWidth <= 767) {
+    if (typeof window !== 'undefined' && window.innerWidth <= 768) {
       patch.mobileTab = 'ai';
     }
     store.setState(patch, 'rightMode:changed');
@@ -2592,6 +2652,10 @@ export function initStickies() {
   });
 
   window.addEventListener('resize', () => {
+    if (isMobileStickyViewport()) {
+      renderStickies();
+      return;
+    }
     let changed = false;
     for (const s of stickies) {
       const nextX = clampPosX(s.x, s.w);
@@ -2695,10 +2759,22 @@ export function initStickies() {
     const saved = item?.payload && typeof item.payload === 'object' ? item.payload : {};
     const rawSticky = saved.sticky && typeof saved.sticky === 'object' ? saved.sticky : saved;
     const { vw, vh } = getViewportSize();
-    const w = clampWidth(rawSticky.w ?? DEFAULT_W);
-    const h = clampHeight(rawSticky.h ?? DEFAULT_H);
-    const x = clampPosX(Number.isFinite(Number(rawSticky.x)) ? Number(rawSticky.x) : Math.round(vw * 0.52), w);
-    const y = clampPosY(Number.isFinite(Number(rawSticky.y)) ? Number(rawSticky.y) : Math.round(vh * 0.24), h);
+    let w;
+    let h;
+    let x;
+    let y;
+    if (isMobileStickyViewport()) {
+      const rect = getMobileStickyRect(stickies.filter((s) => !s.minimized).length);
+      w = rect.w;
+      h = rect.h;
+      x = rect.x;
+      y = rect.y;
+    } else {
+      w = clampWidth(rawSticky.w ?? DEFAULT_W);
+      h = clampHeight(rawSticky.h ?? DEFAULT_H);
+      x = clampPosX(Number.isFinite(Number(rawSticky.x)) ? Number(rawSticky.x) : Math.round(vw * 0.52), w);
+      y = clampPosY(Number.isFinite(Number(rawSticky.y)) ? Number(rawSticky.y) : Math.round(vh * 0.24), h);
+    }
     const candidateId = String(rawSticky.id || saved.sourceStickyId || `sticky_${Date.now()}`);
     const uniqueId = getCardById(candidateId)
       ? `sticky_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
