@@ -1837,14 +1837,19 @@ export function renderMindMap(containerEl, opts = {}) {
     // ignore storage errors
   }
 
-  let isOutlineOpen = true;
-  try {
-    const savedOutlineOpen = localStorage.getItem(OUTLINE_OPEN_STORAGE_KEY);
-    if (savedOutlineOpen !== null) {
-      isOutlineOpen = savedOutlineOpen === '1' || savedOutlineOpen === 'true';
+  const isMobileMindmapViewport =
+    typeof window !== 'undefined' &&
+    (window.innerWidth <= 768 || Boolean(document.body?.classList?.contains('is-android-app')));
+  let isOutlineOpen = !isMobileMindmapViewport;
+  if (!isMobileMindmapViewport) {
+    try {
+      const savedOutlineOpen = localStorage.getItem(OUTLINE_OPEN_STORAGE_KEY);
+      if (savedOutlineOpen !== null) {
+        isOutlineOpen = savedOutlineOpen === '1' || savedOutlineOpen === 'true';
+      }
+    } catch {
+      // ignore storage errors
     }
-  } catch {
-    // ignore storage errors
   }
 
   let outlineWidth = OUTLINE_DEFAULT_WIDTH;

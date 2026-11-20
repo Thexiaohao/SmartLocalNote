@@ -2960,7 +2960,12 @@ export function initCenterView(containerEl) {
 
       const mobileSecBtn = e.target.closest('[data-explorer-mobile-sec]');
       if (mobileSecBtn) {
-        state.explorer.mobileSection = mobileSecBtn.dataset.explorerMobileSec === 'todos' ? 'todos' : 'files';
+        const nextSec = mobileSecBtn.dataset.explorerMobileSec === 'todos' ? 'todos' : 'files';
+        state.explorer.mobileSection = nextSec;
+        if (isMobileViewport()) {
+          store.setState({ mobileTab: nextSec === 'todos' ? 'todos' : 'doc' });
+          store.emit('layout:changed');
+        }
         renderExplorerHome({ refresh: false });
         return;
       }
@@ -7627,6 +7632,20 @@ export function initCenterView(containerEl) {
       }
     } else {
       renderExplorerHome({ refresh: true });
+    }
+  });
+
+  store.on('mobile:focus-files', () => {
+    commitActiveBlock({ reRender: false });
+    state.explorer.mobileSection = 'files';
+    if (store.state.activeCenterView !== 'explorer') {
+      if (typeof setCenterView === 'function') {
+        setCenterView('explorer');
+      } else {
+        store.setState({ activeCenterView: 'explorer' }, 'center-view:change');
+      }
+    } else {
+      renderExplorerHome({ refresh: false });
     }
   });
 

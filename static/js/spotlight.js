@@ -921,15 +921,15 @@ function renderDynamicIsland(islandEl, islandState) {
 async function handleIslandAction(islandEl, action, event) {
   if (action === 'open-todos') {
     event?.stopPropagation?.();
-    if (typeof window !== 'undefined' && window.innerWidth <= 767) {
-      store.setState({ mobileTab: 'doc' });
+    const isMob = typeof window !== 'undefined' && (window.innerWidth <= 768 || document.body?.classList?.contains('is-android-app'));
+    if (isMob) {
+      store.setState({ mobileTab: 'todos' });
+      store.emit('mobile:focus-todos');
       store.emit('layout:changed');
+    } else {
+      store.setCenterView?.('explorer');
+      store.emit('mobile:focus-todos');
     }
-    store.setCenterView?.('explorer');
-    store.emit('explorer:focus-todos');
-    window.requestAnimationFrame(() => {
-      document.querySelector('[data-explorer-role="todo-pane"]')?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
-    });
     return;
   }
 

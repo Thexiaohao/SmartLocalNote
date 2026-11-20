@@ -8524,11 +8524,60 @@ body.is-global-dragging #sticky-dock-pill {
   border-color: transparent;
 }
 
-/* Android WebView base touch optimizations */
+/* Android WebView base touch & hardware compositor hardening */
 body.is-android-app {
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior-y: contain;
   touch-action: manipulation;
+}
+
+/* Disable GPU backdrop-filter on fixed/overlay/floating layers in Android System WebView
+ * so OEM WebViews never fail compositor readback (blank screen or invisible bottom sheets). */
+body.is-android-app .top-bar,
+body.is-android-app .panel-header,
+body.is-android-app .mobile-bottom-nav,
+body.is-android-app .mobile-md-kbd-bar,
+body.is-android-app .mobile-companion-trigger-btn,
+body.is-android-app .spotlight-card,
+body.is-android-app .floating-module-window,
+body.is-android-app #floating-stickies-win,
+body.is-android-app #floating-trash-win,
+body.is-android-app #island-shelf-drawer,
+body.is-android-app #context-menu,
+body.is-android-app #capsule-context-menu,
+body.is-android-app #module-context-menu,
+body.is-android-app #focus-duration-popover,
+body.is-android-app #module-size-popover,
+body.is-android-app #slash-command-menu,
+body.is-android-app .toast,
+body.is-android-app .companion-float-win,
+body.is-android-app [data-role="companion-split-pane"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--bg-island) !important;
+}
+
+body.is-android-app .overlay-backdrop,
+body.is-android-app #sheet-overlay {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: rgba(0, 0, 0, 0.46) !important;
+  animation: none !important;
+  opacity: 1 !important;
+}
+
+body.is-android-app #sheet-overlay {
+  z-index: 2200 !important;
+}
+
+body.is-android-app #sheet-overlay .sheet-card {
+  background: var(--bg-island) !important;
+  color: var(--text-primary) !important;
+  animation: none !important;
+  transform: none !important;
+  opacity: 1 !important;
+  max-height: 82% !important;
+  min-height: 120px;
 }
 
 body.is-android-app .pane-resizer,
@@ -8553,6 +8602,11 @@ body.is-android-app #portable-trash-dock {
 @media (max-width: 768px) {
   html,
   body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
     -webkit-tap-highlight-color: transparent;
     overscroll-behavior-y: contain;
     touch-action: manipulation;
@@ -8560,9 +8614,13 @@ body.is-android-app #portable-trash-dock {
 
   /* 22.1 Edge-to-edge native shell + slim 48px Apple Notes / TickTick Top Bar */
   .app-shell {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
     padding: env(safe-area-inset-top, 0px) 0 0;
     gap: 0;
-    height: 100dvh;
     overflow: hidden;
   }
 
@@ -8572,12 +8630,19 @@ body.is-android-app #portable-trash-dock {
     height: 48px;
     padding: 0 8px;
     gap: 4px;
-    background: var(--bg-glass-strong);
-    backdrop-filter: var(--blur-glass);
-    -webkit-backdrop-filter: var(--blur-glass);
+    background: var(--bg-island);
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
     border-bottom: 1px solid var(--border-hairline);
     border-radius: 0;
     box-shadow: none;
+  }
+
+  /* Hide redundant 主面板 button on Explorer home AND inside mobile MD view (which has its own ← 主面板) */
+  .app-shell[data-center-view="explorer"][data-mobile-tab="doc"] #btn-center-home,
+  .app-shell[data-center-view="explorer"][data-mobile-tab="todos"] #btn-center-home,
+  .app-shell[data-center-view="doc"][data-mobile-tab="doc"]:has(.mobile-md-toolbar) #btn-center-home {
+    display: none !important;
   }
 
   .top-bar-left,
@@ -8683,10 +8748,12 @@ body.is-android-app #portable-trash-dock {
   /* 22.2 Main grid & native full-bleed panels */
   .main-grid {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     gap: 0;
     padding: 0 0 calc(60px + env(safe-area-inset-bottom, 0px));
     min-height: 0;
     flex: 1 1 auto;
+    overflow: hidden;
   }
 
   body.is-mobile-kbd-open .main-grid {
@@ -8698,6 +8765,10 @@ body.is-android-app #portable-trash-dock {
   .app-shell[data-mobile-tab="todos"] .center-panel,
   .app-shell[data-mobile-tab="ai"] .right-panel {
     display: flex;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .island-panel {
@@ -8705,9 +8776,12 @@ body.is-android-app #portable-trash-dock {
     border: none;
     box-shadow: none;
     background: var(--bg-island);
+    will-change: auto !important;
   }
 
-  /* 22.3 Classic 4-Tab Frosted Bottom Thumb Nav + Floating 52x52 '+' Quick-Add FAB */
+  /* 22.3 Classic 4-Tab Bottom Thumb Nav + Floating 50x50 '+' Quick-Add FAB
+   * Never put transform/backdrop-filter at rest on .mobile-bottom-nav so fixed child
+   * #btn-mobile-quick-add isn't trapped and Android WebView always paints cleanly. */
   .mobile-bottom-nav {
     position: fixed;
     left: 0;
@@ -8719,16 +8793,15 @@ body.is-android-app #portable-trash-dock {
     justify-content: space-around;
     gap: 0;
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
-    background: var(--bg-glass-strong);
-    backdrop-filter: var(--blur-glass);
-    -webkit-backdrop-filter: var(--blur-glass);
+    background: var(--bg-island);
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
     border-top: 1px solid var(--border-hairline);
-    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.07);
+    box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.08);
     pointer-events: auto;
-    transform: translateY(0);
+    transform: none;
     opacity: 1;
-    transition: transform var(--dur-normal) var(--ease-apple),
-                opacity var(--dur-fast) var(--ease-apple);
+    transition: opacity var(--dur-fast) var(--ease-apple);
   }
 
   .mobile-nav-pills {
@@ -8783,19 +8856,19 @@ body.is-android-app #portable-trash-dock {
     font-weight: 700;
   }
 
-  /* 52x52 Thumb Golden-Zone Floating Action Button */
+  /* 50x50 Thumb Golden-Zone Floating Action Button */
   .mobile-quick-add,
   #btn-mobile-quick-add {
     position: fixed;
     right: 16px;
-    bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(70px + env(safe-area-inset-bottom, 0px));
     z-index: calc(var(--z-mobile-nav) + 2);
     pointer-events: auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 52px;
-    height: 52px;
+    width: 50px;
+    height: 50px;
     border-radius: 50%;
     background: var(--accent);
     color: #FFFFFF;
@@ -8817,19 +8890,24 @@ body.is-android-app #portable-trash-dock {
     transform: scale(0.9);
   }
 
-  /* When Markdown keyboard bar is visible, elevate FAB slightly or hide while typing */
+  /* When Markdown keyboard bar is visible, elevate FAB slightly */
   body.has-mobile-md-bar .mobile-quick-add,
   body.has-mobile-md-bar #btn-mobile-quick-add {
-    bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(122px + env(safe-area-inset-bottom, 0px));
   }
 
-  /* Auto-hide Bottom Nav & FAB whenever soft keyboard is active */
+  /* Hide Bottom Nav when keyboard is open; hide FAB on keyboard OR active bottom sheet */
   body.is-mobile-kbd-open .mobile-bottom-nav,
   body.is-mobile-kbd-open .mobile-quick-add,
   body.is-mobile-kbd-open #btn-mobile-quick-add {
-    transform: translateY(130%);
+    display: none !important;
+  }
+
+  body.has-sheet-open .mobile-quick-add,
+  body.has-sheet-open #btn-mobile-quick-add {
     opacity: 0;
     pointer-events: none;
+    transform: scale(0.82);
   }
 
   /* 22.4 Hide ALL desktop-only resizers, float buttons, size pills & hover peeks */
@@ -8940,17 +9018,35 @@ body.is-android-app #portable-trash-dock {
     z-index: 1600 !important;
   }
 
+  .overlay-backdrop,
   #sheet-overlay {
-    align-items: flex-end;
-    padding: 0;
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 2200 !important;
+    align-items: flex-end !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    background: rgba(0, 0, 0, 0.46) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    animation: none !important;
+    opacity: 1 !important;
   }
 
   #sheet-overlay .sheet-card {
     width: 100vw !important;
     max-width: 100vw !important;
-    max-height: 82vh !important;
+    max-height: 82% !important;
+    height: auto !important;
+    min-height: 120px;
+    background: var(--bg-island) !important;
+    color: var(--text-primary) !important;
     border-radius: 22px 22px 0 0 !important;
-    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    box-shadow: 0 -10px 36px rgba(0, 0, 0, 0.22) !important;
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
   }
 
   #context-menu .context-menu-item,
@@ -9092,9 +9188,9 @@ body.is-android-app #portable-trash-dock {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
-    background: var(--bg-glass-strong);
-    backdrop-filter: var(--blur-glass);
-    -webkit-backdrop-filter: var(--blur-glass);
+    background: var(--bg-island);
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
     border-top: 1px solid var(--border-hairline);
     box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
   }
@@ -9218,10 +9314,12 @@ body.is-android-app #portable-trash-dock {
   .explorer-mobile-seg {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 6px;
-    padding: 10px 12px 8px;
-    background: var(--bg-island);
-    border-bottom: 1px solid var(--border-hairline);
+    gap: 4px;
+    margin: 8px 12px 4px;
+    padding: 3px;
+    border-radius: 12px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-hairline);
     flex-shrink: 0;
   }
 
@@ -9230,14 +9328,14 @@ body.is-android-app #portable-trash-dock {
     align-items: center;
     justify-content: center;
     gap: 6px;
-    height: 44px;
-    min-height: 44px;
-    padding: 0 12px;
-    border-radius: 13px;
-    background: var(--bg-subtle);
-    border: 1px solid transparent;
+    height: 36px;
+    min-height: 36px;
+    padding: 0 10px;
+    border-radius: 9px;
+    background: transparent;
+    border: none;
     color: var(--text-secondary);
-    font-size: 14.5px;
+    font-size: 13.5px;
     font-weight: 600;
     transition: transform var(--dur-fast) var(--ease-apple);
   }
@@ -9247,9 +9345,9 @@ body.is-android-app #portable-trash-dock {
   }
 
   .explorer-mobile-seg-btn.is-active {
-    background: var(--accent);
-    color: #FFFFFF;
-    box-shadow: 0 4px 14px rgba(0, 122, 255, 0.24);
+    background: var(--bg-island);
+    color: var(--accent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
   }
 
   .explorer-home[data-mobile-section="files"] .explorer-todo-pane {
@@ -9262,8 +9360,12 @@ body.is-android-app #portable-trash-dock {
   }
 
   .explorer-home .explorer-topbar {
-    padding: 8px 12px;
-    gap: 8px;
+    padding: 4px 12px 6px;
+    gap: 6px;
+  }
+
+  .explorer-home .explorer-topbar-row {
+    gap: 6px;
   }
 
   .explorer-home .explorer-breadcrumbs,
@@ -9272,7 +9374,9 @@ body.is-android-app #portable-trash-dock {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
-    padding-bottom: 2px;
+    padding: 2px 16px 2px 0;
+    gap: 6px;
+    width: 100%;
   }
 
   .explorer-home .explorer-breadcrumbs::-webkit-scrollbar,
@@ -9283,39 +9387,45 @@ body.is-android-app #portable-trash-dock {
   .explorer-home .explorer-crumb,
   .explorer-home .explorer-type-pill {
     flex-shrink: 0;
-    height: 34px;
-    padding: 0 12px;
-    font-size: 13px;
+    height: 30px;
+    padding: 0 11px;
+    font-size: 12.5px;
+    border-radius: 9999px;
   }
 
-  /* Hide desktop grid/list switcher & split todo toggle on mobile */
-  .explorer-home .explorer-actions-group .segmented-pill,
-  .explorer-home [data-explorer-act="cycle-todo-pane"],
-  .explorer-home [data-explorer-act="toggle-todo-full"],
-  .explorer-home [data-explorer-act="toggle-select-all"] {
+  /* Compact desktop Explorer toolbar controls on phone (create actions live in '+' FAB) */
+  .explorer-home .explorer-actions-group {
     display: none !important;
   }
 
-  .explorer-home .explorer-actions-group .pill-btn {
-    height: 36px;
-    padding: 0 12px;
-    font-size: 13.5px;
+  .explorer-home [data-explorer-role="search"] {
+    height: 38px !important;
+    font-size: 14.5px !important;
+    border-radius: 12px !important;
   }
 
-  .explorer-home [data-explorer-role="search"] {
-    height: 40px !important;
-    font-size: 15px !important;
-    border-radius: 12px !important;
+  /* Override @media (max-width: 960px) 360px todo truncation on phone */
+  .explorer-home .explorer-body {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
   }
 
   .explorer-home .explorer-files-pane,
   .explorer-home .explorer-todo-pane {
-    flex: 1 1 100% !important;
+    flex: 1 1 auto !important;
     width: 100% !important;
     max-width: 100% !important;
+    max-height: none !important;
+    height: auto !important;
     min-width: 0 !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
     border-left: none !important;
-    padding: 10px 12px calc(100px + env(safe-area-inset-bottom, 0px)) !important;
+    padding: 8px 12px calc(116px + env(safe-area-inset-bottom, 0px)) !important;
   }
 
   /* Apple Notes style horizontal file cards on mobile */
@@ -9378,6 +9488,12 @@ body.is-android-app #portable-trash-dock {
     align-items: center !important;
     justify-content: space-between !important;
     margin-top: 0 !important;
+  }
+
+  .explorer-home .explorer-mobile-more-btn {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
   }
 
   .explorer-home .explorer-card-dir {
@@ -9539,6 +9655,46 @@ body.is-android-app #portable-trash-dock {
   #right-panel .studio-action-grid {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  /* Mobile Mindmap Ergonomics: single-row scrollable toolbar + overlay outline + clean FAB clearance */
+  .mindmap-toolbar {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 6px 10px !important;
+    gap: 6px !important;
+    justify-content: flex-start !important;
+  }
+  .mindmap-toolbar::-webkit-scrollbar {
+    display: none;
+  }
+  .mindmap-toolbar-group {
+    flex-wrap: nowrap !important;
+    flex-shrink: 0 !important;
+  }
+  .mindmap-workspace {
+    position: relative !important;
+  }
+  .mindmap-outline-pane {
+    position: absolute !important;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(76vw, 270px) !important;
+    z-index: 30 !important;
+    background: var(--bg-island) !important;
+    box-shadow: 6px 0 24px rgba(0, 0, 0, 0.22);
+  }
+  .mindmap-hint {
+    left: 10px !important;
+    right: 76px !important;
+    text-align: left !important;
+    font-size: 11px !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .toast-stack {

@@ -4,10 +4,16 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -180,18 +186,26 @@ fun WorkbenchScreen(
       modifier = Modifier.fillMaxSize(),
       factory = { ctx ->
         WebView(ctx).apply {
+          layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+          )
+          setBackgroundColor(Color.TRANSPARENT)
+          setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
           settings.javaScriptEnabled = true
           settings.domStorageEnabled = true
           settings.allowFileAccess = true
           settings.allowContentAccess = true
-          settings.loadWithOverviewMode = true
-          settings.useWideViewPort = true
+          settings.loadWithOverviewMode = false
+          settings.useWideViewPort = false
+          settings.textZoom = 100
           settings.setSupportZoom(false)
           settings.builtInZoomControls = false
           settings.displayZoomControls = false
           settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
           settings.cacheMode = WebSettings.LOAD_DEFAULT
-          settings.userAgentString = "${settings.userAgentString} SmartLocalNoteAndroid/7.5.0 Standalone"
+          settings.userAgentString = "${settings.userAgentString} SmartLocalNoteAndroid/7.7.0 Standalone"
 
           isVerticalScrollBarEnabled = false
           isHorizontalScrollBarEnabled = false
@@ -306,11 +320,28 @@ fun WorkbenchScreen(
                 view?.loadUrl("about:blank")
               }
             }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+              Log.e("SmartLocalNoteWeb", "WebView render process gone: didCrash=${detail?.didCrash()}")
+              isLoading = false
+              errorMessage = "系统 WebView 渲染进程已重置，请点击下方按钮重新加载工作台。"
+              return true
+            }
           }
 
           webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
               loadProgress = newProgress
+            }
+
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+              if (consoleMessage != null && consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                Log.e(
+                  "SmartLocalNoteWeb",
+                  "${consoleMessage.message()} (${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})",
+                )
+              }
+              return super.onConsoleMessage(consoleMessage)
             }
 
             override fun onShowFileChooser(
@@ -341,6 +372,16 @@ fun WorkbenchScreen(
 
           webViewRef = this
           loadUrl(targetUrl)
+        }
+      },
+      update = { view ->
+        if (view.layoutParams?.width != ViewGroup.LayoutParams.MATCH_PARENT ||
+          view.layoutParams?.height != ViewGroup.LayoutParams.MATCH_PARENT
+        ) {
+          view.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+          )
         }
       },
     )

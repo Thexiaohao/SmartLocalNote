@@ -84,7 +84,7 @@ function bindTopBarControls() {
 
   btnCenterHome?.addEventListener('click', () => {
     const nextView = store.state.activeCenterView === 'explorer' ? 'doc' : 'explorer';
-    if (window.innerWidth <= 767) {
+    if (window.innerWidth <= 768) {
       store.setState({ mobileTab: 'doc' });
       syncLayoutClasses();
     }
@@ -411,28 +411,6 @@ function ensureV75MobileStyles() {
   const style = document.createElement('style');
   style.id = 'sln-v75-mobile-styles';
   style.textContent = `
-    @media (max-width: 767px) {
-      .app-shell[data-mobile-tab="todos"] .center-panel {
-        display: flex;
-      }
-      .mobile-bottom-nav {
-        gap: 8px;
-      }
-      .mobile-nav-pills {
-        max-width: calc(100vw - 84px);
-      }
-      .mobile-nav-item {
-        padding: 0 10px;
-        gap: 4px;
-        font-size: 12px;
-      }
-    }
-    @media (max-width: 390px) {
-      .mobile-nav-item {
-        padding: 0 8px;
-        font-size: 11.5px;
-      }
-    }
     .mobile-quick-action-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -790,20 +768,23 @@ function triggerMobileFileUpload() {
 }
 
 function bindMobileControls() {
+  store.on('layout:changed', syncLayoutClasses);
+
   document.querySelectorAll('#mobile-nav .mobile-nav-item[data-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const nextTab = btn.dataset.tab || 'doc';
       store.setState({ mobileTab: nextTab, tabletDrawerOpen: false });
       if (nextTab === 'todos') {
-        store.setCenterView?.('explorer');
-        store.emit('explorer:focus-todos');
-        window.requestAnimationFrame(() => {
-          document.querySelector('[data-explorer-role="todo-pane"]')?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
-        });
+        store.emit('mobile:focus-todos');
       } else if (nextTab === 'doc') {
-        store.setCenterView?.('doc');
+        if (store.state.activeCenterView === 'explorer') {
+          store.emit('mobile:focus-files');
+        } else {
+          store.setCenterView?.('doc');
+        }
       }
       syncLayoutClasses();
+      store.emit('layout:changed');
     });
   });
 

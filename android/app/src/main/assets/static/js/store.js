@@ -1008,6 +1008,7 @@ function getOrCreateSheetOverlay() {
  */
 export function closeSheet() {
   const overlay = document.getElementById('sheet-overlay');
+  document.body?.classList?.remove('has-sheet-open');
   if (!overlay) return;
   overlay.classList.remove('is-open');
   overlay.classList.add('hidden');
@@ -1042,12 +1043,11 @@ export function openSheet({ title = '', bodyHtml = '', footerHtml = '', onMount 
     </div>
   `;
 
+  document.body?.classList?.add('has-sheet-open');
   overlay.hidden = false;
   overlay.setAttribute('aria-hidden', 'false');
   overlay.classList.remove('hidden');
-  window.requestAnimationFrame(() => {
-    overlay.classList.add('is-open');
-  });
+  overlay.classList.add('is-open');
 
   const card = overlay.querySelector('.sheet-card');
   const closeBtn = overlay.querySelector('.sheet-close-btn');
