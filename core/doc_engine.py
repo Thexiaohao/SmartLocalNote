@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -25,6 +26,7 @@ from typing import Any
 import webbrowser
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 
 from config import (
     APPS_FILE,
@@ -1304,6 +1306,59 @@ def _stdlib_extract_pdf_pages(target: Path) -> list[str]:
     while len(page_texts) < total:
         page_texts.append("")
     return page_texts[:total]
+
+
+def _build_placeholder_png(width: int = 16, height: int = 16) -> bytes:
+    """Return a minimal valid RGB PNG using pure stdlib zlib when PyMuPDF is omitted."""
+    def _chunk(tag: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    row = b"\x00" + (b"\xF5\xF5\xF7" * width)
+    idat = zlib.compress(row * height, level=6)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+
+
+def render_pdf_page_png(path_str: str, page: int = 1, zoom: float = 1.5) -> bytes:
+    """Render a PDF page to PNG bytes (uses PyMuPDF with LRU cache, or stdlib PNG fallback)."""
+    target = safe_io.resolve_safe_path(path_str, must_exist=True)
+    if target.suffix.lower() != ".pdf":
+        raise ValueError(f"仅支持 .pdf 文件：{target.name}")
+
+    page_num = max(1, int(page))
+    safe_zoom = min(4.0, max(0.25, float(zoom or 1.5)))
+    zoom_pct = int(round(safe_zoom * 100))
+    mtime = target.stat().st_mtime
+    cache_key = (str(target), page_num, zoom_pct, mtime)
+
+    with _PDF_PAGE_CACHE_LOCK:
+        cached = _PDF_PAGE_CACHE.get(cache_key)
+        if cached is not None:
+            _PDF_PAGE_CACHE.move_to_end(cache_key)
+            return cached
+
+    try:
+        import pymupdf
+
+        with pymupdf.open(target) as doc:
+            total = len(doc)
+            if total == 0:
+                png_bytes = _build_placeholder_png()
+            else:
+                idx = min(total - 1, page_num - 1)
+                pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(safe_zoom, safe_zoom), alpha=False)
+                png_bytes = pix.tobytes("png")
+    except ImportError:
+        # Lightweight compiled Windows EXE strips PyMuPDF in favor of native WebView2 /pdf-stream.
+        png_bytes = _build_placeholder_png()
+
+    with _PDF_PAGE_CACHE_LOCK:
+        _PDF_PAGE_CACHE[cache_key] = png_bytes
+        _PDF_PAGE_CACHE.move_to_end(cache_key)
+        while len(_PDF_PAGE_CACHE) > _PDF_PAGE_CACHE_MAX:
+            _PDF_PAGE_CACHE.popitem(last=False)
+
+    return png_bytes
 
 
 def get_pdf_pages_text(target: Path) -> list[str]:
